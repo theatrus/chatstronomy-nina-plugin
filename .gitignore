@@ -1,0 +1,7 @@
+/artifacts/
+/runtime-cache/
+/**/bin/
+/**/obj/
+.vs/
+.vscode/
+*.user
