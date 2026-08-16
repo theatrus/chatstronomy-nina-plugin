@@ -1,7 +1,123 @@
 # Chatstronomy for N.I.N.A.
 
+![Chatstronomy logo](assets/branding/chatstronomy-featured.png)
+
 Bridge NINA with Discord and Matrix, supporting bot slash commands for control.
 
-The plugin source is being extracted from
-[`theatrus/chatstronomy`](https://github.com/theatrus/chatstronomy). Development
-changes land through pull requests before release packaging is enabled.
+Chatstronomy exposes N.I.N.A. observatory status, images, graphs, and approved
+commands to chat. It supports an easy on-machine setup as well as one central
+Chatstronomy hub serving N.I.N.A. instances on different systems.
+
+Author: Yann Ramin
+
+License: Apache-2.0
+
+## Operating modes
+
+Source and chat delivery are independent choices:
+
+| N.I.N.A. data source | Local chat delivery | Remote chat delivery |
+|---|---|---|
+| Native Direct integration | Bundled runtime with a Discord webhook, user-owned Discord app, Matrix account, or Discord plus Matrix | Outbound authenticated WSS connection to `https://hub.chatstronomy.com/` |
+| Advanced API polling | Bundled runtime polls the separately installed Advanced API plugin and owns local chat credentials | Advanced API can continue through a separately managed Chatstronomy relay |
+
+Local Direct mode starts the bundled runtime with N.I.N.A. and sends data over a
+current-user-only named pipe. Remote Direct mode does not open an inbound port;
+each plugin connects outbound to the hub and is identified by an installation
+ID plus the active N.I.N.A. profile ID.
+
+Local Discord/Matrix secrets and hosted credentials are stored with Windows
+Credential Manager. Matrix homeserver URLs must use HTTPS. Remote control uses a
+closed typed-command allowlist and rejects expired commands.
+
+Guider and autofocus payloads use the shared Rust chart renderer in both local
+and hosted modes:
+
+![Rendered guider graph](docs/images/guiding_graph_sample.png)
+
+![Rendered autofocus graph](docs/images/autofocus_graph_sample.png)
+
+## Repository boundary
+
+This repository owns the C# plugin, N.I.N.A. options UI, Direct/hub client,
+tests, ZIP packaging, and N.I.N.A. registry manifest. The
+[`theatrus/chatstronomy`](https://github.com/theatrus/chatstronomy) backend owns
+the Rust hub, bots, chart rendering, local runtime, wire schemas, and fixtures.
+
+`runtime.lock.json` pins one immutable backend release and runtime-manifest
+checksum. `fetch-runtime.ps1` verifies the manifest, protocol versions, asset
+names, sizes, and SHA-256 hashes before placing the lean runtime in
+`runtime-cache/`. Release builds never resolve `latest`, build from backend
+`main`, or invoke Cargo.
+
+The initial lock remains `pending_backend_release` until backend artifact PR
+[#136](https://github.com/theatrus/chatstronomy/pull/136) is merged and the
+corresponding `v0.3.0` artifacts exist. The fetcher intentionally refuses a
+pending lock.
+
+## Build and test
+
+The plugin targets N.I.N.A. 3.2 (`NINA.Plugin` 3.2.0.9001), .NET 8, Windows x64.
+
+```powershell
+dotnet build Chatstronomy.NINA/Chatstronomy.NINA.csproj
+dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
+```
+
+Process-level runtime and hub tests run when these variables point to verified
+backend artifacts:
+
+```powershell
+$env:CHATSTRONOMY_RUNTIME_EXE = "$PWD/runtime-cache/chatstronomy.exe"
+$env:CHATSTRONOMY_HUB_EXE = "$PWD/runtime-cache/chatstronomy-hub-probe.exe"
+dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
+```
+
+The harness exercises Direct identity and pairing, source parity, typed
+commands, hosted reconnect behavior, and PNG rendering for guider and autofocus
+graphs.
+
+## Package
+
+After the runtime lock is complete:
+
+```powershell
+./fetch-runtime.ps1
+./build-package.ps1 -Version 0.1.0.10
+```
+
+The ZIP has the N.I.N.A. `ARCHIVE` layout:
+
+```text
+Chatstronomy.dll
+runtime/
+  chatstronomy.exe
+```
+
+For a development build, `-RuntimePath` may point to a locally validated lean
+runtime. There is no implicit Cargo fallback.
+
+## Local N.I.N.A. registry
+
+Publish a test build alongside existing registry entries (including PSF Guard)
+with:
+
+```powershell
+./tools/Publish-LocalRegistry.ps1 `
+  -RegistryRoot ../spacecat/artifacts/local-registry `
+  -RuntimePath ../spacecat/artifacts/runtime-contract-test/chatstronomy-plugin-runtime-windows-x64.exe `
+  -Version 0.1.0.10
+```
+
+The publisher replaces only the Chatstronomy manifest entry, preserves all
+other plugins, copies versioned package/image assets, and atomically swaps the
+manifest endpoint.
+
+## Distribution
+
+Dedicated plugin tags use four numeric parts, for example `v0.1.0.10`. The
+release workflow downloads only the locked backend artifacts, runs the full C#
+and cross-process compatibility suite, builds the checksummed plugin ZIP, and
+publishes its N.I.N.A. manifest. Official N.I.N.A. distribution can then point
+to that immutable GitHub release asset without requiring a special archive name
+or repository layout.

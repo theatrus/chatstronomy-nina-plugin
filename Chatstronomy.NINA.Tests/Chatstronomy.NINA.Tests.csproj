@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows7.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>Chatstronomy.NINA.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Chatstronomy.NINA\Chatstronomy.NINA.csproj" />
+    <!-- Match the version carried by NINA.Plugin so the standalone harness
+         exercises the same JSON runtime N.I.N.A. loads in production. -->
+    <PackageReference Include="System.Text.Json" Version="9.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\example_last_af.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

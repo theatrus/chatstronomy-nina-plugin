@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "state": "pending_backend_release",
+  "backend": {
+    "repository": "theatrus/chatstronomy",
+    "tag": "v0.3.0",
+    "runtime_manifest_sha256": null
+  },
+  "protocols": {
+    "direct": 1,
+    "plugin_runtime": 1
+  },
+  "asset_keys": {
+    "plugin_runtime": "plugin_runtime_windows_x64",
+    "full_runtime": "full_windows_x64",
+    "contracts": "plugin_contracts"
+  }
+}
