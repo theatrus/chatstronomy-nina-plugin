@@ -5,13 +5,10 @@ param(
     [string] $RuntimePath = 'runtime-cache/chatstronomy.exe',
 
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.10',
+    [string] $Version = '0.1.0.11',
 
     [ValidatePattern('^https?://')]
-    [string] $RegistryBaseUrl = 'http://127.0.0.1:8765',
-
-    [ValidateSet('Beta', 'Stable')]
-    [string] $Channel = 'Beta'
+    [string] $RegistryBaseUrl = 'http://127.0.0.1:8765'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,8 +43,7 @@ $package = & (Join-Path $repositoryRoot 'build-package.ps1') `
     -RuntimePath $RuntimePath `
     -InstallerUrl $installerUrl `
     -FeaturedImageUrl $featuredImageUrl `
-    -OutputDirectory $outputDirectory `
-    -Channel $Channel
+    -OutputDirectory $outputDirectory
 if ($LASTEXITCODE -ne 0) {
     throw "Plugin packaging failed with exit code $LASTEXITCODE."
 }
