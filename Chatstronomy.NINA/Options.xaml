@@ -230,16 +230,86 @@
                             Text="Choose which N.I.N.A. events become chat messages. Disabled events are still retained for status and target tracking."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
-                            <CheckBox Margin="0,3" Content="Images and thumbnails" IsChecked="{Binding SendImageEvents}" />
-                            <CheckBox Margin="0,3" Content="Autofocus results" IsChecked="{Binding SendAutofocusEvents}" />
-                            <CheckBox Margin="0,3" Content="Guiding and dithering" IsChecked="{Binding SendGuidingEvents}" />
-                            <CheckBox Margin="0,3" Content="Mount, slew, and center" IsChecked="{Binding SendMountEvents}" />
-                            <CheckBox Margin="0,3" Content="Sequence, waits, and cooling" IsChecked="{Binding SendSequenceEvents}" />
-                            <CheckBox Margin="0,3" Content="Targets and Target Scheduler" IsChecked="{Binding SendTargetSchedulerEvents}" />
-                            <CheckBox Margin="0,3" Content="Filter, focuser, and rotator" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
-                            <CheckBox Margin="0,3" Content="Equipment connections" IsChecked="{Binding SendEquipmentConnectionEvents}" />
-                            <CheckBox Margin="0,3" Content="Other N.I.N.A. events" IsChecked="{Binding SendOtherEvents}" />
-                            <CheckBox Margin="0,3" Content="Popup notifications" IsChecked="{Binding SendNinaNotifications}" />
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Images and thumbnails" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendImageEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Autofocus results" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendAutofocusEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Guiding and dithering" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendGuidingEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Mount, slew, and center" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendMountEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Sequence, waits, and cooling" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSequenceEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Targets and Target Scheduler" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendTargetSchedulerEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Filter, focuser, and rotator" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Equipment connections" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendEquipmentConnectionEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Other N.I.N.A. events" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendOtherEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Popup notifications" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendNinaNotifications}" />
+                            </Grid>
                         </UniformGrid>
 
                         <TextBlock Margin="0,14,0,3" FontWeight="SemiBold" Text="N.I.N.A. log lines" />
@@ -248,11 +318,26 @@
                             Text="Log forwarding is opt-in because logs can be frequent and may contain equipment paths or other private details. Chatstronomy captures every level N.I.N.A. writes; select the levels to send."
                             TextWrapping="Wrap" />
                         <WrapPanel>
-                            <CheckBox Margin="0,3,18,3" Content="Errors" IsChecked="{Binding SendNinaLogErrors}" />
-                            <CheckBox Margin="0,3,18,3" Content="Warnings" IsChecked="{Binding SendNinaLogWarnings}" />
-                            <CheckBox Margin="0,3,18,3" Content="Information" IsChecked="{Binding SendNinaLogInformation}" />
-                            <CheckBox Margin="0,3,18,3" Content="Debug" IsChecked="{Binding SendNinaLogDebug}" />
-                            <CheckBox Margin="0,3" Content="Trace" IsChecked="{Binding SendNinaLogTrace}" />
+                            <StackPanel Margin="0,3,18,3" Orientation="Horizontal">
+                                <TextBlock VerticalAlignment="Center" Text="Errors" />
+                                <CheckBox Margin="8,0,0,0" IsChecked="{Binding SendNinaLogErrors}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,3,18,3" Orientation="Horizontal">
+                                <TextBlock VerticalAlignment="Center" Text="Warnings" />
+                                <CheckBox Margin="8,0,0,0" IsChecked="{Binding SendNinaLogWarnings}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,3,18,3" Orientation="Horizontal">
+                                <TextBlock VerticalAlignment="Center" Text="Information" />
+                                <CheckBox Margin="8,0,0,0" IsChecked="{Binding SendNinaLogInformation}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,3,18,3" Orientation="Horizontal">
+                                <TextBlock VerticalAlignment="Center" Text="Debug" />
+                                <CheckBox Margin="8,0,0,0" IsChecked="{Binding SendNinaLogDebug}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,3,0,3" Orientation="Horizontal">
+                                <TextBlock VerticalAlignment="Center" Text="Trace" />
+                                <CheckBox Margin="8,0,0,0" IsChecked="{Binding SendNinaLogTrace}" />
+                            </StackPanel>
                         </WrapPanel>
                     </StackPanel>
                 </Border>

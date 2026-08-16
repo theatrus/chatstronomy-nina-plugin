@@ -26,6 +26,7 @@ internal static class Program
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Hosted Hub is the first chat delivery option", HostedHubIsFirstDeliveryOption);
+        Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
         Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
@@ -309,6 +310,47 @@ internal static class Program
         AssertEqual(
             "Chatstronomy Hub — hosted service",
             (string?)deliveryOptions[0].Attribute("Content"));
+    }
+
+    private static void EventDeliverySwitchesHaveVisibleLabels()
+    {
+        var labelsByBinding = new Dictionary<string, string>
+        {
+            ["{Binding SendImageEvents}"] = "Images and thumbnails",
+            ["{Binding SendAutofocusEvents}"] = "Autofocus results",
+            ["{Binding SendGuidingEvents}"] = "Guiding and dithering",
+            ["{Binding SendMountEvents}"] = "Mount, slew, and center",
+            ["{Binding SendSequenceEvents}"] = "Sequence, waits, and cooling",
+            ["{Binding SendTargetSchedulerEvents}"] = "Targets and Target Scheduler",
+            ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator",
+            ["{Binding SendEquipmentConnectionEvents}"] = "Equipment connections",
+            ["{Binding SendOtherEvents}"] = "Other N.I.N.A. events",
+            ["{Binding SendNinaNotifications}"] = "Popup notifications",
+            ["{Binding SendNinaLogErrors}"] = "Errors",
+            ["{Binding SendNinaLogWarnings}"] = "Warnings",
+            ["{Binding SendNinaLogInformation}"] = "Information",
+            ["{Binding SendNinaLogDebug}"] = "Debug",
+            ["{Binding SendNinaLogTrace}"] = "Trace",
+        };
+
+        var optionsPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Options.xaml");
+        var document = System.Xml.Linq.XDocument.Load(optionsPath);
+        System.Xml.Linq.XNamespace presentation =
+            "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var checkboxes = document.Descendants(presentation + "CheckBox").ToArray();
+
+        foreach (var (binding, label) in labelsByBinding)
+        {
+            var checkbox = checkboxes.Single(
+                element => (string?)element.Attribute("IsChecked") == binding);
+            AssertEqual(null, (string?)checkbox.Attribute("Content"));
+            AssertEqual(
+                label,
+                (string?)checkbox.Parent?
+                    .Elements(presentation + "TextBlock")
+                    .Single()
+                    .Attribute("Text"));
+        }
     }
 
     private static void NewProfilesDefaultToHostedDelivery()
