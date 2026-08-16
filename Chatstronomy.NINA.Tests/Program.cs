@@ -143,7 +143,7 @@ internal static class Program
             ?? throw new InvalidOperationException("N.I.N.A. rejected the development manifest.");
 
         AssertEqual("Chatstronomy", manifest.Name);
-        AssertEqual("0.1.0.15", manifest.Version.ToString());
+        AssertEqual("0.1.0.16", manifest.Version.ToString());
         AssertEqual("3.2.0.9001", manifest.MinimumApplicationVersion.ToString());
         AssertEqual(InstallerType.ARCHIVE, manifest.Installer.Type);
         AssertEqual(InstallerChecksum.SHA256, manifest.Installer.ChecksumType);
@@ -1047,7 +1047,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.15",
+        "0.1.0.16",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
