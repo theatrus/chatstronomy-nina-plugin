@@ -132,7 +132,7 @@ jobs:
         uses: azure/trusted-signing-action@v2
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
           files: ${{ github.workspace }}\artifacts\nina-plugin\package\Chatstronomy\Chatstronomy.dll
           file-digest: SHA256
