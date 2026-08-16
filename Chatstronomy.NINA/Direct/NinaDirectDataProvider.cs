@@ -3,7 +3,6 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using NINA.Core.Interfaces;
 using NINA.Core.Enum;
@@ -242,6 +241,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
                     await GetLastAutofocusAsync(cancellationToken).ConfigureAwait(false)),
             DirectQueryKind.MountInfo =>
                 DirectApiEnvelope<IReadOnlyDictionary<string, object?>>.Ok(GetMountInfo()),
+            DirectQueryKind.CameraInfo =>
+                DirectApiEnvelope<DirectCameraInfo>.Ok(GetCameraInfo()),
             DirectQueryKind.FilterwheelInfo =>
                 DirectApiEnvelope<DirectFilterWheelInfo>.Ok(GetFilterWheelInfo()),
             DirectQueryKind.GuiderInfo =>
@@ -837,6 +838,21 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             available);
     }
 
+    private DirectCameraInfo GetCameraInfo()
+    {
+        var info = camera.GetInfo();
+        return new DirectCameraInfo(
+            info.Connected,
+            info.CanSetTemperature,
+            info.CoolerOn,
+            info.CoolerPower,
+            info.Temperature,
+            info.TemperatureSetPoint,
+            info.Connected && info.CanSetTemperature && camera.AtTargetTemp,
+            info.Name ?? string.Empty,
+            info.DisplayName ?? string.Empty);
+    }
+
     private DirectGuiderInfo GetGuiderInfo()
     {
         var info = guider.GetInfo();
@@ -954,22 +970,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             try
             {
-                var scale = frozen.PixelWidth > 256 ? 256d / frozen.PixelWidth : 1d;
-                BitmapSource thumbnail = frozen;
-                if (scale < 1)
-                {
-                    var transformed = new TransformedBitmap(
-                        frozen,
-                        new ScaleTransform(scale, scale));
-                    transformed.Freeze();
-                    thumbnail = transformed;
-                }
-
-                var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
-                encoder.Frames.Add(BitmapFrame.Create(thumbnail));
-                using var stream = new MemoryStream();
-                encoder.Save(stream);
-                savedImage.ThumbnailData = stream.ToArray();
+                savedImage.ThumbnailData = DirectThumbnailEncoder.Encode(frozen);
             }
             catch
             {
@@ -1134,6 +1135,17 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 }
 
 internal sealed record DirectFilterInfo(string Name, int Id);
+
+internal sealed record DirectCameraInfo(
+    bool Connected,
+    bool CanSetTemperature,
+    bool CoolerOn,
+    double CoolerPower,
+    double Temperature,
+    double TemperatureSetPoint,
+    bool AtTargetTemp,
+    string Name,
+    string DisplayName);
 
 internal sealed record DirectFilterWheelInfo(
     bool Connected,

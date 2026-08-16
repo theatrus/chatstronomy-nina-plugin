@@ -47,9 +47,13 @@ internal static class Program
         Run("Plugin runtime bootstrap is source-explicit", PluginRuntimeBootstrapIsSourceExplicit);
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
+        Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
+        Run("Direct sequence marks chat-visible operations", DirectSequenceMarksChatVisibleOperations);
         Run("Direct guider payload matches the Rust chart contract", DirectGuiderPayloadMatchesRustChart);
         Run("Direct query results match Rust envelope", DirectQueryResultsMatchRustEnvelope);
         Run("Direct histories stay insertion ordered and bounded", DirectHistoriesAreBounded);
+        Run("Direct image thumbnails are sized for chat", DirectImageThumbnailsAreSizedForChat);
+        await RunAsync("Direct pipe serves camera snapshots", DirectPipeServesCameraSnapshots);
         await RunAsync(
             "Hosted plugin pairs and serves native guider graphs",
             HostedPluginPairsAndServesGuiderGraphs);
@@ -67,7 +71,7 @@ internal static class Program
         else
         {
             Console.WriteLine(
-                "SKIP: Backend contract fixtures (CHATSTRONOMY_CONTRACTS_DIR is not set)." );
+                "SKIP: Backend contract fixtures (CHATSTRONOMY_CONTRACTS_DIR is not set).");
         }
 
         var runtimePath = Environment.GetEnvironmentVariable("CHATSTRONOMY_RUNTIME_EXE");
@@ -472,6 +476,99 @@ internal static class Program
         return query.Command ?? throw new InvalidOperationException("Command was not parsed.");
     }
 
+    private static void DirectCameraQueryUsesSharedContract()
+    {
+        var query = DirectProtocol.ParseQuery(
+            """{"type":"query","payload":{"id":"7afcde18-b5a8-46fd-ad1f-ed54cf3bbc4e","kind":"camera_info"}}""");
+        AssertEqual(DirectQueryKind.CameraInfo, query.Kind);
+
+        var envelope = DirectApiEnvelope<DirectCameraInfo>.Ok(new DirectCameraInfo(
+            Connected: true,
+            CanSetTemperature: true,
+            CoolerOn: true,
+            CoolerPower: 72.5,
+            Temperature: -6.4,
+            TemperatureSetPoint: -10,
+            AtTargetTemp: false,
+            Name: "ASI2600MM",
+            DisplayName: "ASI2600MM"));
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(envelope, DirectProtocol.JsonOptions));
+        var camera = json.RootElement.GetProperty("Response");
+        AssertEqual(-6.4, camera.GetProperty("Temperature").GetDouble());
+        AssertEqual(-10.0, camera.GetProperty("TemperatureSetPoint").GetDouble());
+        AssertTrue(camera.GetProperty("CoolerOn").GetBoolean());
+        AssertFalse(camera.GetProperty("AtTargetTemp").GetBoolean());
+    }
+
+    private static void DirectSequenceMarksChatVisibleOperations()
+    {
+        var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
+            "AddItemDetails",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Sequence detail projector was not found.");
+
+        var wait = new global::NINA.Sequencer.SequenceItem.Utility.WaitForTimeSpan { Time = 90 };
+        var waitDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { wait, waitDetails });
+        AssertEqual("time_wait", waitDetails["OperationKind"] as string);
+        AssertEqual(90.0, Convert.ToDouble(waitDetails["Delay"]));
+        AssertEqual(TimeSpan.FromSeconds(90), (TimeSpan)waitDetails["CalculatedWaitDuration"]!);
+
+        var cooling = new global::NINA.Sequencer.SequenceItem.Camera.CoolCamera(null!)
+        {
+            Temperature = -10,
+            Duration = 15,
+        };
+        var coolingDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { cooling, coolingDetails });
+        AssertEqual("camera_cooling", coolingDetails["OperationKind"] as string);
+        AssertEqual(-10.0, Convert.ToDouble(coolingDetails["Temperature"]));
+        AssertEqual(15.0, Convert.ToDouble(coolingDetails["MinCoolingTime"]));
+
+        var slew = new global::NINA.Sequencer.SequenceItem.Telescope.SlewScopeToRaDec(null!, null!);
+        var slewDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { slew, slewDetails });
+        AssertEqual("mount_slew", slewDetails["OperationKind"] as string);
+
+        var center = new global::NINA.Sequencer.SequenceItem.Platesolving.Center(
+            null!, null!, null!, null!, null!, null!, null!, null!, null!);
+        center.PlateSolveStatusVM.PlateSolveResult = new global::NINA.PlateSolving.PlateSolveResult(
+            new DateTime(2026, 8, 15, 23, 45, 0, DateTimeKind.Utc))
+        {
+            Success = true,
+            Coordinates = new global::NINA.Astrometry.Coordinates(
+                12.5,
+                42.25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours),
+            PositionAngle = 91.5,
+            Pixscale = 1.25,
+            Radius = 1.75,
+            Separation = new global::NINA.Astrometry.Separation
+            {
+                Distance = global::NINA.Astrometry.Angle.ByDegree(1d / 60d),
+            },
+        };
+        center.PlateSolveStatusVM.Thumbnail = System.Windows.Media.Imaging.BitmapSource.Create(
+            1,
+            1,
+            96,
+            96,
+            System.Windows.Media.PixelFormats.Bgra32,
+            null,
+            new byte[] { 0, 0, 0, 255 },
+            4);
+        var centerDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { center, centerDetails });
+        AssertEqual("mount_center", centerDetails["OperationKind"] as string);
+        var output = (Dictionary<string, object?>)centerDetails["PlateSolveOutput"]!;
+        AssertEqual(true, Convert.ToBoolean(output["Success"]));
+        AssertEqual(91.5, Convert.ToDouble(output["PositionAngle"]));
+        AssertEqual(60.0, Convert.ToDouble(output["SeparationArcseconds"]));
+        AssertTrue(!string.IsNullOrWhiteSpace(output["ThumbnailBase64"] as string));
+        AssertEqual("image/jpeg", output["ThumbnailMediaType"] as string);
+    }
+
     private static void DirectGuiderPayloadMatchesRustChart()
     {
         var measured = new[]
@@ -584,6 +681,69 @@ internal static class Program
         AssertFalse(history.TryGetAt(2, out _));
         history.Clear();
         AssertEqual(0, history.Count);
+    }
+
+    private static void DirectImageThumbnailsAreSizedForChat()
+    {
+        const int sourceWidth = 2_048;
+        const int sourceHeight = 1_024;
+        var pixels = new byte[sourceWidth * sourceHeight];
+        var source = System.Windows.Media.Imaging.BitmapSource.Create(
+            sourceWidth,
+            sourceHeight,
+            96,
+            96,
+            System.Windows.Media.PixelFormats.Gray8,
+            null,
+            pixels,
+            sourceWidth);
+        source.Freeze();
+
+        var encoded = DirectThumbnailEncoder.Encode(source);
+        using var stream = new MemoryStream(encoded);
+        var decoder = new System.Windows.Media.Imaging.JpegBitmapDecoder(
+            stream,
+            System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
+            System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+        var thumbnail = decoder.Frames[0];
+
+        AssertEqual(DirectThumbnailEncoder.MaxWidth, thumbnail.PixelWidth);
+        AssertEqual(sourceHeight / 2, thumbnail.PixelHeight);
+    }
+
+    private static async Task DirectPipeServesCameraSnapshots()
+    {
+        var provider = new FakeDirectDataProvider();
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        var id = Guid.NewGuid();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            type = "query",
+            payload = new { id, kind = "camera_info" },
+        }));
+        var responseLine = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Direct camera query returned no response.");
+        using var response = JsonDocument.Parse(responseLine);
+        AssertEqual(id, response.RootElement.GetProperty("payload").GetProperty("id").GetGuid());
+        AssertTrue(response.RootElement.GetProperty("payload").GetProperty("ok").GetBoolean());
+        var camera = response.RootElement
+            .GetProperty("payload")
+            .GetProperty("payload")
+            .GetProperty("Response");
+        AssertEqual(5.0, camera.GetProperty("Temperature").GetDouble());
+        AssertEqual(-10.0, camera.GetProperty("TemperatureSetPoint").GetDouble());
+        AssertTrue(provider.QueriedKinds.Contains(DirectQueryKind.CameraInfo));
     }
 
     private static async Task HostedPluginPairsAndServesGuiderGraphs()
@@ -773,7 +933,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.11",
+        "0.1.0.12",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
@@ -1369,6 +1529,17 @@ internal static class Program
                         Array.Empty<DirectImageMetadata>()),
                 DirectQueryKind.Sequence =>
                     DirectApiEnvelope<IReadOnlyList<object>>.Ok(Array.Empty<object>()),
+                DirectQueryKind.CameraInfo =>
+                    DirectApiEnvelope<DirectCameraInfo>.Ok(new DirectCameraInfo(
+                        Connected: true,
+                        CanSetTemperature: true,
+                        CoolerOn: true,
+                        CoolerPower: 60,
+                        Temperature: 5,
+                        TemperatureSetPoint: -10,
+                        AtTargetTemp: false,
+                        Name: "Test camera",
+                        DisplayName: "Test camera")),
                 DirectQueryKind.Thumbnail => new DirectThumbnail(
                     new byte[] { 0xff, 0xd8, 0xff, 0xd9 },
                     "image/jpeg",
