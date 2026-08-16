@@ -12,6 +12,21 @@ Author: Yann Ramin
 
 License: Apache-2.0
 
+## Capabilities
+
+- Reads status, sequence, equipment, image, guider, and autofocus data directly
+  from N.I.N.A.; the Advanced API plugin is optional rather than required.
+- Supervises an on-machine Chatstronomy runtime for Discord webhooks, a
+  user-owned Discord application with slash commands, Matrix over an HTTPS
+  homeserver, or simultaneous Discord and Matrix delivery.
+- Connects outbound to `https://hub.chatstronomy.com/` so one hosted bot can
+  serve multiple N.I.N.A. installations on different computers without inbound
+  observatory ports or chat credentials on each rig.
+- Retains Advanced API polling as a compatibility source for existing
+  Chatstronomy installations.
+- Renders guider and autofocus graphs with the same native renderer in local
+  and hosted modes and exposes only an allowlisted set of control commands.
+
 ## Operating modes
 
 Source and chat delivery are independent choices:
@@ -36,6 +51,51 @@ and hosted modes:
 ![Rendered guider graph](docs/images/guiding_graph_sample.png)
 
 ![Rendered autofocus graph](docs/images/autofocus_graph_sample.png)
+
+## Install a development build
+
+The plugin targets N.I.N.A. 3.2 or newer on Windows x64. Until the first signed
+plugin tag is published, development packages are available from the
+[`main` CI workflow](https://github.com/theatrus/chatstronomy-nina-plugin/actions/workflows/ci.yml?query=branch%3Amain):
+
+1. Open the latest successful `main` run and download the
+   `chatstronomy-nina-package-smoke-test` artifact.
+2. Extract the downloaded Actions artifact to find
+   `Chatstronomy.NINA.0.1.0.10.zip`.
+3. Exit N.I.N.A. completely.
+4. Extract that inner ZIP into
+   `%LOCALAPPDATA%\NINA\Plugins\3.0.0\Chatstronomy`.
+5. Start N.I.N.A., open **Plugins** > **Installed** > **Chatstronomy**, and
+   configure a local or hosted connection.
+
+The equivalent PowerShell install step is:
+
+```powershell
+$destination = Join-Path $env:LOCALAPPDATA 'NINA\Plugins\3.0.0\Chatstronomy'
+New-Item -ItemType Directory -Path $destination -Force | Out-Null
+Expand-Archive `
+  -LiteralPath .\Chatstronomy.NINA.0.1.0.10.zip `
+  -DestinationPath $destination `
+  -Force
+```
+
+Development CI packages contain the immutable, backend-signed Rust runtime,
+but their `Chatstronomy.dll` is an unsigned test build. Official tagged
+packages use the release workflow documented below to sign both shipped
+Windows binaries and verify them before the N.I.N.A. checksum is generated.
+
+To build the same package from source instead of downloading the CI artifact:
+
+```powershell
+git clone https://github.com/theatrus/chatstronomy-nina-plugin.git
+cd chatstronomy-nina-plugin
+./fetch-runtime.ps1
+./build-package.ps1 -Version 0.1.0.10
+```
+
+The resulting ZIP is under `artifacts/nina-plugin/`. `fetch-runtime.ps1`
+downloads the exact backend release pinned by `runtime.lock.json` and rejects
+identity, protocol, size, or checksum mismatches.
 
 ## Repository boundary
 
