@@ -52,23 +52,59 @@ and hosted modes:
 
 ![Rendered autofocus graph](docs/images/autofocus_graph_sample.png)
 
-## Install a development build
+## Install from N.I.N.A.
 
-The plugin targets N.I.N.A. 3.2 or newer on Windows x64. Until the first signed
-plugin tag is published, development packages are available from the
-[`main` CI workflow](https://github.com/theatrus/chatstronomy-nina-plugin/actions/workflows/ci.yml?query=branch%3Amain):
+The plugin targets N.I.N.A. 3.2 or newer on Windows x64. N.I.N.A. can search
+multiple plugin repositories, so the official and development channels use the
+same plugin-manager flow.
 
-1. Open the latest successful `main` run and download the
-   `chatstronomy-nina-package-smoke-test` artifact.
-2. Extract the downloaded Actions artifact to find
-   `Chatstronomy.NINA.0.1.0.10.zip`.
-3. Exit N.I.N.A. completely.
-4. Extract that inner ZIP into
-   `%LOCALAPPDATA%\NINA\Plugins\3.0.0\Chatstronomy`.
-5. Start N.I.N.A., open **Plugins** > **Installed** > **Chatstronomy**, and
-   configure a local or hosted connection.
+### Official channel
 
-The equivalent PowerShell install step is:
+When the signed listing is published in N.I.N.A.'s built-in repository, open
+**Plugins** > **Available**, search for **Chatstronomy**, choose **Install**, and
+restart N.I.N.A. No additional repository URL is needed.
+
+### GitHub development channel
+
+1. Open **Options** > **General** > **Plugin Repositories** and select **+**.
+2. Add this repository URL (N.I.N.A. appends `/plugins/manifests` itself):
+
+   ```text
+   https://raw.githubusercontent.com/theatrus/chatstronomy-nina-plugin/main/registry
+   ```
+
+3. Open **Plugins** > **Available**, select **Chatstronomy**, choose **Install**,
+   and restart N.I.N.A.
+
+The development channel currently contains the immutable, backend-signed Rust
+runtime and an unsigned test `Chatstronomy.dll`. Official tagged packages use
+the release workflow documented below to sign and verify both shipped Windows
+binaries before the N.I.N.A. checksum is generated.
+
+## Recommended setup: Chatstronomy Hub
+
+The Hub is the simplest operating path and lets one centralized bot serve N.I.N.A.
+instances on different computers:
+
+1. Open [hub.chatstronomy.com](https://hub.chatstronomy.com/) and create a
+   one-time pairing code for the observatory.
+2. In **Plugins** > **Installed** > **Chatstronomy**, choose
+   **Chatstronomy.com — hosted bot**.
+3. Keep the default Hub URL, paste the one-time code, and choose
+   **Pair / reconnect**.
+
+The plugin stores the resulting connection credential in Windows Credential
+Manager and reconnects outbound over authenticated WSS. No Discord token,
+Matrix password, Advanced API endpoint, or inbound observatory port is needed
+on the N.I.N.A. computer. Local Discord webhook, user-owned Discord bot, Matrix,
+and Advanced API modes remain available for self-hosted operation.
+
+### Manual/source fallback
+
+For plugin development, the latest successful
+[`main` CI workflow](https://github.com/theatrus/chatstronomy-nina-plugin/actions/workflows/ci.yml?query=branch%3Amain)
+also publishes `chatstronomy-nina-package-smoke-test`. After extracting the
+inner plugin ZIP, a manual install uses:
 
 ```powershell
 $destination = Join-Path $env:LOCALAPPDATA 'NINA\Plugins\3.0.0\Chatstronomy'
@@ -78,11 +114,6 @@ Expand-Archive `
   -DestinationPath $destination `
   -Force
 ```
-
-Development CI packages contain the immutable, backend-signed Rust runtime,
-but their `Chatstronomy.dll` is an unsigned test build. Official tagged
-packages use the release workflow documented below to sign both shipped
-Windows binaries and verify them before the N.I.N.A. checksum is generated.
 
 To build the same package from source instead of downloading the CI artifact:
 
