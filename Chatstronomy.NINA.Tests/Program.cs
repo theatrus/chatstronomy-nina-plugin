@@ -1026,7 +1026,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.14",
+        "0.1.0.15",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
@@ -1107,7 +1107,7 @@ internal static class Program
                 "Chatstronomy",
                 "logs",
                 $"nina-runtime-{profileId:N}.log");
-            var log = File.ReadAllText(logPath);
+            var log = await ReadAllTextWhenUnlockedAsync(logPath);
             AssertFalse(log.Contains("api/webhooks", StringComparison.OrdinalIgnoreCase));
             AssertFalse(log.Contains("token", StringComparison.OrdinalIgnoreCase));
         }
@@ -1118,6 +1118,27 @@ internal static class Program
                 await controller.StopAsync(CancellationToken.None);
             }
             provider.Dispose();
+        }
+    }
+
+    private static async Task<string> ReadAllTextWhenUnlockedAsync(string path)
+    {
+        var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            try
+            {
+                return await File.ReadAllTextAsync(path);
+            }
+            catch (IOException) when (
+                System.Diagnostics.Stopwatch.GetElapsedTime(startedAt) < TimeSpan.FromSeconds(5))
+            {
+                // Windows can retain the exiting process's file handle for a
+                // moment after WaitForExitAsync completes. The release test is
+                // interested in the log contents, not that transient teardown
+                // timing, so give the handle a bounded chance to close.
+                await Task.Delay(50);
+            }
         }
     }
 
