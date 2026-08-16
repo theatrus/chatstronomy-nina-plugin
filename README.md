@@ -50,6 +50,13 @@ names, sizes, and SHA-256 hashes before placing the lean runtime in
 `runtime-cache/`. Release builds never resolve `latest`, build from backend
 `main`, or invoke Cargo.
 
+Rust is compiled and Authenticode-signed only by the backend release. This
+repository copies that signed lean executable without modifying it. Its release
+workflow verifies the runtime is signed by StackFoundry LLC, stages the package,
+signs `Chatstronomy.dll`, verifies both signatures, and only then creates the ZIP
+and N.I.N.A. checksum. `build-package.ps1 -StageOnly` and `-PackageOnly` expose
+that signing seam without changing the normal one-command development build.
+
 The initial lock remains `pending_backend_release` until backend artifact PR
 [#136](https://github.com/theatrus/chatstronomy/pull/136) is merged and the
 corresponding `v0.3.0` artifacts exist. The fetcher intentionally refuses a
@@ -116,8 +123,8 @@ manifest endpoint.
 ## Distribution
 
 Dedicated plugin tags use four numeric parts, for example `v0.1.0.10`. The
-release workflow downloads only the locked backend artifacts, runs the full C#
-and cross-process compatibility suite, builds the checksummed plugin ZIP, and
-publishes its N.I.N.A. manifest. Official N.I.N.A. distribution can then point
-to that immutable GitHub release asset without requiring a special archive name
-or repository layout.
+release workflow downloads only the locked, backend-signed artifacts, runs the
+full C# and cross-process compatibility suite, signs the plugin DLL, builds the
+checksummed plugin ZIP, and publishes its N.I.N.A. manifest. Official N.I.N.A.
+distribution can then point to that immutable GitHub release asset without
+requiring a special archive name or repository layout.

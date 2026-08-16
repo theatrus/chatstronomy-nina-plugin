@@ -17,8 +17,18 @@ param(
     [ValidateSet('Beta', 'Stable')]
     [string] $Channel = 'Beta',
 
-    [switch] $SkipRuntime
+    [switch] $SkipRuntime,
+
+    # Authenticode signing must happen after the package is staged but before
+    # its archive checksum is written to the N.I.N.A. manifest.
+    [switch] $StageOnly,
+
+    [switch] $PackageOnly
 )
+
+if ($StageOnly -and $PackageOnly) {
+    throw 'Specify at most one of -StageOnly and -PackageOnly.'
+}
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -53,11 +63,15 @@ $packageDirectory = Join-Path $outputRoot 'package/Chatstronomy'
 $archivePath = Join-Path $outputRoot $archiveName
 $manifestPath = Join-Path $outputRoot "Chatstronomy.NINA.$Version.manifest.json"
 
-foreach ($directory in @($buildDirectory, $packageDirectory)) {
-    if (Test-Path -LiteralPath $directory) {
-        Remove-Item -LiteralPath $directory -Recurse -Force
+if (-not $PackageOnly) {
+    foreach ($directory in @($buildDirectory, $packageDirectory)) {
+        if (Test-Path -LiteralPath $directory) {
+            Remove-Item -LiteralPath $directory -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+} elseif (-not (Test-Path -LiteralPath $packageDirectory -PathType Container)) {
+    throw "-PackageOnly needs a staged package at $packageDirectory; run -StageOnly first."
 }
 
 foreach ($file in @($archivePath, $manifestPath)) {
@@ -66,39 +80,63 @@ foreach ($file in @($archivePath, $manifestPath)) {
     }
 }
 
-dotnet build $project `
-    --configuration Release `
-    --output $buildDirectory `
-    -p:Version=$Version `
-    -p:AssemblyVersion=$Version `
-    -p:FileVersion=$Version
-if ($LASTEXITCODE -ne 0) {
-    throw "Chatstronomy N.I.N.A. plugin build failed with exit code $LASTEXITCODE."
-}
-
-$pluginDll = Join-Path $buildDirectory 'Chatstronomy.dll'
-if (-not (Test-Path -LiteralPath $pluginDll)) {
-    throw "Expected plugin assembly was not produced at $pluginDll."
-}
-
-Copy-Item -LiteralPath $pluginDll -Destination $packageDirectory
-
 $packagedRuntime = $null
-if (-not $SkipRuntime) {
-    if ([string]::IsNullOrWhiteSpace($RuntimePath)) {
-        throw 'RuntimePath is required unless -SkipRuntime is set.'
-    }
-    if (-not [IO.Path]::IsPathRooted($RuntimePath)) {
-        $RuntimePath = Join-Path $repositoryRoot $RuntimePath
+$pluginDll = Join-Path $packageDirectory 'Chatstronomy.dll'
+
+if (-not $PackageOnly) {
+    dotnet build $project `
+        --configuration Release `
+        --output $buildDirectory `
+        -p:Version=$Version `
+        -p:AssemblyVersion=$Version `
+        -p:FileVersion=$Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Chatstronomy N.I.N.A. plugin build failed with exit code $LASTEXITCODE."
     }
 
-    if (-not (Test-Path -LiteralPath $RuntimePath -PathType Leaf)) {
-        throw "Expected the pinned Chatstronomy runtime at $RuntimePath. Run ./fetch-runtime.ps1 or pass -RuntimePath explicitly."
+    $builtPluginDll = Join-Path $buildDirectory 'Chatstronomy.dll'
+    if (-not (Test-Path -LiteralPath $builtPluginDll -PathType Leaf)) {
+        throw "Expected plugin assembly was not produced at $builtPluginDll."
     }
-    $runtimeDirectory = Join-Path $packageDirectory 'runtime'
-    New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
-    $packagedRuntime = Join-Path $runtimeDirectory 'chatstronomy.exe'
-    Copy-Item -LiteralPath $RuntimePath -Destination $packagedRuntime
+
+    Copy-Item -LiteralPath $builtPluginDll -Destination $pluginDll
+
+    if (-not $SkipRuntime) {
+        if ([string]::IsNullOrWhiteSpace($RuntimePath)) {
+            throw 'RuntimePath is required unless -SkipRuntime is set.'
+        }
+        if (-not [IO.Path]::IsPathRooted($RuntimePath)) {
+            $RuntimePath = Join-Path $repositoryRoot $RuntimePath
+        }
+
+        if (-not (Test-Path -LiteralPath $RuntimePath -PathType Leaf)) {
+            throw "Expected the pinned Chatstronomy runtime at $RuntimePath. Run ./fetch-runtime.ps1 or pass -RuntimePath explicitly."
+        }
+        $runtimeDirectory = Join-Path $packageDirectory 'runtime'
+        New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+        $packagedRuntime = Join-Path $runtimeDirectory 'chatstronomy.exe'
+        Copy-Item -LiteralPath $RuntimePath -Destination $packagedRuntime
+    }
+
+} else {
+    if (-not (Test-Path -LiteralPath $pluginDll -PathType Leaf)) {
+        throw "The staged package does not contain $pluginDll."
+    }
+    if (-not $SkipRuntime) {
+        $packagedRuntime = Join-Path $packageDirectory 'runtime/chatstronomy.exe'
+        if (-not (Test-Path -LiteralPath $packagedRuntime -PathType Leaf)) {
+            throw "The staged package does not contain $packagedRuntime."
+        }
+    }
+}
+
+if ($StageOnly) {
+    [pscustomobject]@{
+        Package = $packageDirectory
+        Plugin = $pluginDll
+        Runtime = $packagedRuntime
+    }
+    return
 }
 
 Compress-Archive -Path (Join-Path $packageDirectory '*') -DestinationPath $archivePath
