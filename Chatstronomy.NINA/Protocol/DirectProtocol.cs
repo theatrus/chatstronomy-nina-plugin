@@ -7,7 +7,7 @@ internal static class DirectProtocol
 {
     internal const ushort CurrentVersion = 1;
     internal const ushort LegacyPayloadVersion = 1;
-    internal const ushort CurrentPayloadVersion = 2;
+    internal const ushort CurrentPayloadVersion = 3;
     internal const long ExpiryClockSkewGraceSeconds = 120;
     private const string PipePrefix = "chatstronomy-agent-v1";
     internal const string WebSocketPath = "/v1/direct";

@@ -25,17 +25,49 @@ internal sealed class ChatstronomySettings
         options = new PluginOptionsAccessor(profileService, PluginId);
     }
 
+    /// Marker for "the profile has never written this key", which
+    /// <see cref="PluginOptionsAccessor"/> cannot report directly. It is not a
+    /// legal <see cref="ChatDeliveryMode"/> name, so it can never collide with
+    /// a stored value.
+    private const string DeliveryModeUnset = "<unset>";
+
     public ChatDeliveryMode DeliveryMode
     {
         get
         {
-            var value = options.GetValueString(
-                nameof(DeliveryMode),
-                ChatDeliveryMode.HostedService.ToString());
-            return ParseDeliveryMode(value);
+            var value = options.GetValueString(nameof(DeliveryMode), DeliveryModeUnset);
+            return value == DeliveryModeUnset
+                ? AdoptDeliveryModeForExistingProfile()
+                : ParseDeliveryMode(value);
         }
         set => options.SetValueString(nameof(DeliveryMode), value.ToString());
     }
+
+    /// Decide what an absent <c>DeliveryMode</c> key means.
+    ///
+    /// New profiles default to the hosted Hub. An existing profile is a
+    /// different case: the webhook radio used to be the default selection, and
+    /// WPF does not write a setting back just for rendering the initial
+    /// selection — so a user who accepted that default and pasted a webhook URL
+    /// has no key stored at all. Reading them as hosted would silently stop
+    /// their delivery on upgrade, so infer the previous default from the
+    /// credentials they actually configured. The result is persisted, so this
+    /// runs once per profile.
+    private ChatDeliveryMode AdoptDeliveryModeForExistingProfile()
+    {
+        var mode = HasLocalDeliveryCredential()
+            ? ChatDeliveryMode.DiscordWebhook
+            : ChatDeliveryMode.HostedService;
+        DeliveryMode = mode;
+        return mode;
+    }
+
+    /// True when this profile already holds a secret that only local delivery
+    /// uses. Hosted mode stores a connection credential instead.
+    private bool HasLocalDeliveryCredential() =>
+        !string.IsNullOrWhiteSpace(DiscordWebhookUrl)
+        || !string.IsNullOrWhiteSpace(DiscordBotToken)
+        || !string.IsNullOrWhiteSpace(MatrixPassword);
 
     internal static ChatDeliveryMode ParseDeliveryMode(string? value) =>
         Enum.TryParse<ChatDeliveryMode>(value, out var mode)

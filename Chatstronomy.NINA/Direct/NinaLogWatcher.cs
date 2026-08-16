@@ -21,7 +21,23 @@ internal sealed record NinaLogRecord(
 internal sealed class NinaLogWatcher : IDisposable
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
+    /// How long <see cref="Stop"/> waits for the tail to unwind before giving
+    /// up. The loop only ever blocks on a file read or the poll delay, so this
+    /// is generous.
+    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(2);
+    /// A single log line is normally well under a kilobyte. A co-installed
+    /// plugin logging a serialized response can emit far more, and that text is
+    /// held in the event ring and re-sent on every poll, so cap it.
+    private const int MaxMessageChars = 2_000;
+    /// Ceiling for a partial line carried between polls. Without it, one
+    /// newline-free megabyte accumulates across every read.
+    private const int MaxPendingChars = 64 * 1024;
+
     private readonly Action<NinaLogRecord> onRecord;
+    /// Start and Stop are called from plugin lifecycle code and must not
+    /// interleave: a Stop that returned before its tail unwound used to let a
+    /// following Start run a second tail over the same file.
+    private readonly object gate = new();
     private CancellationTokenSource? stop;
     private Task? watcherTask;
 
@@ -32,20 +48,45 @@ internal sealed class NinaLogWatcher : IDisposable
 
     internal void Start()
     {
-        if (stop is not null)
+        lock (gate)
         {
-            return;
+            if (stop is not null)
+            {
+                return;
+            }
+            var cancellation = new CancellationTokenSource();
+            stop = cancellation;
+            watcherTask = Task.Run(() => WatchAsync(cancellation.Token));
         }
-        stop = new CancellationTokenSource();
-        watcherTask = Task.Run(() => WatchAsync(stop.Token));
     }
 
     internal void Stop()
     {
-        var cancellation = Interlocked.Exchange(ref stop, null);
-        cancellation?.Cancel();
-        cancellation?.Dispose();
-        watcherTask = null;
+        lock (gate)
+        {
+            var cancellation = stop;
+            var running = watcherTask;
+            stop = null;
+            watcherTask = null;
+            if (cancellation is null)
+            {
+                return;
+            }
+
+            cancellation.Cancel();
+            try
+            {
+                // Teardown unsubscribes the consumer straight after this
+                // returns, so wait for the loop to leave rather than let it
+                // deliver records into a stopped provider.
+                running?.Wait(StopTimeout);
+            }
+            catch (AggregateException)
+            {
+                // WatchAsync handles its own failures; nothing to add here.
+            }
+            cancellation.Dispose();
+        }
     }
 
     public void Dispose() => Stop();
@@ -56,6 +97,10 @@ internal sealed class NinaLogWatcher : IDisposable
         long position = 0;
         var pending = string.Empty;
         var firstLogFile = true;
+        // A read can land mid-character, so decoding must carry state across
+        // polls; a fresh GetString per chunk turns one split character into two
+        // replacement characters.
+        var decoder = Encoding.UTF8.GetDecoder();
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -65,6 +110,7 @@ internal sealed class NinaLogWatcher : IDisposable
                 if (!string.Equals(activePath, latestPath, StringComparison.OrdinalIgnoreCase))
                 {
                     activePath = latestPath;
+                    decoder.Reset();
                     // Existing lines predate plugin startup and belong to the
                     // updater baseline. Start at EOF to avoid racing a replay
                     // of the whole N.I.N.A. session into chat. A newly rotated
@@ -78,17 +124,29 @@ internal sealed class NinaLogWatcher : IDisposable
 
                 if (activePath is not null)
                 {
-                    var read = await ReadNewTextAsync(activePath, position, cancellationToken)
+                    var read = await ReadNewTextAsync(
+                            activePath,
+                            position,
+                            decoder,
+                            cancellationToken)
                         .ConfigureAwait(false);
                     position = read.Position;
                     if (read.Reset)
                     {
                         pending = string.Empty;
+                        decoder.Reset();
                     }
                     if (read.Text.Length > 0)
                     {
                         pending += read.Text;
                         pending = ProcessCompleteLines(pending);
+                        if (pending.Length > MaxPendingChars)
+                        {
+                            // A single line this long is not a log record we
+                            // can use. Drop it rather than keep concatenating
+                            // it on every poll.
+                            pending = string.Empty;
+                        }
                     }
                 }
             }
@@ -145,6 +203,7 @@ internal sealed class NinaLogWatcher : IDisposable
     private static async Task<LogReadResult> ReadNewTextAsync(
         string path,
         long position,
+        Decoder decoder,
         CancellationToken cancellationToken)
     {
         await using var stream = new FileStream(
@@ -155,13 +214,18 @@ internal sealed class NinaLogWatcher : IDisposable
             bufferSize: 16 * 1024,
             options: FileOptions.Asynchronous | FileOptions.SequentialScan);
         var reset = position > stream.Length;
+        if (reset)
+        {
+            decoder.Reset();
+        }
         stream.Position = reset ? 0 : position;
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
-        return new LogReadResult(
-            stream.Position,
-            Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length)),
-            reset);
+
+        var byteCount = checked((int)buffer.Length);
+        var chars = new char[decoder.GetCharCount(buffer.GetBuffer(), 0, byteCount, flush: false)];
+        var charCount = decoder.GetChars(buffer.GetBuffer(), 0, byteCount, chars, 0, flush: false);
+        return new LogReadResult(stream.Position, new string(chars, 0, charCount), reset);
     }
 
     private static string? FindActiveLogFile()
@@ -172,11 +236,17 @@ internal sealed class NinaLogWatcher : IDisposable
             return null;
         }
         var processMarker = $".{Environment.ProcessId}-";
+        // Order by name, not by last-write time. Windows recycles process IDs,
+        // so a closed log from an earlier session can carry the same marker,
+        // and NTFS defers the directory timestamp of a file with an open
+        // write handle — which let a stale file out-rank the live one and
+        // replay an entire old session into chat. The leading
+        // yyyyMMdd-HHmmss in the file name sorts chronologically.
         return Directory.EnumerateFiles(directory, "*.log", SearchOption.TopDirectoryOnly)
             .Where(path => Path.GetFileName(path).Contains(
                 processMarker,
                 StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
     }
 
@@ -197,13 +267,18 @@ internal sealed class NinaLogWatcher : IDisposable
         }
 
         _ = int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out var sourceLine);
+        var message = parts[5].Trim();
+        if (message.Length > MaxMessageChars)
+        {
+            message = string.Concat(message.AsSpan(0, MaxMessageChars - 1), "…");
+        }
         record = new NinaLogRecord(
             time,
             NormalizeLevel(parts[1]),
             parts[2].Trim(),
             parts[3].Trim(),
             sourceLine,
-            parts[5].Trim());
+            message);
         return true;
     }
 

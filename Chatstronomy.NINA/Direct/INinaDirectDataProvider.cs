@@ -12,5 +12,9 @@ internal interface INinaDirectDataProvider : IDisposable
 
     void Reset();
 
+    /// Re-read the delivery options, starting or stopping the N.I.N.A. log
+    /// tail so it only runs while at least one level is selected.
+    void ApplyLogDeliveryOptions();
+
     Task<object?> ExecuteAsync(DirectQuery query, CancellationToken cancellationToken);
 }

@@ -34,6 +34,10 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private const int EventHistoryCapacity = 10_000;
     private const int ImageHistoryCapacity = 500;
     private const int GuideHistoryCapacity = 10_000;
+    /// Forwarded log lines live in their own ring. Sharing the equipment ring
+    /// let an evening of INFO chatter evict every real event, leaving the
+    /// consumer's state reconstruction with nothing to read.
+    private const int LogHistoryCapacity = 500;
     private static readonly string[] TargetSchedulerTopics =
     [
         "TargetScheduler-WaitStart",
@@ -60,6 +64,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private readonly NinaNotificationWatcher notificationWatcher;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
+    private readonly BoundedHistory<Dictionary<string, object?>> logEvents =
+        new(LogHistoryCapacity);
     private readonly BoundedHistory<DirectSavedImage> images =
         new(ImageHistoryCapacity);
     private readonly BoundedHistory<DirectGuideStep> guideSteps =
@@ -129,6 +135,13 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             return;
         }
 
+        // Mark started before wiring anything up. Stop() early-returns when
+        // this is false, so setting it last meant a throw part-way through
+        // left the handlers, the log tail, and the toast hook attached with no
+        // way to detach them — a zombie uploader after the user disables the
+        // plugin.
+        started = true;
+
         telescope.Connected += TelescopeConnected;
         telescope.Disconnected += TelescopeDisconnected;
         telescope.BeforeMeridianFlip += TelescopeBeforeMeridianFlip;
@@ -167,11 +180,33 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             messageBroker.Subscribe(topic, this);
         }
-        logWatcher.Start();
+        ApplyLogDeliveryOptions();
         _ = notificationWatcher.Start();
-        started = true;
         sequenceSubscriptionStop = new CancellationTokenSource();
         _ = SubscribeToSequenceWhenReadyAsync(sequenceSubscriptionStop.Token);
+    }
+
+    /// Start or stop the log tail to match the current selection.
+    ///
+    /// Nothing needs to read the N.I.N.A. log until at least one level is
+    /// ticked, and all of them default to off — so for most users this keeps
+    /// the tail from opening, decoding, and parsing the log all night only to
+    /// discard every line. Called again whenever the options change.
+    public void ApplyLogDeliveryOptions()
+    {
+        if (!started)
+        {
+            logWatcher.Stop();
+            return;
+        }
+        if (eventDelivery.Current.AnyLogLevelEnabled)
+        {
+            logWatcher.Start();
+        }
+        else
+        {
+            logWatcher.Stop();
+        }
     }
 
     public void Stop()
@@ -242,6 +277,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     public void Reset()
     {
         events.Clear();
+        logEvents.Clear();
         images.Clear();
         guideSteps.Clear();
         lock (autofocusReportGate)
@@ -259,7 +295,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         object? result = query.Kind switch
         {
             DirectQueryKind.EventHistory =>
-                DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(events.Snapshot()),
+                DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
+                    SnapshotEventHistory()),
             DirectQueryKind.ImageHistory =>
                 DirectApiEnvelope<IReadOnlyList<DirectImageMetadata>>.Ok(
                     images.Snapshot().Select(image => image.Metadata).ToArray()),
@@ -1073,7 +1110,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             return;
         }
-        AddEventCore(
+        logEvents.Add(BuildEvent(
             record.Time,
             "NINA-LOG",
             chatEnabled: true,
@@ -1081,8 +1118,34 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             ("Source", record.Source),
             ("Member", record.Member),
             ("Line", record.Line),
-            ("Message", record.Message));
+            ("Message", record.Message)));
     }
+
+    /// Equipment events and forwarded log lines, merged in time order.
+    ///
+    /// They are buffered separately so log volume cannot evict equipment
+    /// history, but the consumer still expects one chronological list.
+    private IReadOnlyList<Dictionary<string, object?>> SnapshotEventHistory()
+    {
+        var logs = logEvents.Snapshot();
+        var equipment = events.Snapshot();
+        if (logs.Count == 0)
+        {
+            return equipment;
+        }
+
+        return equipment
+            .Concat(logs)
+            .OrderBy(item => item.TryGetValue("Time", out var time) ? ToSortableTime(time) : default)
+            .ToArray();
+    }
+
+    private static DateTimeOffset ToSortableTime(object? time) => time switch
+    {
+        DateTimeOffset offset => offset,
+        DateTime value => new DateTimeOffset(value.ToUniversalTime(), TimeSpan.Zero),
+        _ => default,
+    };
 
     private void RecordNotification(NinaNotificationRecord notification)
     {
@@ -1120,6 +1183,13 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         object time,
         string eventName,
         bool chatEnabled,
+        params (string Name, object? Value)[] details) =>
+        events.Add(BuildEvent(time, eventName, chatEnabled, details));
+
+    private static Dictionary<string, object?> BuildEvent(
+        object time,
+        string eventName,
+        bool chatEnabled,
         params (string Name, object? Value)[] details)
     {
         var item = new Dictionary<string, object?>
@@ -1130,9 +1200,17 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         };
         foreach (var (name, value) in details)
         {
+            // Omit absent details rather than sending an explicit null. The
+            // consumer picks an event shape by which fields are present, and a
+            // null in a typed slot fails that match — which used to drop the
+            // whole event silently, so a target change was never reported.
+            if (value is null)
+            {
+                continue;
+            }
             item[name] = value;
         }
-        events.Add(item);
+        return item;
     }
 
     private async Task SubscribeToSequenceWhenReadyAsync(CancellationToken cancellationToken)
