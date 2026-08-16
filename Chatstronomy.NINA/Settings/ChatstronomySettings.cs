@@ -169,44 +169,6 @@ internal sealed class ChatstronomySettings
         set => options.SetValueString(nameof(LocalRuntimePath), value?.Trim() ?? string.Empty);
     }
 
-    public string AdvancedApiBaseUrl
-    {
-        get => options.GetValueString(nameof(AdvancedApiBaseUrl), "http://127.0.0.1:1888/");
-        set => options.SetValueString(nameof(AdvancedApiBaseUrl), value?.Trim() ?? string.Empty);
-    }
-
-    public RuntimeSourceMode RuntimeSourceMode
-    {
-        get
-        {
-            var value = options.GetValueString(
-                nameof(RuntimeSourceMode),
-                global::Chatstronomy.NINA.Settings.RuntimeSourceMode.Direct.ToString());
-            return Enum.TryParse<RuntimeSourceMode>(value, out var mode)
-                ? mode
-                : global::Chatstronomy.NINA.Settings.RuntimeSourceMode.Direct;
-        }
-        set => options.SetValueString(nameof(RuntimeSourceMode), value.ToString());
-    }
-
-    public string PollingIntervalSeconds
-    {
-        get => options.GetValueString(nameof(PollingIntervalSeconds), "5");
-        set => options.SetValueString(nameof(PollingIntervalSeconds), value?.Trim() ?? string.Empty);
-    }
-
-    public bool StartLocalRuntime
-    {
-        get => options.GetValueBoolean(nameof(StartLocalRuntime), true);
-        set => options.SetValueBoolean(nameof(StartLocalRuntime), value);
-    }
-
-    public bool StopLocalRuntimeWithNina
-    {
-        get => options.GetValueBoolean(nameof(StopLocalRuntimeWithNina), true);
-        set => options.SetValueBoolean(nameof(StopLocalRuntimeWithNina), value);
-    }
-
     public bool SendImageEvents
     {
         get => options.GetValueBoolean(nameof(SendImageEvents), true);

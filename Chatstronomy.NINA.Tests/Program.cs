@@ -24,8 +24,6 @@ internal static class Program
         Run("Discord accepts complete webhook URLs", DiscordAcceptsCompleteWebhookUrls);
         Run("Discord rejects incomplete webhook URLs", DiscordRejectsIncompleteWebhookUrls);
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
-        Run("Advanced API mode is legacy-profile only", AdvancedApiModeIsLegacyProfileOnly);
-        Run("Advanced API polling settings are validated", AdvancedApiPollingIsValidated);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
@@ -48,8 +46,7 @@ internal static class Program
         await RunAsync(
             "Hosted stop finalizes cleanup before honoring caller cancellation",
             HostedStopFinalizesBeforeCallerCancellation);
-        Run("Direct source does not require Advanced API settings", DirectSourceNeedsNoAdvancedApi);
-        Run("Plugin runtime bootstrap is source-explicit", PluginRuntimeBootstrapIsSourceExplicit);
+        Run("Local runtime requires an existing executable", LocalRuntimeRequiresExecutable);
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
@@ -88,9 +85,6 @@ internal static class Program
             await RunAsync(
                 "Plugin runtime starts and stops over its control pipe",
                 () => PluginRuntimeStartsAndStops(runtimePath));
-            await RunAsync(
-                "Plugin runtime can detach when configured to outlive N.I.N.A.",
-                () => PluginRuntimeDetaches(runtimePath));
             await RunAsync(
                 "Plugin runtime queries the native Direct data pipe",
                 () => PluginRuntimeUsesDirectPipe(runtimePath));
@@ -381,100 +375,15 @@ internal static class Program
         AssertFalse(noDeadline.IsExpiredAt(long.MaxValue));
     }
 
-    private static void AdvancedApiPollingIsValidated()
+    private static void LocalRuntimeRequiresExecutable()
     {
         var configuration = ChatstronomyConfigurationValidator.BuildLocalRuntime(
-            Environment.ProcessPath ?? "test-runtime.exe",
-            RuntimeSourceMode.AdvancedApi,
-            "http://127.0.0.1:1888/",
-            "7",
-            startWithNina: false,
-            stopWithNina: true);
-        var source = AssertType<AdvancedApiPollingSourceConfiguration>(configuration.Source);
-        AssertEqual("http://127.0.0.1:1888/", source.BaseUrl.AbsoluteUri);
-        AssertEqual<uint>(7, source.PollIntervalSeconds);
-
-        AssertThrows<InvalidOperationException>(() =>
-            ChatstronomyConfigurationValidator.BuildLocalRuntime(
-                Environment.ProcessPath ?? "test-runtime.exe",
-                RuntimeSourceMode.AdvancedApi,
-                "http://127.0.0.1:1888/",
-                "0",
-                startWithNina: false,
-                stopWithNina: true));
-    }
-
-    private static void AdvancedApiModeIsLegacyProfileOnly()
-    {
-        AssertFalse(RuntimeSourceModePolicy.IsDeprecated(RuntimeSourceMode.Direct));
-        AssertTrue(RuntimeSourceModePolicy.IsDeprecated(RuntimeSourceMode.AdvancedApi));
-        AssertFalse(RuntimeSourceModePolicy.CanTransition(
-            RuntimeSourceMode.Direct,
-            RuntimeSourceMode.AdvancedApi));
-        AssertTrue(RuntimeSourceModePolicy.CanTransition(
-            RuntimeSourceMode.AdvancedApi,
-            RuntimeSourceMode.Direct));
-        AssertTrue(RuntimeSourceModePolicy.CanTransition(
-            RuntimeSourceMode.AdvancedApi,
-            RuntimeSourceMode.AdvancedApi));
-
-        var status = RuntimeSourceModePolicy.AddDeprecationNotice(
-            RuntimeSourceMode.AdvancedApi,
-            "Configuration is ready.");
-        AssertTrue(status.StartsWith(
-            RuntimeSourceModePolicy.AdvancedApiDeprecationNotice,
-            StringComparison.Ordinal));
-        AssertEqual(
-            "Configuration is ready.",
-            RuntimeSourceModePolicy.AddDeprecationNotice(
-                RuntimeSourceMode.Direct,
-                "Configuration is ready."));
-    }
-
-    private static void DirectSourceNeedsNoAdvancedApi()
-    {
-        var configuration = ChatstronomyConfigurationValidator.BuildLocalRuntime(
-            Environment.ProcessPath ?? "test-runtime.exe",
-            RuntimeSourceMode.Direct,
-            advancedApiBaseUrl: string.Empty,
-            pollingIntervalSeconds: string.Empty,
-            startWithNina: true,
-            stopWithNina: false);
-
-        AssertType<NinaDirectSourceConfiguration>(configuration.Source);
-        AssertTrue(configuration.StopWithNina);
-        AssertThrows<InvalidOperationException>(() =>
-            ChatstronomyConfigurationValidator.BuildLocalRuntime(
-                Environment.ProcessPath ?? "test-runtime.exe",
-                RuntimeSourceMode.Direct,
-                advancedApiBaseUrl: string.Empty,
-                pollingIntervalSeconds: string.Empty,
-                startWithNina: false,
-                stopWithNina: false));
-    }
-
-    private static void PluginRuntimeBootstrapIsSourceExplicit()
-    {
-        var configuration = BuildRuntimeConfiguration(
             Environment.ProcessPath ?? "test-runtime.exe");
-        var json = PluginRuntimeBootstrap.Serialize(
-            configuration,
-            new LocalRuntimeIdentity(
-                Guid.Parse("363db028-9d79-4fdc-8940-1b1ff52b9e8d"),
-                Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
-                "North Rig"));
 
-        using var document = JsonDocument.Parse(json);
-        var root = document.RootElement;
-        AssertEqual(PluginRuntimeBootstrap.ProtocolVersion,
-            root.GetProperty("protocol_version").GetUInt16());
-        AssertEqual("advanced_api_polling",
-            root.GetProperty("source").GetProperty("kind").GetString());
-        AssertEqual<uint>(5,
-            root.GetProperty("source").GetProperty("poll_interval_seconds").GetUInt32());
-        AssertEqual("discord_webhook",
-            root.GetProperty("delivery").GetProperty("kind").GetString());
-        AssertFalse(json.Contains("test-runtime.exe", StringComparison.OrdinalIgnoreCase));
+        AssertTrue(File.Exists(configuration.ExecutablePath));
+        AssertThrows<InvalidOperationException>(() =>
+            ChatstronomyConfigurationValidator.BuildLocalRuntime(
+                Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
     }
 
     private static void DirectCommandsUseSemanticWireNames()
@@ -718,11 +627,7 @@ internal static class Program
             new DiscordWebhookDeliveryConfiguration(
                 new Uri("https://discord.com/api/webhooks/123/token")),
             Matrix: null,
-            new LocalRuntimeConfiguration(
-                runtimePath,
-                new NinaDirectSourceConfiguration(),
-                StartWithNina: false,
-                StopWithNina: false));
+            new LocalRuntimeConfiguration(runtimePath));
         var json = PluginRuntimeBootstrap.Serialize(
             configuration,
             new LocalRuntimeIdentity(Guid.NewGuid(), Guid.NewGuid(), "Direct Rig"),
@@ -1122,12 +1027,13 @@ internal static class Program
 
     private static async Task PluginRuntimeStartsAndStops(string runtimePath)
     {
-        var controller = new ChatstronomyRuntimeController();
+        var provider = new FakeDirectDataProvider();
+        var controller = new ChatstronomyRuntimeController(provider);
         var profileId = Guid.NewGuid();
         try
         {
             await controller.StartAsync(
-                BuildRuntimeConfiguration(runtimePath),
+                BuildDirectRuntimeConfiguration(runtimePath),
                 new LocalRuntimeIdentity(
                     Guid.NewGuid(),
                     profileId,
@@ -1154,53 +1060,7 @@ internal static class Program
             {
                 await controller.StopAsync(CancellationToken.None);
             }
-        }
-    }
-
-    private static async Task PluginRuntimeDetaches(string runtimePath)
-    {
-        var controller = new ChatstronomyRuntimeController();
-        int? processId = null;
-        try
-        {
-            await controller.StartAsync(
-                BuildRuntimeConfiguration(runtimePath, stopWithNina: false),
-                new LocalRuntimeIdentity(Guid.NewGuid(), Guid.NewGuid(), "Detach Test"),
-                CancellationToken.None);
-            processId = controller.ProcessId;
-            AssertTrue(processId.HasValue);
-
-            await controller.DetachAsync(CancellationToken.None);
-            AssertFalse(controller.IsRunning);
-
-            await Task.Delay(250);
-            using var detached = System.Diagnostics.Process.GetProcessById(processId!.Value);
-            AssertFalse(detached.HasExited);
-            detached.Kill(entireProcessTree: true);
-            await detached.WaitForExitAsync();
-        }
-        finally
-        {
-            if (controller.IsRunning)
-            {
-                await controller.StopAsync(CancellationToken.None);
-            }
-            if (processId.HasValue)
-            {
-                try
-                {
-                    using var detached = System.Diagnostics.Process.GetProcessById(processId.Value);
-                    if (!detached.HasExited)
-                    {
-                        detached.Kill(entireProcessTree: true);
-                        await detached.WaitForExitAsync();
-                    }
-                }
-                catch (ArgumentException)
-                {
-                    // Already exited and removed from the process table.
-                }
-            }
+            provider.Dispose();
         }
     }
 
@@ -1441,31 +1301,12 @@ internal static class Program
         }
     }
 
-    private static ChatstronomyConfiguration BuildRuntimeConfiguration(
-        string runtimePath,
-        bool stopWithNina = true) =>
-        new(
-            new DiscordWebhookDeliveryConfiguration(
-                new Uri("https://discord.com/api/webhooks/123/token")),
-            Matrix: null,
-            new LocalRuntimeConfiguration(
-                runtimePath,
-                new AdvancedApiPollingSourceConfiguration(
-                    new Uri("http://127.0.0.1:1888/"),
-                    PollIntervalSeconds: 5),
-                StartWithNina: true,
-                StopWithNina: stopWithNina));
-
     private static ChatstronomyConfiguration BuildDirectRuntimeConfiguration(string runtimePath) =>
         new(
             new DiscordWebhookDeliveryConfiguration(
                 new Uri("https://discord.com/api/webhooks/123/token")),
             Matrix: null,
-            new LocalRuntimeConfiguration(
-                runtimePath,
-                new NinaDirectSourceConfiguration(),
-                StartWithNina: true,
-                StopWithNina: true));
+            new LocalRuntimeConfiguration(runtimePath));
 
     private static void Run(string name, Action test)
     {

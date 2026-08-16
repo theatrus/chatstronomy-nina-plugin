@@ -16,7 +16,7 @@ internal sealed record NinaLogRecord(
 /// <summary>
 /// Tails the current N.I.N.A. process log without replacing or reconfiguring
 /// N.I.N.A.'s global Serilog pipeline. This follows the same file boundary as
-/// Advanced API, but exposes every emitted level selected by the user.
+/// the N.I.N.A. process, exposing every emitted level selected by the user.
 /// </summary>
 internal sealed class NinaLogWatcher : IDisposable
 {
@@ -55,6 +55,7 @@ internal sealed class NinaLogWatcher : IDisposable
         string? activePath = null;
         long position = 0;
         var pending = string.Empty;
+        var firstLogFile = true;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -64,7 +65,14 @@ internal sealed class NinaLogWatcher : IDisposable
                 if (!string.Equals(activePath, latestPath, StringComparison.OrdinalIgnoreCase))
                 {
                     activePath = latestPath;
-                    position = 0;
+                    // Existing lines predate plugin startup and belong to the
+                    // updater baseline. Start at EOF to avoid racing a replay
+                    // of the whole N.I.N.A. session into chat. A newly rotated
+                    // file starts at zero so no live records are missed.
+                    position = firstLogFile && latestPath is not null
+                        ? new FileInfo(latestPath).Length
+                        : 0;
+                    firstLogFile &= latestPath is null;
                     pending = string.Empty;
                 }
 

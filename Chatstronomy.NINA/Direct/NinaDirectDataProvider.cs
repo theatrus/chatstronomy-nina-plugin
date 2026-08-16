@@ -25,7 +25,7 @@ using OxyPlot;
 namespace Chatstronomy.NINA.Direct;
 
 /// <summary>
-/// Native implementation of the Advanced API-compatible read surface used by
+/// Native implementation of the Direct read surface used by
 /// Chatstronomy. It reads live device state from N.I.N.A. mediators and keeps
 /// only bounded callback history; it does not host an HTTP server.
 /// </summary>

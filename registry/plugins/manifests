@@ -28,7 +28,7 @@
     },
     "Descriptions": {
       "ShortDescription": "Bridge NINA with Discord and Matrix, supporting bot slash commands for control",
-      "LongDescription": "Routes N.I.N.A. status, events, images, and approved commands through Discord and Matrix chat. Includes a supervised on-machine runtime with Advanced API polling, plus multi-system Remote and native Direct integration paths.",
+      "LongDescription": "Routes native N.I.N.A. status, events, images, popup notifications, selected logs, and approved commands through Discord and Matrix. Supports a supervised local runtime or multi-system Chatstronomy Hub.",
       "FeaturedImageURL": "https://raw.githubusercontent.com/theatrus/chatstronomy-nina-plugin/main/assets/branding/chatstronomy-featured.png",
       "ScreenshotURL": "",
       "AltScreenshotURL": ""

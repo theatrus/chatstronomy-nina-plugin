@@ -352,86 +352,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
-    public string AdvancedApiBaseUrl
-    {
-        get => settings.AdvancedApiBaseUrl;
-        set
-        {
-            settings.AdvancedApiBaseUrl = value;
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
-    }
-
-    public bool UseDirectSource
-    {
-        get => settings.RuntimeSourceMode == RuntimeSourceMode.Direct;
-        set
-        {
-            if (value)
-            {
-                SetRuntimeSourceMode(RuntimeSourceMode.Direct);
-            }
-        }
-    }
-
-    public bool UseAdvancedApiSource
-    {
-        get => settings.RuntimeSourceMode == RuntimeSourceMode.AdvancedApi;
-        set
-        {
-            if (value)
-            {
-                SetRuntimeSourceMode(RuntimeSourceMode.AdvancedApi);
-            }
-        }
-    }
-
-    public bool CanSelectAdvancedApiSource =>
-        RuntimeSourceModePolicy.IsDeprecated(settings.RuntimeSourceMode);
-
-    public string AdvancedApiDeprecationNotice =>
-        RuntimeSourceModePolicy.AdvancedApiDeprecationNotice;
-
-    public string PollingIntervalSeconds
-    {
-        get => settings.PollingIntervalSeconds;
-        set
-        {
-            settings.PollingIntervalSeconds = value;
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
-    }
-
-    public bool StartLocalRuntime
-    {
-        get => UseDirectSource || settings.StartLocalRuntime;
-        set
-        {
-            if (UseAdvancedApiSource)
-            {
-                settings.StartLocalRuntime = value;
-            }
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
-    }
-
-    public bool StopLocalRuntimeWithNina
-    {
-        get => UseDirectSource || settings.StopLocalRuntimeWithNina;
-        set
-        {
-            if (UseAdvancedApiSource)
-            {
-                settings.StopLocalRuntimeWithNina = value;
-            }
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
-    }
-
     public bool SendImageEvents
     {
         get => settings.SendImageEvents;
@@ -560,23 +480,13 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
                     ? hostedError ?? hubClient.StatusMessage
                     : runtimeController.IsRunning
                         ? runtimeController.StatusMessage
-                        : StartLocalRuntime
-                            ? $"Configuration is ready. {runtimeController.StatusMessage}"
-                            : "Configuration is ready; Chatstronomy must already be running locally.";
-                return UsesLocalRuntime
-                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
-                        settings.RuntimeSourceMode,
-                        status)
-                    : status;
+                        : $"Configuration is ready. {runtimeController.StatusMessage}";
+                return status;
             }
             catch (Exception exception) when (IsHostedConfigurationException(exception))
             {
                 var status = HostedErrorMessage("Configuration is not ready", exception);
-                return UsesLocalRuntime
-                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
-                        settings.RuntimeSourceMode,
-                        status)
-                    : status;
+                return status;
             }
         }
     }
@@ -606,14 +516,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             await hubClient.StopAsync(CancellationToken.None);
             if (runtimeController.IsRunning)
             {
-                if (StopLocalRuntimeWithNina)
-                {
-                    await runtimeController.StopAsync(CancellationToken.None);
-                }
-                else
-                {
-                    await runtimeController.DetachAsync(CancellationToken.None);
-                }
+                await runtimeController.StopAsync(CancellationToken.None);
             }
         }
         finally
@@ -647,13 +550,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         };
 
         var localRuntime = UsesLocalRuntime
-            ? ChatstronomyConfigurationValidator.BuildLocalRuntime(
-                LocalRuntimePath,
-                settings.RuntimeSourceMode,
-                AdvancedApiBaseUrl,
-                PollingIntervalSeconds,
-                StartLocalRuntime,
-                StopLocalRuntimeWithNina)
+            ? ChatstronomyConfigurationValidator.BuildLocalRuntime(LocalRuntimePath)
             : null;
         var matrix = UsesLocalRuntime && UseLocalMatrix
             ? new MatrixDeliveryConfiguration(
@@ -707,22 +604,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             PluginVersion: pluginVersion,
             NinaVersion: ninaVersion,
             Capabilities: directDataProvider.Capabilities);
-    }
-
-    private void SetRuntimeSourceMode(RuntimeSourceMode mode)
-    {
-        if (!RuntimeSourceModePolicy.CanTransition(settings.RuntimeSourceMode, mode))
-        {
-            return;
-        }
-
-        if (settings.RuntimeSourceMode == mode)
-        {
-            return;
-        }
-
-        settings.RuntimeSourceMode = mode;
-        RefreshAllProperties();
     }
 
     private void SetDeliveryMode(ChatDeliveryMode mode)
@@ -807,10 +688,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         {
             await runtimeController.StopAsync(cancellationToken);
         }
-        if (StartLocalRuntime)
-        {
-            await StartLocalRuntimeCoreAsync(cancellationToken);
-        }
+        await StartLocalRuntimeCoreAsync(cancellationToken);
     }
 
     private async Task StartLocalRuntimeCoreAsync(CancellationToken cancellationToken)
@@ -1086,14 +964,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(HostedPairingToken),
             nameof(HostedCredentialStatus),
             nameof(LocalRuntimePath),
-            nameof(UseDirectSource),
-            nameof(UseAdvancedApiSource),
-            nameof(CanSelectAdvancedApiSource),
-            nameof(AdvancedApiDeprecationNotice),
-            nameof(AdvancedApiBaseUrl),
-            nameof(PollingIntervalSeconds),
-            nameof(StartLocalRuntime),
-            nameof(StopLocalRuntimeWithNina),
             nameof(SendImageEvents),
             nameof(SendAutofocusEvents),
             nameof(SendGuidingEvents),

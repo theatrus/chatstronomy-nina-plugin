@@ -26,26 +26,16 @@ internal static class PluginRuntimeBootstrap
             ?? throw new InvalidOperationException(
                 "A local runtime configuration is required for local process startup.");
 
-        var source = localRuntime.Source switch
+        var source = new RuntimeSourcePayload
         {
-            NinaDirectSourceConfiguration => new RuntimeSourcePayload
-            {
-                Kind = "nina_direct",
-                PipeName = string.IsNullOrWhiteSpace(directPipeName)
-                    ? throw new InvalidOperationException(
-                        "A Direct data pipe is required for native N.I.N.A. mode.")
-                    : directPipeName,
-                Capabilities = directCapabilities
-                    ?? throw new InvalidOperationException(
-                        "Direct capabilities are required for native N.I.N.A. mode."),
-            },
-            AdvancedApiPollingSourceConfiguration advancedApi => new RuntimeSourcePayload
-            {
-                Kind = "advanced_api_polling",
-                BaseUrl = advancedApi.BaseUrl.AbsoluteUri,
-                PollIntervalSeconds = advancedApi.PollIntervalSeconds,
-            },
-            _ => throw new InvalidOperationException("Unknown Chatstronomy runtime source mode."),
+            Kind = "nina_direct",
+            PipeName = string.IsNullOrWhiteSpace(directPipeName)
+                ? throw new InvalidOperationException(
+                    "A Direct data pipe is required for native N.I.N.A. mode.")
+                : directPipeName,
+            Capabilities = directCapabilities
+                ?? throw new InvalidOperationException(
+                    "Direct capabilities are required for native N.I.N.A. mode."),
         };
 
         var delivery = configuration.Delivery switch
@@ -96,7 +86,7 @@ internal static class PluginRuntimeBootstrap
             Delivery = delivery,
             Matrix = matrix,
             DataDirectory = dataDirectory,
-            ExitOnControlDisconnect = localRuntime.StopWithNina,
+            ExitOnControlDisconnect = true,
         };
 
         return JsonSerializer.Serialize(payload, JsonOptions);
@@ -136,9 +126,6 @@ internal static class PluginRuntimeBootstrap
 
         public DirectCapabilities? Capabilities { get; init; }
 
-        public string? BaseUrl { get; init; }
-
-        public uint? PollIntervalSeconds { get; init; }
     }
 
     private sealed class RuntimeDeliveryPayload
