@@ -127,3 +127,18 @@ full C# and cross-process compatibility suite, signs the plugin DLL, builds the
 checksummed plugin ZIP, and publishes its N.I.N.A. manifest. Official N.I.N.A.
 distribution can then point to that immutable GitHub release asset without
 requiring a special archive name or repository layout.
+
+The GitHub `release` environment must expose the Azure and Trusted Signing
+variables consumed by `.github/workflows/release.yml`. Its Azure app registration
+uses issuer `https://token.actions.githubusercontent.com`, audience
+`api://AzureADTokenExchange`, and this exact federated subject:
+
+```text
+repo:theatrus@23114/chatstronomy-nina-plugin@1335518579:environment:release
+```
+
+GitHub includes immutable owner and repository IDs in that subject, so the
+older name-only form does not match. A manual workflow dispatch is a non-
+publishing signing dry run; use it after changing federation or signing
+settings and require the runtime and plugin DLL signature-verification steps to
+pass before creating a tag.
