@@ -32,11 +32,15 @@ internal static class Program
             "Development repository manifest matches N.I.N.A.'s plugin contract",
             DevelopmentRepositoryManifestMatchesNinaContract);
         Run("Hosted pair and auth frames match the Rust contract", HostedHandshakeFramesMatchRust);
+        Run("Hosted client accepts unmarked legacy hub payloads", HostedLegacyHubPayloadsAreAccepted);
         Run("Hosted secrets are scoped to profile and hub origin", HostedSecretsAreOriginScoped);
         Run("Direct query deadlines match the hub clock-skew contract", DirectQueryDeadlinesMatchHub);
         await RunAsync(
             "Hosted credentials take precedence over stale pairing codes",
             HostedCredentialTakesPrecedenceOverPairingCode);
+        await RunAsync(
+            "Hosted client labels unmarked legacy hub payloads",
+            HostedLegacyHubPayloadsAreLabeled);
         await RunAsync(
             "Hosted connection and authentication attempts time out",
             HostedConnectionAttemptsTimeOut);
@@ -183,6 +187,17 @@ internal static class Program
             DirectProtocol.CurrentVersion,
             pair.RootElement.GetProperty("payload").GetProperty("hello")
                 .GetProperty("protocol_version").GetUInt16());
+        AssertEqual(
+            DirectProtocol.CurrentPayloadVersion,
+            pair.RootElement.GetProperty("payload").GetProperty("hello")
+                .GetProperty("payload_version").GetUInt16());
+
+        using var legacyHello = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(fixtures, "client-hello-legacy.json")));
+        AssertFalse(
+            legacyHello.RootElement.GetProperty("payload").TryGetProperty(
+                "payload_version",
+                out _));
     }
 
     private static void MatrixAcceptsHttpsHomeserver()
@@ -299,6 +314,10 @@ internal static class Program
             hello.NodeId,
             pair.RootElement.GetProperty("payload").GetProperty("hello")
                 .GetProperty("node_id").GetGuid());
+        AssertEqual(
+            DirectProtocol.CurrentPayloadVersion,
+            pair.RootElement.GetProperty("payload").GetProperty("hello")
+                .GetProperty("payload_version").GetUInt16());
 
         using var auth = JsonDocument.Parse(
             DirectProtocol.SerializeAuth("csrc_durable", hello));
@@ -306,6 +325,16 @@ internal static class Program
         AssertEqual(
             "csrc_durable",
             auth.RootElement.GetProperty("payload").GetProperty("credential").GetString());
+    }
+
+    private static void HostedLegacyHubPayloadsAreAccepted()
+    {
+        var message = DirectProtocol.ParseHubMessage(
+            """{"type":"agent_hello","payload":{"protocol_version":1,"connection_id":"6dd05107-5b90-4d46-99c8-eb9a17489e81","rig_id":{"node_id":"363db028-9d79-4fdc-8940-1b1ff52b9e8d","profile_id":"460a8c62-28ce-4781-92e5-ab2440982175"}}}""");
+        AssertTrue(message is HubAgentHelloMessage
+        {
+            Hello.PayloadVersion: DirectProtocol.LegacyPayloadVersion,
+        });
     }
 
     private static void HostedSecretsAreOriginScoped()
@@ -826,6 +855,34 @@ internal static class Program
         }
     }
 
+    private static async Task HostedLegacyHubPayloadsAreLabeled()
+    {
+        var hello = HostedHello();
+        var socketFactory = new ScriptedHubSocketFactory(LegacyAgentHelloJson(hello));
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var client = new ChatstronomyHubClient(provider, socketFactory);
+            var statuses = new ConcurrentQueue<string>();
+            client.StateChanged += (_, _) => statuses.Enqueue(client.StatusMessage);
+            var configuration = new HubConnectionConfiguration(
+                new Uri("https://hub.example.test/"),
+                Credential: "csrc_legacy",
+                PairingToken: null,
+                hello.ProfileId);
+
+            await AssertThrowsAsync<HubDisconnectedException>(() =>
+                client.RunSingleConnectionAsync(configuration, hello, CancellationToken.None));
+
+            AssertTrue(statuses.Any(status => status.Contains("legacy payload v1")));
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
     private static async Task HostedConnectionAttemptsTimeOut()
     {
         foreach (var hangDuringConnect in new[] { true, false })
@@ -928,12 +985,13 @@ internal static class Program
 
     private static ClientHello HostedHello() => new(
         DirectProtocol.CurrentVersion,
+        DirectProtocol.CurrentPayloadVersion,
         Guid.Parse("363db028-9d79-4fdc-8940-1b1ff52b9e8d"),
         Guid.Parse("7afcde18-b5a8-46fd-ad1f-ed54cf3bbc4e"),
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.12",
+        "0.1.0.13",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
@@ -969,9 +1027,22 @@ internal static class Program
     private static string AgentHelloJson(ClientHello hello) =>
         JsonSerializer.Serialize(new { type = "agent_hello", payload = AgentHelloPayload(hello) });
 
+    private static string LegacyAgentHelloJson(ClientHello hello) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "agent_hello",
+            payload = new
+            {
+                protocol_version = 1,
+                connection_id = Guid.Parse("6dd05107-5b90-4d46-99c8-eb9a17489e81"),
+                rig_id = new { node_id = hello.NodeId, profile_id = hello.ProfileId },
+            },
+        });
+
     private static object AgentHelloPayload(ClientHello hello) => new
     {
         protocol_version = 1,
+        payload_version = hello.PayloadVersion,
         connection_id = Guid.Parse("6dd05107-5b90-4d46-99c8-eb9a17489e81"),
         rig_id = new { node_id = hello.NodeId, profile_id = hello.ProfileId },
     };

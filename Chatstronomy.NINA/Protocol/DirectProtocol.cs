@@ -6,6 +6,8 @@ namespace Chatstronomy.NINA.Protocol;
 internal static class DirectProtocol
 {
     internal const ushort CurrentVersion = 1;
+    internal const ushort LegacyPayloadVersion = 1;
+    internal const ushort CurrentPayloadVersion = 2;
     internal const long ExpiryClockSkewGraceSeconds = 120;
     private const string PipePrefix = "chatstronomy-agent-v1";
     internal const string WebSocketPath = "/v1/direct";
@@ -133,6 +135,7 @@ internal static class DirectProtocol
         var rigId = RequiredObject(payload, "rig_id");
         return new AgentHello(
             RequiredUInt16(payload, "protocol_version"),
+            OptionalUInt16(payload, "payload_version") ?? LegacyPayloadVersion,
             RequiredGuid(payload, "connection_id"),
             RequiredGuid(rigId, "node_id"),
             RequiredGuid(rigId, "profile_id"));
@@ -215,6 +218,19 @@ internal static class DirectProtocol
     private static ushort RequiredUInt16(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || !value.TryGetUInt16(out var result))
+        {
+            throw new DirectProtocolException($"Direct message field '{name}' must be an unsigned 16-bit integer.");
+        }
+        return result;
+    }
+
+    private static ushort? OptionalUInt16(JsonElement parent, string name)
+    {
+        if (!parent.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+        if (!value.TryGetUInt16(out var result))
         {
             throw new DirectProtocolException($"Direct message field '{name}' must be an unsigned 16-bit integer.");
         }
@@ -374,6 +390,7 @@ internal sealed record HeartbeatPayload(
 
 internal sealed record AgentHello(
     ushort ProtocolVersion,
+    ushort PayloadVersion,
     Guid ConnectionId,
     Guid NodeId,
     Guid ProfileId);
@@ -426,6 +443,7 @@ internal sealed record DirectCapabilities(
 
 internal sealed record ClientHello(
     [property: JsonPropertyName("protocol_version")] ushort ProtocolVersion,
+    [property: JsonPropertyName("payload_version")] ushort PayloadVersion,
     [property: JsonPropertyName("node_id")] Guid NodeId,
     [property: JsonPropertyName("session_id")] Guid SessionId,
     [property: JsonPropertyName("process_id")] int ProcessId,
