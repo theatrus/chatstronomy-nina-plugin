@@ -52,6 +52,7 @@ internal static class Program
         Run("Direct guider payload matches the Rust chart contract", DirectGuiderPayloadMatchesRustChart);
         Run("Direct query results match Rust envelope", DirectQueryResultsMatchRustEnvelope);
         Run("Direct histories stay insertion ordered and bounded", DirectHistoriesAreBounded);
+        Run("Direct image thumbnails are sized for chat", DirectImageThumbnailsAreSizedForChat);
         await RunAsync("Direct pipe serves camera snapshots", DirectPipeServesCameraSnapshots);
         await RunAsync(
             "Hosted plugin pairs and serves native guider graphs",
@@ -680,6 +681,34 @@ internal static class Program
         AssertFalse(history.TryGetAt(2, out _));
         history.Clear();
         AssertEqual(0, history.Count);
+    }
+
+    private static void DirectImageThumbnailsAreSizedForChat()
+    {
+        const int sourceWidth = 2_048;
+        const int sourceHeight = 1_024;
+        var pixels = new byte[sourceWidth * sourceHeight];
+        var source = System.Windows.Media.Imaging.BitmapSource.Create(
+            sourceWidth,
+            sourceHeight,
+            96,
+            96,
+            System.Windows.Media.PixelFormats.Gray8,
+            null,
+            pixels,
+            sourceWidth);
+        source.Freeze();
+
+        var encoded = DirectThumbnailEncoder.Encode(source);
+        using var stream = new MemoryStream(encoded);
+        var decoder = new System.Windows.Media.Imaging.JpegBitmapDecoder(
+            stream,
+            System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
+            System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+        var thumbnail = decoder.Frames[0];
+
+        AssertEqual(DirectThumbnailEncoder.MaxWidth, thumbnail.PixelWidth);
+        AssertEqual(sourceHeight / 2, thumbnail.PixelHeight);
     }
 
     private static async Task DirectPipeServesCameraSnapshots()

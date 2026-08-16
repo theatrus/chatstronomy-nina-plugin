@@ -3,7 +3,6 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using NINA.Core.Interfaces;
 using NINA.Core.Enum;
@@ -971,22 +970,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             try
             {
-                var scale = frozen.PixelWidth > 256 ? 256d / frozen.PixelWidth : 1d;
-                BitmapSource thumbnail = frozen;
-                if (scale < 1)
-                {
-                    var transformed = new TransformedBitmap(
-                        frozen,
-                        new ScaleTransform(scale, scale));
-                    transformed.Freeze();
-                    thumbnail = transformed;
-                }
-
-                var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
-                encoder.Frames.Add(BitmapFrame.Create(thumbnail));
-                using var stream = new MemoryStream();
-                encoder.Save(stream);
-                savedImage.ThumbnailData = stream.ToArray();
+                savedImage.ThumbnailData = DirectThumbnailEncoder.Encode(frozen);
             }
             catch
             {
