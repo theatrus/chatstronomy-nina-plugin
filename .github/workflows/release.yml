@@ -165,7 +165,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: Chatstronomy for N.I.N.A. ${{ steps.version.outputs.version }}
-          prerelease: true
+          prerelease: false
           generate_release_notes: true
           files: |
             artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.zip
