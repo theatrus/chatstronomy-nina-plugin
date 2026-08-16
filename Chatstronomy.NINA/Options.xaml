@@ -222,6 +222,45 @@
                     Margin="0,16,0,0"
                     Padding="12"
                     BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
+                        <TextBlock
+                            Margin="0,3,0,10"
+                            Text="Choose which N.I.N.A. events become chat messages. Disabled events are still retained for status and target tracking."
+                            TextWrapping="Wrap" />
+                        <UniformGrid Columns="2">
+                            <CheckBox Margin="0,3" Content="Images and thumbnails" IsChecked="{Binding SendImageEvents}" />
+                            <CheckBox Margin="0,3" Content="Autofocus results" IsChecked="{Binding SendAutofocusEvents}" />
+                            <CheckBox Margin="0,3" Content="Guiding and dithering" IsChecked="{Binding SendGuidingEvents}" />
+                            <CheckBox Margin="0,3" Content="Mount, slew, and center" IsChecked="{Binding SendMountEvents}" />
+                            <CheckBox Margin="0,3" Content="Sequence, waits, and cooling" IsChecked="{Binding SendSequenceEvents}" />
+                            <CheckBox Margin="0,3" Content="Targets and Target Scheduler" IsChecked="{Binding SendTargetSchedulerEvents}" />
+                            <CheckBox Margin="0,3" Content="Filter, focuser, and rotator" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
+                            <CheckBox Margin="0,3" Content="Equipment connections" IsChecked="{Binding SendEquipmentConnectionEvents}" />
+                            <CheckBox Margin="0,3" Content="Other N.I.N.A. events" IsChecked="{Binding SendOtherEvents}" />
+                            <CheckBox Margin="0,3" Content="Popup notifications" IsChecked="{Binding SendNinaNotifications}" />
+                        </UniformGrid>
+
+                        <TextBlock Margin="0,14,0,3" FontWeight="SemiBold" Text="N.I.N.A. log lines" />
+                        <TextBlock
+                            Margin="0,0,0,7"
+                            Text="Log forwarding is opt-in because logs can be frequent and may contain equipment paths or other private details. Chatstronomy captures every level N.I.N.A. writes; select the levels to send."
+                            TextWrapping="Wrap" />
+                        <WrapPanel>
+                            <CheckBox Margin="0,3,18,3" Content="Errors" IsChecked="{Binding SendNinaLogErrors}" />
+                            <CheckBox Margin="0,3,18,3" Content="Warnings" IsChecked="{Binding SendNinaLogWarnings}" />
+                            <CheckBox Margin="0,3,18,3" Content="Information" IsChecked="{Binding SendNinaLogInformation}" />
+                            <CheckBox Margin="0,3,18,3" Content="Debug" IsChecked="{Binding SendNinaLogDebug}" />
+                            <CheckBox Margin="0,3" Content="Trace" IsChecked="{Binding SendNinaLogTrace}" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Margin="0,16,0,0"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
                     BorderThickness="1"
                     Visibility="{Binding UsesLocalRuntime, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <StackPanel>

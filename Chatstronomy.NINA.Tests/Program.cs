@@ -53,6 +53,9 @@ internal static class Program
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
+        Run("Direct event delivery categories are independently configurable", DirectEventDeliveryIsConfigurable);
+        Run("N.I.N.A. log lines preserve structured source and message data", NinaLogLinesAreStructured);
+        Run("N.I.N.A. popup colors map to chat severity", NinaPopupColorsMapToSeverity);
         Run("Direct sequence marks chat-visible operations", DirectSequenceMarksChatVisibleOperations);
         Run("Direct guider payload matches the Rust chart contract", DirectGuiderPayloadMatchesRustChart);
         Run("Direct query results match Rust envelope", DirectQueryResultsMatchRustEnvelope);
@@ -555,6 +558,48 @@ internal static class Program
         AssertEqual(-10.0, camera.GetProperty("TemperatureSetPoint").GetDouble());
         AssertTrue(camera.GetProperty("CoolerOn").GetBoolean());
         AssertFalse(camera.GetProperty("AtTargetTemp").GetBoolean());
+    }
+
+    private static void DirectEventDeliveryIsConfigurable()
+    {
+        var options = DirectEventDeliveryOptions.Default with
+        {
+            Guiding = false,
+            EquipmentConnections = false,
+            TargetScheduler = false,
+            NinaLogWarnings = true,
+        };
+
+        AssertFalse(options.ShouldSendEvent("GUIDER-DITHER"));
+        AssertFalse(options.ShouldSendEvent("GUIDER-CONNECTED"));
+        AssertFalse(options.ShouldSendEvent("TS-TARGETSTART"));
+        AssertTrue(options.ShouldSendEvent("MOUNT-CENTER"));
+        AssertTrue(options.ShouldSendLogLevel("WARNING"));
+        AssertFalse(options.ShouldSendLogLevel("INFO"));
+    }
+
+    private static void NinaLogLinesAreStructured()
+    {
+        AssertTrue(NinaLogWatcher.TryParseLine(
+            "2026-08-16 21:04:05.123|Warning|CameraVM.cs|Connect|42|Camera | response delayed",
+            out var record));
+        AssertEqual("WARNING", record.Level);
+        AssertEqual("CameraVM.cs", record.Source);
+        AssertEqual("Connect", record.Member);
+        AssertEqual(42, record.Line);
+        AssertEqual("Camera | response delayed", record.Message);
+    }
+
+    private static void NinaPopupColorsMapToSeverity()
+    {
+        AssertEqual("ERROR", NinaNotificationWatcher.Classify(
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Red)));
+        AssertEqual("WARNING", NinaNotificationWatcher.Classify(
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Gold)));
+        AssertEqual("SUCCESS", NinaNotificationWatcher.Classify(
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Lime)));
+        AssertEqual("INFORMATION", NinaNotificationWatcher.Classify(
+            new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Blue)));
     }
 
     private static void DirectSequenceMarksChatVisibleOperations()

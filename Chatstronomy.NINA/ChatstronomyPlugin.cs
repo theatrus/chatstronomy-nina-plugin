@@ -34,6 +34,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 {
     private readonly IProfileService profileService;
     private readonly ChatstronomySettings settings;
+    private readonly DirectEventDeliveryPolicy eventDelivery;
     private readonly IChatstronomyRuntimeController runtimeController;
     private readonly INinaDirectDataProvider directDataProvider;
     private readonly ChatstronomyHubClient hubClient;
@@ -62,10 +63,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
         IImageHistoryVM imageHistory,
-        IWindowServiceFactory windowFactory)
+        IWindowServiceFactory windowFactory,
+        IMessageBroker messageBroker)
     {
         this.profileService = profileService;
         settings = new ChatstronomySettings(profileService);
+        eventDelivery = new DirectEventDeliveryPolicy(settings.EventDeliveryOptions);
         directDataProvider = new NinaDirectDataProvider(
             profileService,
             telescope,
@@ -79,7 +82,9 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             applicationStatus,
             autoFocusFactory,
             imageHistory,
-            windowFactory);
+            windowFactory,
+            messageBroker,
+            eventDelivery);
         runtimeController = new ChatstronomyRuntimeController(directDataProvider);
         hubClient = new ChatstronomyHubClient(directDataProvider);
         startRuntimeCommand = new AsyncCommand(
@@ -427,6 +432,96 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
+    public bool SendImageEvents
+    {
+        get => settings.SendImageEvents;
+        set => SetEventDeliveryOption(() => settings.SendImageEvents = value);
+    }
+
+    public bool SendAutofocusEvents
+    {
+        get => settings.SendAutofocusEvents;
+        set => SetEventDeliveryOption(() => settings.SendAutofocusEvents = value);
+    }
+
+    public bool SendGuidingEvents
+    {
+        get => settings.SendGuidingEvents;
+        set => SetEventDeliveryOption(() => settings.SendGuidingEvents = value);
+    }
+
+    public bool SendMountEvents
+    {
+        get => settings.SendMountEvents;
+        set => SetEventDeliveryOption(() => settings.SendMountEvents = value);
+    }
+
+    public bool SendSequenceEvents
+    {
+        get => settings.SendSequenceEvents;
+        set => SetEventDeliveryOption(() => settings.SendSequenceEvents = value);
+    }
+
+    public bool SendTargetSchedulerEvents
+    {
+        get => settings.SendTargetSchedulerEvents;
+        set => SetEventDeliveryOption(() => settings.SendTargetSchedulerEvents = value);
+    }
+
+    public bool SendFilterFocuserRotatorEvents
+    {
+        get => settings.SendFilterFocuserRotatorEvents;
+        set => SetEventDeliveryOption(() => settings.SendFilterFocuserRotatorEvents = value);
+    }
+
+    public bool SendEquipmentConnectionEvents
+    {
+        get => settings.SendEquipmentConnectionEvents;
+        set => SetEventDeliveryOption(() => settings.SendEquipmentConnectionEvents = value);
+    }
+
+    public bool SendOtherEvents
+    {
+        get => settings.SendOtherEvents;
+        set => SetEventDeliveryOption(() => settings.SendOtherEvents = value);
+    }
+
+    public bool SendNinaNotifications
+    {
+        get => settings.SendNinaNotifications;
+        set => SetEventDeliveryOption(() => settings.SendNinaNotifications = value);
+    }
+
+    public bool SendNinaLogErrors
+    {
+        get => settings.SendNinaLogErrors;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogErrors = value);
+    }
+
+    public bool SendNinaLogWarnings
+    {
+        get => settings.SendNinaLogWarnings;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogWarnings = value);
+    }
+
+    public bool SendNinaLogInformation
+    {
+        get => settings.SendNinaLogInformation;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogInformation = value);
+    }
+
+    public bool SendNinaLogDebug
+    {
+        get => settings.SendNinaLogDebug;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogDebug = value);
+    }
+
+    public bool SendNinaLogTrace
+    {
+        get => settings.SendNinaLogTrace;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogTrace = value);
+    }
+
     public ICommand StartRuntimeCommand => startRuntimeCommand;
 
     public ICommand StopRuntimeCommand => stopRuntimeCommand;
@@ -656,6 +751,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             {
                 await runtimeController.StopAsync(CancellationToken.None);
             }
+            eventDelivery.Update(settings.EventDeliveryOptions);
             directDataProvider.Reset();
             RefreshAllProperties();
             await StartConfiguredModeCoreAsync(CancellationToken.None);
@@ -998,6 +1094,21 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(PollingIntervalSeconds),
             nameof(StartLocalRuntime),
             nameof(StopLocalRuntimeWithNina),
+            nameof(SendImageEvents),
+            nameof(SendAutofocusEvents),
+            nameof(SendGuidingEvents),
+            nameof(SendMountEvents),
+            nameof(SendSequenceEvents),
+            nameof(SendTargetSchedulerEvents),
+            nameof(SendFilterFocuserRotatorEvents),
+            nameof(SendEquipmentConnectionEvents),
+            nameof(SendOtherEvents),
+            nameof(SendNinaNotifications),
+            nameof(SendNinaLogErrors),
+            nameof(SendNinaLogWarnings),
+            nameof(SendNinaLogInformation),
+            nameof(SendNinaLogDebug),
+            nameof(SendNinaLogTrace),
             nameof(IsConfigurationValid),
             nameof(ConfigurationStatus),
         })
@@ -1015,6 +1126,15 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         connectHostedCommand.RaiseCanExecuteChanged();
         disconnectHostedCommand.RaiseCanExecuteChanged();
         forgetHostedCredentialCommand.RaiseCanExecuteChanged();
+    }
+
+    private void SetEventDeliveryOption(
+        Action update,
+        [CallerMemberName] string? propertyName = null)
+    {
+        update();
+        eventDelivery.Update(settings.EventDeliveryOptions);
+        RaisePropertyChanged(propertyName);
     }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null) =>

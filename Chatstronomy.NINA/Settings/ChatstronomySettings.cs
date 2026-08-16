@@ -207,6 +207,113 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(StopLocalRuntimeWithNina), value);
     }
 
+    public bool SendImageEvents
+    {
+        get => options.GetValueBoolean(nameof(SendImageEvents), true);
+        set => options.SetValueBoolean(nameof(SendImageEvents), value);
+    }
+
+    public bool SendAutofocusEvents
+    {
+        get => options.GetValueBoolean(nameof(SendAutofocusEvents), true);
+        set => options.SetValueBoolean(nameof(SendAutofocusEvents), value);
+    }
+
+    public bool SendGuidingEvents
+    {
+        get => options.GetValueBoolean(nameof(SendGuidingEvents), true);
+        set => options.SetValueBoolean(nameof(SendGuidingEvents), value);
+    }
+
+    public bool SendMountEvents
+    {
+        get => options.GetValueBoolean(nameof(SendMountEvents), true);
+        set => options.SetValueBoolean(nameof(SendMountEvents), value);
+    }
+
+    public bool SendSequenceEvents
+    {
+        get => options.GetValueBoolean(nameof(SendSequenceEvents), true);
+        set => options.SetValueBoolean(nameof(SendSequenceEvents), value);
+    }
+
+    public bool SendTargetSchedulerEvents
+    {
+        get => options.GetValueBoolean(nameof(SendTargetSchedulerEvents), true);
+        set => options.SetValueBoolean(nameof(SendTargetSchedulerEvents), value);
+    }
+
+    public bool SendFilterFocuserRotatorEvents
+    {
+        get => options.GetValueBoolean(nameof(SendFilterFocuserRotatorEvents), true);
+        set => options.SetValueBoolean(nameof(SendFilterFocuserRotatorEvents), value);
+    }
+
+    public bool SendEquipmentConnectionEvents
+    {
+        get => options.GetValueBoolean(nameof(SendEquipmentConnectionEvents), true);
+        set => options.SetValueBoolean(nameof(SendEquipmentConnectionEvents), value);
+    }
+
+    public bool SendOtherEvents
+    {
+        get => options.GetValueBoolean(nameof(SendOtherEvents), true);
+        set => options.SetValueBoolean(nameof(SendOtherEvents), value);
+    }
+
+    public bool SendNinaNotifications
+    {
+        get => options.GetValueBoolean(nameof(SendNinaNotifications), true);
+        set => options.SetValueBoolean(nameof(SendNinaNotifications), value);
+    }
+
+    public bool SendNinaLogErrors
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogErrors), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogErrors), value);
+    }
+
+    public bool SendNinaLogWarnings
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogWarnings), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogWarnings), value);
+    }
+
+    public bool SendNinaLogInformation
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogInformation), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogInformation), value);
+    }
+
+    public bool SendNinaLogDebug
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogDebug), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogDebug), value);
+    }
+
+    public bool SendNinaLogTrace
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogTrace), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogTrace), value);
+    }
+
+    internal DirectEventDeliveryOptions EventDeliveryOptions => new(
+        Images: SendImageEvents,
+        Autofocus: SendAutofocusEvents,
+        Guiding: SendGuidingEvents,
+        Mount: SendMountEvents,
+        Sequence: SendSequenceEvents,
+        TargetScheduler: SendTargetSchedulerEvents,
+        FilterFocuserRotator: SendFilterFocuserRotatorEvents,
+        EquipmentConnections: SendEquipmentConnectionEvents,
+        OtherEvents: SendOtherEvents,
+        NinaNotifications: SendNinaNotifications,
+        NinaLogErrors: SendNinaLogErrors,
+        NinaLogWarnings: SendNinaLogWarnings,
+        NinaLogInformation: SendNinaLogInformation,
+        NinaLogDebug: SendNinaLogDebug,
+        NinaLogTrace: SendNinaLogTrace);
+
     private string CredentialTarget(string kind) =>
         CredentialTarget(profileService.ActiveProfile.Id, kind);
 

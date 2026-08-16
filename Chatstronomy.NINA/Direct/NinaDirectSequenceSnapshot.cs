@@ -9,6 +9,7 @@ using NINA.Sequencer.Container;
 using NINA.Sequencer.Interfaces.Mediator;
 using NINA.Sequencer.SequenceItem;
 using NINA.Sequencer.Trigger;
+using Chatstronomy.NINA.Settings;
 
 namespace Chatstronomy.NINA.Direct;
 
@@ -53,7 +54,9 @@ internal static class NinaDirectSequenceSnapshot
             ["CompletedIterations"] = "CompletedIterations",
         };
 
-    internal static IReadOnlyList<Dictionary<string, object?>> Build(ISequenceMediator sequence)
+    internal static IReadOnlyList<Dictionary<string, object?>> Build(
+        ISequenceMediator sequence,
+        DirectEventDeliveryOptions? delivery = null)
     {
         if (!sequence.Initialized)
         {
@@ -70,7 +73,8 @@ internal static class NinaDirectSequenceSnapshot
                     : Array.Empty<Dictionary<string, object?>>(),
             },
         };
-        result.AddRange(root.GetItemsSnapshot().Select(BuildItem));
+        var options = delivery ?? DirectEventDeliveryOptions.Default;
+        result.AddRange(root.GetItemsSnapshot().Select(item => BuildItem(item, options)));
         return result;
     }
 
@@ -88,7 +92,9 @@ internal static class NinaDirectSequenceSnapshot
             ?? throw new InvalidOperationException("The loaded N.I.N.A. sequence has no root container.");
     }
 
-    private static Dictionary<string, object?> BuildItem(ISequenceItem item)
+    private static Dictionary<string, object?> BuildItem(
+        ISequenceItem item,
+        DirectEventDeliveryOptions delivery)
     {
         var itemType = item.GetType().Name;
         var expandContainer = item is ISequenceContainer
@@ -98,11 +104,20 @@ internal static class NinaDirectSequenceSnapshot
         if (item is IDeepSkyObjectContainer)
         {
             result["IsTargetContainer"] = true;
+            result["ChatEnabled"] = delivery.TargetScheduler;
+            var target = OptionalProperty(item, "Target");
+            if (OptionalProperty(target, "TargetName") is string targetName
+                && !string.IsNullOrWhiteSpace(targetName))
+            {
+                result["TargetName"] = targetName;
+            }
         }
 
         if (expandContainer && item is ISequenceContainer container)
         {
-            result["Items"] = container.GetItemsSnapshot().Select(BuildItem).ToArray();
+            result["Items"] = container.GetItemsSnapshot()
+                .Select(child => BuildItem(child, delivery))
+                .ToArray();
             result["Conditions"] = container is IConditionable conditionable
                 ? conditionable.GetConditionsSnapshot().Select(BuildCondition).ToArray()
                 : Array.Empty<Dictionary<string, object?>>();
@@ -112,7 +127,24 @@ internal static class NinaDirectSequenceSnapshot
         }
 
         AddItemDetails(item, result);
+        AddDeliveryDetails(item, result, delivery);
         return result;
+    }
+
+    private static void AddDeliveryDetails(
+        ISequenceItem item,
+        IDictionary<string, object?> result,
+        DirectEventDeliveryOptions delivery)
+    {
+        var typeName = item.GetType().Name;
+        if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz" or "Center" or "CenterAndRotate")
+        {
+            result["ChatEnabled"] = delivery.Mount;
+        }
+        else if (typeName is "CoolCamera" or "WarmCamera" or "WaitForTime" or "WaitForTimeSpan")
+        {
+            result["ChatEnabled"] = delivery.Sequence;
+        }
     }
 
     private static Dictionary<string, object?> BuildTrigger(ISequenceTrigger trigger)
