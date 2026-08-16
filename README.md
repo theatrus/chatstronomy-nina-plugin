@@ -25,8 +25,8 @@ License: Apache-2.0
 - Connects outbound to `https://hub.chatstronomy.com/` so one hosted bot can
   serve multiple N.I.N.A. installations on different computers without inbound
   observatory ports or chat credentials on each rig.
-- Retains Advanced API polling as a compatibility source for existing
-  Chatstronomy installations.
+- Retains deprecated Advanced API polling only for plugin profiles that already
+  use it, so they can migrate to native Direct without an abrupt break.
 - Renders guider and autofocus graphs with the same native renderer in local
   and hosted modes and exposes only an allowlisted set of control commands.
 
@@ -37,7 +37,7 @@ Source and chat delivery are independent choices:
 | N.I.N.A. data source | Local chat delivery | Remote chat delivery |
 |---|---|---|
 | Native Direct integration | Bundled runtime with a Discord webhook, user-owned Discord app, Matrix account, or Discord plus Matrix | Outbound authenticated WSS connection to `https://hub.chatstronomy.com/` |
-| Advanced API polling | Bundled runtime polls the separately installed Advanced API plugin and owns local chat credentials | Advanced API can continue through a separately managed Chatstronomy relay |
+| Advanced API polling (deprecated) | Existing plugin profiles may continue polling the separately installed Advanced API plugin until switched to Direct; new profiles cannot select this source | Separately managed legacy Chatstronomy relays remain compatible |
 
 Local Direct mode starts the bundled runtime with N.I.N.A. and sends data over a
 current-user-only named pipe. Remote Direct mode does not open an inbound port;
@@ -104,8 +104,11 @@ instances on different computers:
 The plugin stores the resulting connection credential in Windows Credential
 Manager and reconnects outbound over authenticated WSS. No Discord token,
 Matrix password, Advanced API endpoint, or inbound observatory port is needed
-on the N.I.N.A. computer. Local Discord webhook, user-owned Discord bot, Matrix,
-and Advanced API modes remain available for self-hosted operation.
+on the N.I.N.A. computer. Local Discord webhook, user-owned Discord bot, and
+Matrix modes remain available for self-hosted operation. Deprecated Advanced API
+polling remains operational only for plugin profiles that already selected it;
+after switching one of those profiles to Direct, it cannot be re-enabled in the
+plugin UI.
 
 ### Manual/source fallback
 
@@ -118,7 +121,7 @@ inner plugin ZIP, a manual install uses:
 $destination = Join-Path $env:LOCALAPPDATA 'NINA\Plugins\3.0.0\Chatstronomy'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Expand-Archive `
-  -LiteralPath .\Chatstronomy.NINA.0.1.0.13.zip `
+  -LiteralPath .\Chatstronomy.NINA.0.1.0.14.zip `
   -DestinationPath $destination `
   -Force
 ```
@@ -129,7 +132,7 @@ To build the same package from source instead of downloading the CI artifact:
 git clone https://github.com/theatrus/chatstronomy-nina-plugin.git
 cd chatstronomy-nina-plugin
 ./fetch-runtime.ps1
-./build-package.ps1 -Version 0.1.0.13
+./build-package.ps1 -Version 0.1.0.14
 ```
 
 The resulting ZIP is under `artifacts/nina-plugin/`. `fetch-runtime.ps1`
@@ -188,7 +191,7 @@ After the runtime lock is complete:
 
 ```powershell
 ./fetch-runtime.ps1
-./build-package.ps1 -Version 0.1.0.13
+./build-package.ps1 -Version 0.1.0.14
 ```
 
 The ZIP has the N.I.N.A. `ARCHIVE` layout:
@@ -204,7 +207,7 @@ runtime. There is no implicit Cargo fallback.
 
 ## Distribution
 
-Dedicated plugin tags use four numeric parts, for example `v0.1.0.13`. The
+Dedicated plugin tags use four numeric parts, for example `v0.1.0.14`. The
 release workflow downloads only the locked, backend-signed artifacts, runs the
 full C# and cross-process compatibility suite, signs the plugin DLL, builds the
 checksummed plugin ZIP, and publishes its N.I.N.A. manifest. Official N.I.N.A.

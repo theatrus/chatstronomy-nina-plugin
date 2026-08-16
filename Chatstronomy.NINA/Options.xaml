@@ -11,7 +11,7 @@
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Chat delivery" />
                 <TextBlock
                     Margin="0,4,0,14"
-                    Text="Choose who owns the chat connection. This is independent of whether Chatstronomy reads N.I.N.A. through Direct or Advanced API mode."
+                    Text="Choose who owns the chat connection. Native Direct is the supported N.I.N.A. data source; existing legacy profiles may continue using deprecated Advanced API polling."
                     TextWrapping="Wrap" />
 
                 <Border Padding="12" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1">
@@ -234,7 +234,7 @@
                         <RadioButton
                             Margin="0,6,0,0"
                             GroupName="ChatstronomySource"
-                            Content="Direct â€” use this plugin (recommended)"
+                            Content="Direct — use this plugin (recommended)"
                             IsChecked="{Binding UseDirectSource}" />
                         <TextBlock
                             Margin="22,2,0,6"
@@ -242,11 +242,12 @@
                             TextWrapping="Wrap" />
                         <RadioButton
                             GroupName="ChatstronomySource"
-                            Content="Advanced API â€” compatibility mode"
+                            Content="Advanced API — deprecated (existing profiles only)"
+                            IsEnabled="{Binding CanSelectAdvancedApiSource}"
                             IsChecked="{Binding UseAdvancedApiSource}" />
                         <TextBlock
                             Margin="22,2,0,12"
-                            Text="Polls an existing Advanced API installation and preserves the legacy integration."
+                            Text="{Binding AdvancedApiDeprecationNotice}"
                             TextWrapping="Wrap" />
                         <Grid Margin="0,0,0,5">
                             <Grid.ColumnDefinitions>

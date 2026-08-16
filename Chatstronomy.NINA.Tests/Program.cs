@@ -24,6 +24,7 @@ internal static class Program
         Run("Discord accepts complete webhook URLs", DiscordAcceptsCompleteWebhookUrls);
         Run("Discord rejects incomplete webhook URLs", DiscordRejectsIncompleteWebhookUrls);
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
+        Run("Advanced API mode is legacy-profile only", AdvancedApiModeIsLegacyProfileOnly);
         Run("Advanced API polling settings are validated", AdvancedApiPollingIsValidated);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
@@ -398,6 +399,33 @@ internal static class Program
                 "0",
                 startWithNina: false,
                 stopWithNina: true));
+    }
+
+    private static void AdvancedApiModeIsLegacyProfileOnly()
+    {
+        AssertFalse(RuntimeSourceModePolicy.IsDeprecated(RuntimeSourceMode.Direct));
+        AssertTrue(RuntimeSourceModePolicy.IsDeprecated(RuntimeSourceMode.AdvancedApi));
+        AssertFalse(RuntimeSourceModePolicy.CanTransition(
+            RuntimeSourceMode.Direct,
+            RuntimeSourceMode.AdvancedApi));
+        AssertTrue(RuntimeSourceModePolicy.CanTransition(
+            RuntimeSourceMode.AdvancedApi,
+            RuntimeSourceMode.Direct));
+        AssertTrue(RuntimeSourceModePolicy.CanTransition(
+            RuntimeSourceMode.AdvancedApi,
+            RuntimeSourceMode.AdvancedApi));
+
+        var status = RuntimeSourceModePolicy.AddDeprecationNotice(
+            RuntimeSourceMode.AdvancedApi,
+            "Configuration is ready.");
+        AssertTrue(status.StartsWith(
+            RuntimeSourceModePolicy.AdvancedApiDeprecationNotice,
+            StringComparison.Ordinal));
+        AssertEqual(
+            "Configuration is ready.",
+            RuntimeSourceModePolicy.AddDeprecationNotice(
+                RuntimeSourceMode.Direct,
+                "Configuration is ready."));
     }
 
     private static void DirectSourceNeedsNoAdvancedApi()
@@ -991,7 +1019,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.13",
+        "0.1.0.14",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
