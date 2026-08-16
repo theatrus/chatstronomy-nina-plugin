@@ -39,9 +39,9 @@ jobs:
         shell: pwsh
         run: |
           $arguments = @{
-            Version = '0.1.0.17'
+            Version = '0.1.0.18'
             SkipRuntime = $true
-            InstallerUrl = 'https://example.invalid/Chatstronomy.NINA.0.1.0.17.zip'
+            InstallerUrl = 'https://example.invalid/Chatstronomy.NINA.0.1.0.18.zip'
             FeaturedImageUrl = 'https://example.invalid/chatstronomy-featured.png'
           }
           ./build-package.ps1 @arguments -StageOnly
@@ -103,12 +103,12 @@ jobs:
           $env:CHATSTRONOMY_HUB_EXE = $runtime.HubProbe
           $env:CHATSTRONOMY_CONTRACTS_DIR = $runtime.Contracts
           dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
-          ./build-package.ps1 -Version 0.1.0.17 -RuntimePath $runtime.Runtime
+          ./build-package.ps1 -Version 0.1.0.18 -RuntimePath $runtime.Runtime
 
       - name: Upload package smoke-test
         uses: actions/upload-artifact@v7
         with:
           name: chatstronomy-nina-package-smoke-test
           path: |
-            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.17.zip
-            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.17.manifest.json
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.18.zip
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.18.manifest.json
