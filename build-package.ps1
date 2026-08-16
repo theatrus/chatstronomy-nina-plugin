@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.13',
+    [string] $Version = '0.1.0.14',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',
@@ -164,7 +164,7 @@ $manifest = [ordered]@{
     }
     Descriptions = [ordered]@{
         ShortDescription = 'Bridge NINA with Discord and Matrix, supporting bot slash commands for control'
-        LongDescription = 'Routes N.I.N.A. status, events, images, and approved commands through Discord and Matrix chat. Includes a supervised on-machine runtime with Advanced API polling, plus multi-system Remote and native Direct integration paths.'
+        LongDescription = 'Routes N.I.N.A. status, events, images, and approved commands through Discord and Matrix chat. Native Direct supports supervised local and multi-system hosted operation; deprecated Advanced API polling remains available only to existing plugin profiles.'
         FeaturedImageURL = $FeaturedImageUrl
         ScreenshotURL = ''
         AltScreenshotURL = ''

@@ -382,6 +382,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
+    public bool CanSelectAdvancedApiSource =>
+        RuntimeSourceModePolicy.IsDeprecated(settings.RuntimeSourceMode);
+
+    public string AdvancedApiDeprecationNotice =>
+        RuntimeSourceModePolicy.AdvancedApiDeprecationNotice;
+
     public string PollingIntervalSeconds
     {
         get => settings.PollingIntervalSeconds;
@@ -455,17 +461,27 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             {
                 _ = BuildConfiguration();
                 var hostedError = Volatile.Read(ref hostedOperationError);
-                return UseHostedService
+                var status = UseHostedService
                     ? hostedError ?? hubClient.StatusMessage
                     : runtimeController.IsRunning
                         ? runtimeController.StatusMessage
                         : StartLocalRuntime
                             ? $"Configuration is ready. {runtimeController.StatusMessage}"
                             : "Configuration is ready; Chatstronomy must already be running locally.";
+                return UsesLocalRuntime
+                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
+                        settings.RuntimeSourceMode,
+                        status)
+                    : status;
             }
             catch (Exception exception) when (IsHostedConfigurationException(exception))
             {
-                return HostedErrorMessage("Configuration is not ready", exception);
+                var status = HostedErrorMessage("Configuration is not ready", exception);
+                return UsesLocalRuntime
+                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
+                        settings.RuntimeSourceMode,
+                        status)
+                    : status;
             }
         }
     }
@@ -600,6 +616,11 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
     private void SetRuntimeSourceMode(RuntimeSourceMode mode)
     {
+        if (!RuntimeSourceModePolicy.CanTransition(settings.RuntimeSourceMode, mode))
+        {
+            return;
+        }
+
         if (settings.RuntimeSourceMode == mode)
         {
             return;
@@ -971,6 +992,8 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(LocalRuntimePath),
             nameof(UseDirectSource),
             nameof(UseAdvancedApiSource),
+            nameof(CanSelectAdvancedApiSource),
+            nameof(AdvancedApiDeprecationNotice),
             nameof(AdvancedApiBaseUrl),
             nameof(PollingIntervalSeconds),
             nameof(StartLocalRuntime),
