@@ -48,7 +48,7 @@ internal static class Program
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
-        Run("Direct sequence marks long-running operations", DirectSequenceMarksLongRunningOperations);
+        Run("Direct sequence marks chat-visible operations", DirectSequenceMarksChatVisibleOperations);
         Run("Direct guider payload matches the Rust chart contract", DirectGuiderPayloadMatchesRustChart);
         Run("Direct query results match Rust envelope", DirectQueryResultsMatchRustEnvelope);
         Run("Direct histories stay insertion ordered and bounded", DirectHistoriesAreBounded);
@@ -499,7 +499,7 @@ internal static class Program
         AssertFalse(camera.GetProperty("AtTargetTemp").GetBoolean());
     }
 
-    private static void DirectSequenceMarksLongRunningOperations()
+    private static void DirectSequenceMarksChatVisibleOperations()
     {
         var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
             "AddItemDetails",
@@ -523,6 +523,49 @@ internal static class Program
         AssertEqual("camera_cooling", coolingDetails["OperationKind"] as string);
         AssertEqual(-10.0, Convert.ToDouble(coolingDetails["Temperature"]));
         AssertEqual(15.0, Convert.ToDouble(coolingDetails["MinCoolingTime"]));
+
+        var slew = new global::NINA.Sequencer.SequenceItem.Telescope.SlewScopeToRaDec(null!, null!);
+        var slewDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { slew, slewDetails });
+        AssertEqual("mount_slew", slewDetails["OperationKind"] as string);
+
+        var center = new global::NINA.Sequencer.SequenceItem.Platesolving.Center(
+            null!, null!, null!, null!, null!, null!, null!, null!, null!);
+        center.PlateSolveStatusVM.PlateSolveResult = new global::NINA.PlateSolving.PlateSolveResult(
+            new DateTime(2026, 8, 15, 23, 45, 0, DateTimeKind.Utc))
+        {
+            Success = true,
+            Coordinates = new global::NINA.Astrometry.Coordinates(
+                12.5,
+                42.25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours),
+            PositionAngle = 91.5,
+            Pixscale = 1.25,
+            Radius = 1.75,
+            Separation = new global::NINA.Astrometry.Separation
+            {
+                Distance = global::NINA.Astrometry.Angle.ByDegree(1d / 60d),
+            },
+        };
+        center.PlateSolveStatusVM.Thumbnail = System.Windows.Media.Imaging.BitmapSource.Create(
+            1,
+            1,
+            96,
+            96,
+            System.Windows.Media.PixelFormats.Bgra32,
+            null,
+            new byte[] { 0, 0, 0, 255 },
+            4);
+        var centerDetails = new Dictionary<string, object?>();
+        method.Invoke(null, new object[] { center, centerDetails });
+        AssertEqual("mount_center", centerDetails["OperationKind"] as string);
+        var output = (Dictionary<string, object?>)centerDetails["PlateSolveOutput"]!;
+        AssertEqual(true, Convert.ToBoolean(output["Success"]));
+        AssertEqual(91.5, Convert.ToDouble(output["PositionAngle"]));
+        AssertEqual(60.0, Convert.ToDouble(output["SeparationArcseconds"]));
+        AssertTrue(!string.IsNullOrWhiteSpace(output["ThumbnailBase64"] as string));
+        AssertEqual("image/jpeg", output["ThumbnailMediaType"] as string);
     }
 
     private static void DirectGuiderPayloadMatchesRustChart()

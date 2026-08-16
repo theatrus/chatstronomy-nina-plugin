@@ -16,6 +16,9 @@ License: Apache-2.0
 
 - Reads status, sequence, equipment, image, guider, and autofocus data directly
   from N.I.N.A.; the Advanced API plugin is optional rather than required.
+- Reports camera cooling, timed waits, mount slews, and centering lifecycle
+  updates. Center attempts include plate-solve output and a compact thumbnail
+  for Discord or Matrix in local and hosted Direct modes.
 - Supervises an on-machine Chatstronomy runtime for Discord webhooks, a
   user-owned Discord application with slash commands, Matrix over an HTTPS
   homeserver, or simultaneous Discord and Matrix delivery.

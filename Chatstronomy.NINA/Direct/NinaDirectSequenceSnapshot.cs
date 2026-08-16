@@ -1,4 +1,8 @@
 using System.Reflection;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using NINA.Sequencer;
 using NINA.Sequencer.Conditions;
 using NINA.Sequencer.Container;
@@ -16,6 +20,11 @@ namespace Chatstronomy.NINA.Direct;
 /// </summary>
 internal static class NinaDirectSequenceSnapshot
 {
+    private static readonly ConditionalWeakTable<BitmapSource, EncodedThumbnail>
+        EncodedThumbnails = new();
+
+    private sealed record EncodedThumbnail(byte[] Data);
+
     private static readonly IReadOnlyDictionary<string, string> DetailNames =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -175,6 +184,15 @@ internal static class NinaDirectSequenceSnapshot
             result["OperationKind"] = "camera_cooling";
             AddIfPresent(item, result, "Duration", "MinCoolingTime");
         }
+        else if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz")
+        {
+            result["OperationKind"] = "mount_slew";
+        }
+        else if (typeName is "Center" or "CenterAndRotate")
+        {
+            result["OperationKind"] = "mount_center";
+            AddPlateSolveOutput(item, result);
+        }
         else if (typeName == "WarmCamera")
         {
             AddIfPresent(item, result, "Duration", "MinWarmingTime");
@@ -242,6 +260,108 @@ internal static class NinaDirectSequenceSnapshot
         }
     }
 
+    private static void AddPlateSolveOutput(
+        object item,
+        IDictionary<string, object?> result)
+    {
+        var status = OptionalProperty(item, "PlateSolveStatusVM");
+        var solve = OptionalProperty(status, "PlateSolveResult");
+        var thumbnail = OptionalProperty(status, "Thumbnail") as BitmapSource;
+        if (solve is null && thumbnail is null)
+        {
+            return;
+        }
+
+        var output = new Dictionary<string, object?>();
+        if (solve is not null)
+        {
+            AddIfPresent(solve, output, "SolveTime", "SolveTime");
+            AddIfPresent(solve, output, "Success", "Success");
+            AddFiniteIfPresent(solve, output, "PositionAngle", "PositionAngle");
+            AddFiniteIfPresent(solve, output, "Pixscale", "PixelScale");
+            AddFiniteIfPresent(solve, output, "Radius", "RadiusDegrees");
+            AddIfPresent(solve, output, "Flipped", "Flipped");
+
+            var coordinates = OptionalProperty(solve, "Coordinates");
+            if (coordinates is not null)
+            {
+                output["Coordinates"] = CompactCoordinates(coordinates);
+            }
+
+            var separation = OptionalProperty(solve, "Separation");
+            var distance = OptionalProperty(separation, "Distance");
+            AddFiniteIfPresent(distance, output, "ArcSeconds", "SeparationArcseconds");
+            AddIfPresent(solve, output, "RaErrorString", "RaError");
+            AddIfPresent(solve, output, "DecErrorString", "DecError");
+            AddFiniteIfPresent(solve, output, "RaPixError", "RaPixelError");
+            AddFiniteIfPresent(solve, output, "DecPixError", "DecPixelError");
+        }
+
+        var encoded = EncodeThumbnail(thumbnail);
+        if (encoded is not null)
+        {
+            output["ThumbnailBase64"] = Convert.ToBase64String(encoded);
+            output["ThumbnailMediaType"] = "image/jpeg";
+        }
+
+        result["PlateSolveOutput"] = output;
+    }
+
+    private static Dictionary<string, object?> CompactCoordinates(object coordinates)
+    {
+        var result = new Dictionary<string, object?>();
+        AddFiniteIfPresent(coordinates, result, "RA", "RA");
+        AddFiniteIfPresent(coordinates, result, "RADegrees", "RADegrees");
+        AddIfPresent(coordinates, result, "RAString", "RAString");
+        AddFiniteIfPresent(coordinates, result, "Dec", "Dec");
+        AddIfPresent(coordinates, result, "DecString", "DecString");
+        AddIfPresent(coordinates, result, "Epoch", "Epoch");
+        return result;
+    }
+
+    private static byte[]? EncodeThumbnail(BitmapSource? source)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+        if (EncodedThumbnails.TryGetValue(source, out var cached))
+        {
+            return cached.Data;
+        }
+
+        try
+        {
+            var scale = source.PixelWidth > 256 ? 256d / source.PixelWidth : 1d;
+            BitmapSource thumbnail = source;
+            if (scale < 1)
+            {
+                thumbnail = new TransformedBitmap(source, new ScaleTransform(scale, scale));
+            }
+
+            var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
+            encoder.Frames.Add(BitmapFrame.Create(thumbnail));
+            using var stream = new MemoryStream();
+            encoder.Save(stream);
+            var encoded = stream.ToArray();
+            try
+            {
+                EncodedThumbnails.Add(source, new EncodedThumbnail(encoded));
+            }
+            catch (ArgumentException)
+            {
+                // Another query cached this same WPF image concurrently.
+            }
+            return encoded;
+        }
+        catch
+        {
+            // Solve metadata remains useful if a third-party image source
+            // cannot be encoded by WPF.
+            return null;
+        }
+    }
+
     private static void AddAggregateExposureDetails(
         object item,
         IDictionary<string, object?> result,
@@ -291,6 +411,25 @@ internal static class NinaDirectSequenceSnapshot
         if (value is not null)
         {
             destination[wireName] = value.GetType().IsEnum ? value.ToString() : value;
+        }
+    }
+
+    private static void AddFiniteIfPresent(
+        object? source,
+        IDictionary<string, object?> destination,
+        string propertyName,
+        string wireName)
+    {
+        var value = OptionalProperty(source, propertyName);
+        if (value is not null
+            && double.TryParse(
+                Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var number)
+            && double.IsFinite(number))
+        {
+            destination[wireName] = number;
         }
     }
 
