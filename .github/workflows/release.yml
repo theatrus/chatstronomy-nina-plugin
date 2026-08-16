@@ -121,7 +121,7 @@ jobs:
       # Azure is short-lived and the compatibility suite above can run longer.
       - name: Authenticate to Azure
         if: env.SIGN_WINDOWS == 'true'
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
