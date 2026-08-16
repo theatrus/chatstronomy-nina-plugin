@@ -163,22 +163,6 @@ runtime/
 For a development build, `-RuntimePath` may point to a locally validated lean
 runtime. There is no implicit Cargo fallback.
 
-## Local N.I.N.A. registry
-
-Publish a test build alongside existing registry entries (including PSF Guard)
-with:
-
-```powershell
-./tools/Publish-LocalRegistry.ps1 `
-  -RegistryRoot ../spacecat/artifacts/local-registry `
-  -RuntimePath ../spacecat/artifacts/runtime-contract-test/chatstronomy-plugin-runtime-windows-x64.exe `
-  -Version 0.1.0.10
-```
-
-The publisher replaces only the Chatstronomy manifest entry, preserves all
-other plugins, copies versioned package/image assets, and atomically swaps the
-manifest endpoint.
-
 ## Distribution
 
 Dedicated plugin tags use four numeric parts, for example `v0.1.0.10`. The
