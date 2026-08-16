@@ -1,4 +1,5 @@
 using Chatstronomy.NINA.Protocol;
+using Chatstronomy.NINA.Settings;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,6 +14,7 @@ using NINA.Equipment.Equipment.MyFocuser;
 using NINA.Equipment.Interfaces;
 using NINA.Equipment.Interfaces.Mediator;
 using NINA.Profile.Interfaces;
+using NINA.Plugin.Interfaces;
 using NINA.Sequencer.Interfaces.Mediator;
 using NINA.WPF.Base.Interfaces;
 using NINA.WPF.Base.Interfaces.Mediator;
@@ -23,15 +25,21 @@ using OxyPlot;
 namespace Chatstronomy.NINA.Direct;
 
 /// <summary>
-/// Native implementation of the Advanced API-compatible read surface used by
+/// Native implementation of the Direct read surface used by
 /// Chatstronomy. It reads live device state from N.I.N.A. mediators and keeps
 /// only bounded callback history; it does not host an HTTP server.
 /// </summary>
-internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuserConsumer
+internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuserConsumer, ISubscriber
 {
-    private const int EventHistoryCapacity = 2_000;
+    private const int EventHistoryCapacity = 10_000;
     private const int ImageHistoryCapacity = 500;
     private const int GuideHistoryCapacity = 10_000;
+    private static readonly string[] TargetSchedulerTopics =
+    [
+        "TargetScheduler-WaitStart",
+        "TargetScheduler-NewTargetStart",
+        "TargetScheduler-TargetStart",
+    ];
 
     private readonly IProfileService profileService;
     private readonly ITelescopeMediator telescope;
@@ -46,6 +54,10 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private readonly IAutoFocusVMFactory autoFocusFactory;
     private readonly IImageHistoryVM imageHistory;
     private readonly IWindowServiceFactory windowFactory;
+    private readonly IMessageBroker messageBroker;
+    private readonly DirectEventDeliveryPolicy eventDelivery;
+    private readonly NinaLogWatcher logWatcher;
+    private readonly NinaNotificationWatcher notificationWatcher;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
     private readonly BoundedHistory<DirectSavedImage> images =
@@ -77,7 +89,9 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
         IImageHistoryVM imageHistory,
-        IWindowServiceFactory windowFactory)
+        IWindowServiceFactory windowFactory,
+        IMessageBroker messageBroker,
+        DirectEventDeliveryPolicy eventDelivery)
     {
         this.profileService = profileService;
         this.telescope = telescope;
@@ -92,6 +106,10 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         this.autoFocusFactory = autoFocusFactory;
         this.imageHistory = imageHistory;
         this.windowFactory = windowFactory;
+        this.messageBroker = messageBroker;
+        this.eventDelivery = eventDelivery;
+        logWatcher = new NinaLogWatcher(RecordLog);
+        notificationWatcher = new NinaNotificationWatcher(RecordNotification);
     }
 
     public DirectCapabilities Capabilities { get; } = new(
@@ -145,6 +163,12 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         focuser.RegisterConsumer(this);
 
         imageSave.ImageSaved += ImageSaved;
+        foreach (var topic in TargetSchedulerTopics)
+        {
+            messageBroker.Subscribe(topic, this);
+        }
+        logWatcher.Start();
+        _ = notificationWatcher.Start();
         started = true;
         sequenceSubscriptionStop = new CancellationTokenSource();
         _ = SubscribeToSequenceWhenReadyAsync(sequenceSubscriptionStop.Token);
@@ -190,6 +214,13 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         focuser.Disconnected -= FocuserDisconnected;
         focuser.RemoveConsumer(this);
 
+        foreach (var topic in TargetSchedulerTopics)
+        {
+            messageBroker.Unsubscribe(topic, this);
+        }
+        logWatcher.Stop();
+        notificationWatcher.Stop();
+
         started = false;
         var subscriptionStop = sequenceSubscriptionStop;
         sequenceSubscriptionStop = null;
@@ -234,7 +265,9 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
                     images.Snapshot().Select(image => image.Metadata).ToArray()),
             DirectQueryKind.Sequence =>
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
-                    RunOnUiThread(() => NinaDirectSequenceSnapshot.Build(sequence))),
+                    RunOnUiThread(() => NinaDirectSequenceSnapshot.Build(
+                        sequence,
+                        eventDelivery.Current))),
             DirectQueryKind.Thumbnail => GetThumbnail(query.Index),
             DirectQueryKind.LastAutofocus =>
                 DirectApiEnvelope<JsonElement>.Ok(
@@ -945,7 +978,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             Median: FiniteOrZero(statistics?.Median ?? 0),
             Stars: starAnalysis?.DetectedStars ?? 0,
             HFR: FiniteOrZero(starAnalysis?.HFR ?? 0),
-            IsBayered: args.IsBayered);
+            IsBayered: args.IsBayered,
+            ChatEnabled: eventDelivery.Current.Images);
         var savedImage = new DirectSavedImage(image);
         images.Add(savedImage);
         AddEvent("IMAGE-SAVE");
@@ -996,12 +1030,103 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             Dither: "NO"));
     }
 
-    private void AddEvent(string eventName, params (string Name, object? Value)[] details)
+    public Task OnMessageReceived(IMessage message)
+    {
+        var eventName = message.Topic switch
+        {
+            "TargetScheduler-WaitStart" => "TS-WAITSTART",
+            "TargetScheduler-NewTargetStart" => "TS-NEWTARGETSTART",
+            "TargetScheduler-TargetStart" => "TS-TARGETSTART",
+            _ => null,
+        };
+        if (eventName is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (eventName == "TS-WAITSTART")
+        {
+            AddEventAt(
+                message.SentAt,
+                eventName,
+                ("WaitEndTime", message.Content));
+            return Task.CompletedTask;
+        }
+
+        message.CustomHeaders.TryGetValue("ProjectName", out var projectName);
+        message.CustomHeaders.TryGetValue("Coordinates", out var coordinates);
+        message.CustomHeaders.TryGetValue("Rotation", out var rotation);
+        AddEventAt(
+            message.SentAt,
+            eventName,
+            ("TargetName", Convert.ToString(message.Content) ?? string.Empty),
+            ("ProjectName", Convert.ToString(projectName) ?? string.Empty),
+            ("Coordinates", coordinates),
+            ("Rotation", rotation),
+            ("TargetEndTime", message.Expiration));
+        return Task.CompletedTask;
+    }
+
+    private void RecordLog(NinaLogRecord record)
+    {
+        if (!eventDelivery.Current.ShouldSendLogLevel(record.Level))
+        {
+            return;
+        }
+        AddEventCore(
+            record.Time,
+            "NINA-LOG",
+            chatEnabled: true,
+            ("Level", record.Level),
+            ("Source", record.Source),
+            ("Member", record.Member),
+            ("Line", record.Line),
+            ("Message", record.Message));
+    }
+
+    private void RecordNotification(NinaNotificationRecord notification)
+    {
+        if (!eventDelivery.Current.NinaNotifications)
+        {
+            return;
+        }
+        AddEventCore(
+            notification.Time,
+            "NINA-NOTIFICATION",
+            chatEnabled: true,
+            ("Level", notification.Level),
+            ("Header", notification.Header),
+            ("Message", notification.Message));
+    }
+
+    private void AddEvent(string eventName, params (string Name, object? Value)[] details) =>
+        AddEventCore(
+            DateTime.Now,
+            eventName,
+            eventDelivery.Current.ShouldSendEvent(eventName),
+            details);
+
+    private void AddEventAt(
+        DateTimeOffset time,
+        string eventName,
+        params (string Name, object? Value)[] details) =>
+        AddEventCore(
+            time,
+            eventName,
+            eventDelivery.Current.ShouldSendEvent(eventName),
+            details);
+
+    private void AddEventCore(
+        object time,
+        string eventName,
+        bool chatEnabled,
+        params (string Name, object? Value)[] details)
     {
         var item = new Dictionary<string, object?>
         {
-            ["Time"] = DateTime.Now,
+            ["Time"] = time,
             ["Event"] = eventName,
+            ["ChatEnabled"] = chatEnabled,
         };
         foreach (var (name, value) in details)
         {
@@ -1180,7 +1305,8 @@ internal sealed record DirectImageMetadata(
     double Median,
     int Stars,
     double HFR,
-    bool IsBayered);
+    bool IsBayered,
+    bool ChatEnabled);
 
 internal sealed class DirectSavedImage(DirectImageMetadata metadata)
 {

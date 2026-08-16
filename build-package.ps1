@@ -164,7 +164,7 @@ $manifest = [ordered]@{
     }
     Descriptions = [ordered]@{
         ShortDescription = 'Bridge NINA with Discord and Matrix, supporting bot slash commands for control'
-        LongDescription = 'Routes N.I.N.A. status, events, images, and approved commands through Discord and Matrix chat. Native Direct supports supervised local and multi-system hosted operation; deprecated Advanced API polling remains available only to existing plugin profiles.'
+        LongDescription = 'Routes native N.I.N.A. status, events, images, popup notifications, selected logs, and approved commands through Discord and Matrix. Supports a supervised local runtime or multi-system Chatstronomy Hub.'
         FeaturedImageURL = $FeaturedImageUrl
         ScreenshotURL = ''
         AltScreenshotURL = ''

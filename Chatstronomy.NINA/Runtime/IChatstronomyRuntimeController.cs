@@ -28,6 +28,4 @@ internal interface IChatstronomyRuntimeController
         CancellationToken cancellationToken);
 
     Task StopAsync(CancellationToken cancellationToken);
-
-    Task DetachAsync(CancellationToken cancellationToken);
 }

@@ -31,13 +31,16 @@ internal sealed class ChatstronomySettings
         {
             var value = options.GetValueString(
                 nameof(DeliveryMode),
-                ChatDeliveryMode.DiscordWebhook.ToString());
-            return Enum.TryParse<ChatDeliveryMode>(value, out var mode)
-                ? mode
-                : ChatDeliveryMode.DiscordWebhook;
+                ChatDeliveryMode.HostedService.ToString());
+            return ParseDeliveryMode(value);
         }
         set => options.SetValueString(nameof(DeliveryMode), value.ToString());
     }
+
+    internal static ChatDeliveryMode ParseDeliveryMode(string? value) =>
+        Enum.TryParse<ChatDeliveryMode>(value, out var mode)
+            ? mode
+            : ChatDeliveryMode.HostedService;
 
     public string DiscordWebhookUrl
     {
@@ -169,43 +172,112 @@ internal sealed class ChatstronomySettings
         set => options.SetValueString(nameof(LocalRuntimePath), value?.Trim() ?? string.Empty);
     }
 
-    public string AdvancedApiBaseUrl
+    public bool SendImageEvents
     {
-        get => options.GetValueString(nameof(AdvancedApiBaseUrl), "http://127.0.0.1:1888/");
-        set => options.SetValueString(nameof(AdvancedApiBaseUrl), value?.Trim() ?? string.Empty);
+        get => options.GetValueBoolean(nameof(SendImageEvents), true);
+        set => options.SetValueBoolean(nameof(SendImageEvents), value);
     }
 
-    public RuntimeSourceMode RuntimeSourceMode
+    public bool SendAutofocusEvents
     {
-        get
-        {
-            var value = options.GetValueString(
-                nameof(RuntimeSourceMode),
-                global::Chatstronomy.NINA.Settings.RuntimeSourceMode.Direct.ToString());
-            return Enum.TryParse<RuntimeSourceMode>(value, out var mode)
-                ? mode
-                : global::Chatstronomy.NINA.Settings.RuntimeSourceMode.Direct;
-        }
-        set => options.SetValueString(nameof(RuntimeSourceMode), value.ToString());
+        get => options.GetValueBoolean(nameof(SendAutofocusEvents), true);
+        set => options.SetValueBoolean(nameof(SendAutofocusEvents), value);
     }
 
-    public string PollingIntervalSeconds
+    public bool SendGuidingEvents
     {
-        get => options.GetValueString(nameof(PollingIntervalSeconds), "5");
-        set => options.SetValueString(nameof(PollingIntervalSeconds), value?.Trim() ?? string.Empty);
+        get => options.GetValueBoolean(nameof(SendGuidingEvents), true);
+        set => options.SetValueBoolean(nameof(SendGuidingEvents), value);
     }
 
-    public bool StartLocalRuntime
+    public bool SendMountEvents
     {
-        get => options.GetValueBoolean(nameof(StartLocalRuntime), true);
-        set => options.SetValueBoolean(nameof(StartLocalRuntime), value);
+        get => options.GetValueBoolean(nameof(SendMountEvents), true);
+        set => options.SetValueBoolean(nameof(SendMountEvents), value);
     }
 
-    public bool StopLocalRuntimeWithNina
+    public bool SendSequenceEvents
     {
-        get => options.GetValueBoolean(nameof(StopLocalRuntimeWithNina), true);
-        set => options.SetValueBoolean(nameof(StopLocalRuntimeWithNina), value);
+        get => options.GetValueBoolean(nameof(SendSequenceEvents), true);
+        set => options.SetValueBoolean(nameof(SendSequenceEvents), value);
     }
+
+    public bool SendTargetSchedulerEvents
+    {
+        get => options.GetValueBoolean(nameof(SendTargetSchedulerEvents), true);
+        set => options.SetValueBoolean(nameof(SendTargetSchedulerEvents), value);
+    }
+
+    public bool SendFilterFocuserRotatorEvents
+    {
+        get => options.GetValueBoolean(nameof(SendFilterFocuserRotatorEvents), true);
+        set => options.SetValueBoolean(nameof(SendFilterFocuserRotatorEvents), value);
+    }
+
+    public bool SendEquipmentConnectionEvents
+    {
+        get => options.GetValueBoolean(nameof(SendEquipmentConnectionEvents), true);
+        set => options.SetValueBoolean(nameof(SendEquipmentConnectionEvents), value);
+    }
+
+    public bool SendOtherEvents
+    {
+        get => options.GetValueBoolean(nameof(SendOtherEvents), true);
+        set => options.SetValueBoolean(nameof(SendOtherEvents), value);
+    }
+
+    public bool SendNinaNotifications
+    {
+        get => options.GetValueBoolean(nameof(SendNinaNotifications), true);
+        set => options.SetValueBoolean(nameof(SendNinaNotifications), value);
+    }
+
+    public bool SendNinaLogErrors
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogErrors), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogErrors), value);
+    }
+
+    public bool SendNinaLogWarnings
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogWarnings), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogWarnings), value);
+    }
+
+    public bool SendNinaLogInformation
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogInformation), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogInformation), value);
+    }
+
+    public bool SendNinaLogDebug
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogDebug), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogDebug), value);
+    }
+
+    public bool SendNinaLogTrace
+    {
+        get => options.GetValueBoolean(nameof(SendNinaLogTrace), false);
+        set => options.SetValueBoolean(nameof(SendNinaLogTrace), value);
+    }
+
+    internal DirectEventDeliveryOptions EventDeliveryOptions => new(
+        Images: SendImageEvents,
+        Autofocus: SendAutofocusEvents,
+        Guiding: SendGuidingEvents,
+        Mount: SendMountEvents,
+        Sequence: SendSequenceEvents,
+        TargetScheduler: SendTargetSchedulerEvents,
+        FilterFocuserRotator: SendFilterFocuserRotatorEvents,
+        EquipmentConnections: SendEquipmentConnectionEvents,
+        OtherEvents: SendOtherEvents,
+        NinaNotifications: SendNinaNotifications,
+        NinaLogErrors: SendNinaLogErrors,
+        NinaLogWarnings: SendNinaLogWarnings,
+        NinaLogInformation: SendNinaLogInformation,
+        NinaLogDebug: SendNinaLogDebug,
+        NinaLogTrace: SendNinaLogTrace);
 
     private string CredentialTarget(string kind) =>
         CredentialTarget(profileService.ActiveProfile.Id, kind);

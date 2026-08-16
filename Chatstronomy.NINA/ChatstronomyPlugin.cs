@@ -34,6 +34,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 {
     private readonly IProfileService profileService;
     private readonly ChatstronomySettings settings;
+    private readonly DirectEventDeliveryPolicy eventDelivery;
     private readonly IChatstronomyRuntimeController runtimeController;
     private readonly INinaDirectDataProvider directDataProvider;
     private readonly ChatstronomyHubClient hubClient;
@@ -62,10 +63,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
         IImageHistoryVM imageHistory,
-        IWindowServiceFactory windowFactory)
+        IWindowServiceFactory windowFactory,
+        IMessageBroker messageBroker)
     {
         this.profileService = profileService;
         settings = new ChatstronomySettings(profileService);
+        eventDelivery = new DirectEventDeliveryPolicy(settings.EventDeliveryOptions);
         directDataProvider = new NinaDirectDataProvider(
             profileService,
             telescope,
@@ -79,7 +82,9 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             applicationStatus,
             autoFocusFactory,
             imageHistory,
-            windowFactory);
+            windowFactory,
+            messageBroker,
+            eventDelivery);
         runtimeController = new ChatstronomyRuntimeController(directDataProvider);
         hubClient = new ChatstronomyHubClient(directDataProvider);
         startRuntimeCommand = new AsyncCommand(
@@ -347,84 +352,94 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
-    public string AdvancedApiBaseUrl
+    public bool SendImageEvents
     {
-        get => settings.AdvancedApiBaseUrl;
-        set
-        {
-            settings.AdvancedApiBaseUrl = value;
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
+        get => settings.SendImageEvents;
+        set => SetEventDeliveryOption(() => settings.SendImageEvents = value);
     }
 
-    public bool UseDirectSource
+    public bool SendAutofocusEvents
     {
-        get => settings.RuntimeSourceMode == RuntimeSourceMode.Direct;
-        set
-        {
-            if (value)
-            {
-                SetRuntimeSourceMode(RuntimeSourceMode.Direct);
-            }
-        }
+        get => settings.SendAutofocusEvents;
+        set => SetEventDeliveryOption(() => settings.SendAutofocusEvents = value);
     }
 
-    public bool UseAdvancedApiSource
+    public bool SendGuidingEvents
     {
-        get => settings.RuntimeSourceMode == RuntimeSourceMode.AdvancedApi;
-        set
-        {
-            if (value)
-            {
-                SetRuntimeSourceMode(RuntimeSourceMode.AdvancedApi);
-            }
-        }
+        get => settings.SendGuidingEvents;
+        set => SetEventDeliveryOption(() => settings.SendGuidingEvents = value);
     }
 
-    public bool CanSelectAdvancedApiSource =>
-        RuntimeSourceModePolicy.IsDeprecated(settings.RuntimeSourceMode);
-
-    public string AdvancedApiDeprecationNotice =>
-        RuntimeSourceModePolicy.AdvancedApiDeprecationNotice;
-
-    public string PollingIntervalSeconds
+    public bool SendMountEvents
     {
-        get => settings.PollingIntervalSeconds;
-        set
-        {
-            settings.PollingIntervalSeconds = value;
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
+        get => settings.SendMountEvents;
+        set => SetEventDeliveryOption(() => settings.SendMountEvents = value);
     }
 
-    public bool StartLocalRuntime
+    public bool SendSequenceEvents
     {
-        get => UseDirectSource || settings.StartLocalRuntime;
-        set
-        {
-            if (UseAdvancedApiSource)
-            {
-                settings.StartLocalRuntime = value;
-            }
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
+        get => settings.SendSequenceEvents;
+        set => SetEventDeliveryOption(() => settings.SendSequenceEvents = value);
     }
 
-    public bool StopLocalRuntimeWithNina
+    public bool SendTargetSchedulerEvents
     {
-        get => UseDirectSource || settings.StopLocalRuntimeWithNina;
-        set
-        {
-            if (UseAdvancedApiSource)
-            {
-                settings.StopLocalRuntimeWithNina = value;
-            }
-            RaisePropertyChanged();
-            RefreshStatus();
-        }
+        get => settings.SendTargetSchedulerEvents;
+        set => SetEventDeliveryOption(() => settings.SendTargetSchedulerEvents = value);
+    }
+
+    public bool SendFilterFocuserRotatorEvents
+    {
+        get => settings.SendFilterFocuserRotatorEvents;
+        set => SetEventDeliveryOption(() => settings.SendFilterFocuserRotatorEvents = value);
+    }
+
+    public bool SendEquipmentConnectionEvents
+    {
+        get => settings.SendEquipmentConnectionEvents;
+        set => SetEventDeliveryOption(() => settings.SendEquipmentConnectionEvents = value);
+    }
+
+    public bool SendOtherEvents
+    {
+        get => settings.SendOtherEvents;
+        set => SetEventDeliveryOption(() => settings.SendOtherEvents = value);
+    }
+
+    public bool SendNinaNotifications
+    {
+        get => settings.SendNinaNotifications;
+        set => SetEventDeliveryOption(() => settings.SendNinaNotifications = value);
+    }
+
+    public bool SendNinaLogErrors
+    {
+        get => settings.SendNinaLogErrors;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogErrors = value);
+    }
+
+    public bool SendNinaLogWarnings
+    {
+        get => settings.SendNinaLogWarnings;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogWarnings = value);
+    }
+
+    public bool SendNinaLogInformation
+    {
+        get => settings.SendNinaLogInformation;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogInformation = value);
+    }
+
+    public bool SendNinaLogDebug
+    {
+        get => settings.SendNinaLogDebug;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogDebug = value);
+    }
+
+    public bool SendNinaLogTrace
+    {
+        get => settings.SendNinaLogTrace;
+        set => SetEventDeliveryOption(() => settings.SendNinaLogTrace = value);
     }
 
     public ICommand StartRuntimeCommand => startRuntimeCommand;
@@ -465,23 +480,13 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
                     ? hostedError ?? hubClient.StatusMessage
                     : runtimeController.IsRunning
                         ? runtimeController.StatusMessage
-                        : StartLocalRuntime
-                            ? $"Configuration is ready. {runtimeController.StatusMessage}"
-                            : "Configuration is ready; Chatstronomy must already be running locally.";
-                return UsesLocalRuntime
-                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
-                        settings.RuntimeSourceMode,
-                        status)
-                    : status;
+                        : $"Configuration is ready. {runtimeController.StatusMessage}";
+                return status;
             }
             catch (Exception exception) when (IsHostedConfigurationException(exception))
             {
                 var status = HostedErrorMessage("Configuration is not ready", exception);
-                return UsesLocalRuntime
-                    ? RuntimeSourceModePolicy.AddDeprecationNotice(
-                        settings.RuntimeSourceMode,
-                        status)
-                    : status;
+                return status;
             }
         }
     }
@@ -511,14 +516,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             await hubClient.StopAsync(CancellationToken.None);
             if (runtimeController.IsRunning)
             {
-                if (StopLocalRuntimeWithNina)
-                {
-                    await runtimeController.StopAsync(CancellationToken.None);
-                }
-                else
-                {
-                    await runtimeController.DetachAsync(CancellationToken.None);
-                }
+                await runtimeController.StopAsync(CancellationToken.None);
             }
         }
         finally
@@ -552,13 +550,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         };
 
         var localRuntime = UsesLocalRuntime
-            ? ChatstronomyConfigurationValidator.BuildLocalRuntime(
-                LocalRuntimePath,
-                settings.RuntimeSourceMode,
-                AdvancedApiBaseUrl,
-                PollingIntervalSeconds,
-                StartLocalRuntime,
-                StopLocalRuntimeWithNina)
+            ? ChatstronomyConfigurationValidator.BuildLocalRuntime(LocalRuntimePath)
             : null;
         var matrix = UsesLocalRuntime && UseLocalMatrix
             ? new MatrixDeliveryConfiguration(
@@ -614,22 +606,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             Capabilities: directDataProvider.Capabilities);
     }
 
-    private void SetRuntimeSourceMode(RuntimeSourceMode mode)
-    {
-        if (!RuntimeSourceModePolicy.CanTransition(settings.RuntimeSourceMode, mode))
-        {
-            return;
-        }
-
-        if (settings.RuntimeSourceMode == mode)
-        {
-            return;
-        }
-
-        settings.RuntimeSourceMode = mode;
-        RefreshAllProperties();
-    }
-
     private void SetDeliveryMode(ChatDeliveryMode mode)
     {
         if (settings.DeliveryMode == mode)
@@ -656,6 +632,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             {
                 await runtimeController.StopAsync(CancellationToken.None);
             }
+            eventDelivery.Update(settings.EventDeliveryOptions);
             directDataProvider.Reset();
             RefreshAllProperties();
             await StartConfiguredModeCoreAsync(CancellationToken.None);
@@ -711,10 +688,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         {
             await runtimeController.StopAsync(cancellationToken);
         }
-        if (StartLocalRuntime)
-        {
-            await StartLocalRuntimeCoreAsync(cancellationToken);
-        }
+        await StartLocalRuntimeCoreAsync(cancellationToken);
     }
 
     private async Task StartLocalRuntimeCoreAsync(CancellationToken cancellationToken)
@@ -990,14 +964,21 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(HostedPairingToken),
             nameof(HostedCredentialStatus),
             nameof(LocalRuntimePath),
-            nameof(UseDirectSource),
-            nameof(UseAdvancedApiSource),
-            nameof(CanSelectAdvancedApiSource),
-            nameof(AdvancedApiDeprecationNotice),
-            nameof(AdvancedApiBaseUrl),
-            nameof(PollingIntervalSeconds),
-            nameof(StartLocalRuntime),
-            nameof(StopLocalRuntimeWithNina),
+            nameof(SendImageEvents),
+            nameof(SendAutofocusEvents),
+            nameof(SendGuidingEvents),
+            nameof(SendMountEvents),
+            nameof(SendSequenceEvents),
+            nameof(SendTargetSchedulerEvents),
+            nameof(SendFilterFocuserRotatorEvents),
+            nameof(SendEquipmentConnectionEvents),
+            nameof(SendOtherEvents),
+            nameof(SendNinaNotifications),
+            nameof(SendNinaLogErrors),
+            nameof(SendNinaLogWarnings),
+            nameof(SendNinaLogInformation),
+            nameof(SendNinaLogDebug),
+            nameof(SendNinaLogTrace),
             nameof(IsConfigurationValid),
             nameof(ConfigurationStatus),
         })
@@ -1015,6 +996,15 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         connectHostedCommand.RaiseCanExecuteChanged();
         disconnectHostedCommand.RaiseCanExecuteChanged();
         forgetHostedCredentialCommand.RaiseCanExecuteChanged();
+    }
+
+    private void SetEventDeliveryOption(
+        Action update,
+        [CallerMemberName] string? propertyName = null)
+    {
+        update();
+        eventDelivery.Update(settings.EventDeliveryOptions);
+        RaisePropertyChanged(propertyName);
     }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null) =>

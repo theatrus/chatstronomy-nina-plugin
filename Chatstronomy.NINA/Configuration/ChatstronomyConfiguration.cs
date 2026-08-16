@@ -23,20 +23,7 @@ internal sealed record MatrixDeliveryConfiguration(
     string Password,
     string DefaultRoomId);
 
-internal abstract record RuntimeSourceConfiguration;
-
-internal sealed record NinaDirectSourceConfiguration : RuntimeSourceConfiguration;
-
-internal sealed record AdvancedApiPollingSourceConfiguration(
-    Uri BaseUrl,
-    uint PollIntervalSeconds)
-    : RuntimeSourceConfiguration;
-
-internal sealed record LocalRuntimeConfiguration(
-    string ExecutablePath,
-    RuntimeSourceConfiguration Source,
-    bool StartWithNina,
-    bool StopWithNina);
+internal sealed record LocalRuntimeConfiguration(string ExecutablePath);
 
 internal sealed record ChatstronomyConfiguration(
     ChatDeliveryConfiguration? Delivery,
@@ -120,78 +107,22 @@ internal static class ChatstronomyConfigurationValidator
         return uri;
     }
 
-    public static Uri RequireAdvancedApiUrl(string value)
-    {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrWhiteSpace(uri.Host))
-        {
-            throw new InvalidOperationException(
-                "N.I.N.A. Advanced API URL must be an absolute http:// or https:// URL.");
-        }
-
-        return uri;
-    }
-
-    public static LocalRuntimeConfiguration BuildLocalRuntime(
-        string executablePath,
-        RuntimeSourceMode sourceMode,
-        string advancedApiBaseUrl,
-        string pollingIntervalSeconds,
-        bool startWithNina,
-        bool stopWithNina)
+    public static LocalRuntimeConfiguration BuildLocalRuntime(string executablePath)
     {
         var path = executablePath?.Trim() ?? string.Empty;
-        if (sourceMode == RuntimeSourceMode.Direct && !startWithNina)
+        if (string.IsNullOrWhiteSpace(path))
         {
             throw new InvalidOperationException(
-                "Direct mode requires Chatstronomy to start with N.I.N.A.");
-        }
-        if (startWithNina && string.IsNullOrWhiteSpace(path))
-        {
-            throw new InvalidOperationException(
-                "Select the Chatstronomy runtime executable or turn off automatic start.");
+                "Select the Chatstronomy runtime executable.");
         }
 
-        if (startWithNina && !File.Exists(path))
+        if (!File.Exists(path))
         {
             throw new InvalidOperationException(
                 "The configured Chatstronomy runtime executable was not found.");
         }
 
-        // Only a process started by this plugin is eligible for teardown. This
-        // prevents "Stop with N.I.N.A." from terminating a separately managed
-        // Chatstronomy instance.
-        RuntimeSourceConfiguration source = sourceMode switch
-        {
-            RuntimeSourceMode.Direct => new NinaDirectSourceConfiguration(),
-            RuntimeSourceMode.AdvancedApi => BuildAdvancedApiSource(
-                advancedApiBaseUrl,
-                pollingIntervalSeconds),
-            _ => throw new InvalidOperationException("Unknown Chatstronomy source mode."),
-        };
-
-        return new LocalRuntimeConfiguration(
-            path,
-            source,
-            startWithNina,
-            startWithNina && (sourceMode == RuntimeSourceMode.Direct || stopWithNina));
-    }
-
-    private static AdvancedApiPollingSourceConfiguration BuildAdvancedApiSource(
-        string baseUrl,
-        string pollingIntervalSeconds)
-    {
-        if (!uint.TryParse(pollingIntervalSeconds, out var interval)
-            || interval is < 1 or > 300)
-        {
-            throw new InvalidOperationException(
-                "Polling interval must be a whole number from 1 to 300 seconds.");
-        }
-
-        return new AdvancedApiPollingSourceConfiguration(
-            RequireAdvancedApiUrl(baseUrl),
-            interval);
+        return new LocalRuntimeConfiguration(path);
     }
 
     private static bool IsDiscordHost(string host) =>

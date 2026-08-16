@@ -11,7 +11,7 @@
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Chat delivery" />
                 <TextBlock
                     Margin="0,4,0,14"
-                    Text="Choose who owns the chat connection. Native Direct is the supported N.I.N.A. data source; existing legacy profiles may continue using deprecated Advanced API polling."
+                    Text="Choose local Discord or Matrix delivery, or connect this N.I.N.A. profile to the hosted Chatstronomy Hub."
                     TextWrapping="Wrap" />
 
                 <Border Padding="12" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1">
@@ -222,57 +222,53 @@
                     Margin="0,16,0,0"
                     Padding="12"
                     BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
+                        <TextBlock
+                            Margin="0,3,0,10"
+                            Text="Choose which N.I.N.A. events become chat messages. Disabled events are still retained for status and target tracking."
+                            TextWrapping="Wrap" />
+                        <UniformGrid Columns="2">
+                            <CheckBox Margin="0,3" Content="Images and thumbnails" IsChecked="{Binding SendImageEvents}" />
+                            <CheckBox Margin="0,3" Content="Autofocus results" IsChecked="{Binding SendAutofocusEvents}" />
+                            <CheckBox Margin="0,3" Content="Guiding and dithering" IsChecked="{Binding SendGuidingEvents}" />
+                            <CheckBox Margin="0,3" Content="Mount, slew, and center" IsChecked="{Binding SendMountEvents}" />
+                            <CheckBox Margin="0,3" Content="Sequence, waits, and cooling" IsChecked="{Binding SendSequenceEvents}" />
+                            <CheckBox Margin="0,3" Content="Targets and Target Scheduler" IsChecked="{Binding SendTargetSchedulerEvents}" />
+                            <CheckBox Margin="0,3" Content="Filter, focuser, and rotator" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
+                            <CheckBox Margin="0,3" Content="Equipment connections" IsChecked="{Binding SendEquipmentConnectionEvents}" />
+                            <CheckBox Margin="0,3" Content="Other N.I.N.A. events" IsChecked="{Binding SendOtherEvents}" />
+                            <CheckBox Margin="0,3" Content="Popup notifications" IsChecked="{Binding SendNinaNotifications}" />
+                        </UniformGrid>
+
+                        <TextBlock Margin="0,14,0,3" FontWeight="SemiBold" Text="N.I.N.A. log lines" />
+                        <TextBlock
+                            Margin="0,0,0,7"
+                            Text="Log forwarding is opt-in because logs can be frequent and may contain equipment paths or other private details. Chatstronomy captures every level N.I.N.A. writes; select the levels to send."
+                            TextWrapping="Wrap" />
+                        <WrapPanel>
+                            <CheckBox Margin="0,3,18,3" Content="Errors" IsChecked="{Binding SendNinaLogErrors}" />
+                            <CheckBox Margin="0,3,18,3" Content="Warnings" IsChecked="{Binding SendNinaLogWarnings}" />
+                            <CheckBox Margin="0,3,18,3" Content="Information" IsChecked="{Binding SendNinaLogInformation}" />
+                            <CheckBox Margin="0,3,18,3" Content="Debug" IsChecked="{Binding SendNinaLogDebug}" />
+                            <CheckBox Margin="0,3" Content="Trace" IsChecked="{Binding SendNinaLogTrace}" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Margin="0,16,0,0"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
                     BorderThickness="1"
                     Visibility="{Binding UsesLocalRuntime, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <StackPanel>
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Local Chatstronomy runtime" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="The plugin can own a bundled or separately installed Chatstronomy process. Credentials are handed over a current-user-only named pipe, never command-line arguments or a temporary configuration file."
+                            Text="The plugin starts its bundled Chatstronomy runtime and supplies native N.I.N.A. data plus credentials over current-user-only named pipes. It does not open an observatory HTTP endpoint."
                             TextWrapping="Wrap" />
-                        <TextBlock FontWeight="SemiBold" Text="N.I.N.A. data source" />
-                        <RadioButton
-                            Margin="0,6,0,0"
-                            GroupName="ChatstronomySource"
-                            Content="Direct — use this plugin (recommended)"
-                            IsChecked="{Binding UseDirectSource}" />
-                        <TextBlock
-                            Margin="22,2,0,6"
-                            Text="Reads N.I.N.A. mediators directly. The Advanced API plugin and HTTP endpoint are not required."
-                            TextWrapping="Wrap" />
-                        <RadioButton
-                            GroupName="ChatstronomySource"
-                            Content="Advanced API — deprecated (existing profiles only)"
-                            IsEnabled="{Binding CanSelectAdvancedApiSource}"
-                            IsChecked="{Binding UseAdvancedApiSource}" />
-                        <TextBlock
-                            Margin="22,2,0,12"
-                            Text="{Binding AdvancedApiDeprecationNotice}"
-                            TextWrapping="Wrap" />
-                        <Grid Margin="0,0,0,5">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock VerticalAlignment="Center" Text="Start Chatstronomy with N.I.N.A." />
-                            <CheckBox
-                                Grid.Column="1"
-                                IsEnabled="{Binding UseAdvancedApiSource}"
-                                IsChecked="{Binding StartLocalRuntime}" />
-                        </Grid>
-                        <Grid Margin="0,0,0,10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock
-                                VerticalAlignment="Center"
-                                Text="Stop the plugin-owned runtime when N.I.N.A. exits" />
-                            <CheckBox
-                                Grid.Column="1"
-                                IsEnabled="{Binding UseAdvancedApiSource}"
-                                IsChecked="{Binding StopLocalRuntimeWithNina}" />
-                        </Grid>
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="180" />
@@ -283,28 +279,6 @@
                                 Grid.Column="1"
                                 Text="{Binding LocalRuntimePath, UpdateSourceTrigger=LostFocus}" />
                         </Grid>
-                        <StackPanel Visibility="{Binding UseAdvancedApiSource, Converter={StaticResource BooleanToVisibilityConverter}}">
-                            <Grid Margin="0,0,0,8">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="180" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Advanced API URL" />
-                                <TextBox
-                                    Grid.Column="1"
-                                    Text="{Binding AdvancedApiBaseUrl, UpdateSourceTrigger=LostFocus}" />
-                            </Grid>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="180" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Polling interval (seconds)" />
-                                <TextBox
-                                    Grid.Column="1"
-                                    Text="{Binding PollingIntervalSeconds, UpdateSourceTrigger=LostFocus}" />
-                            </Grid>
-                        </StackPanel>
                         <StackPanel
                             Margin="0,12,0,0"
                             HorizontalAlignment="Right"

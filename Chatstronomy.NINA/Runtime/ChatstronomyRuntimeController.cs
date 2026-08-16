@@ -21,14 +21,14 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
 
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
     private readonly object stateGate = new();
-    private readonly INinaDirectDataProvider? directDataProvider;
+    private readonly INinaDirectDataProvider directDataProvider;
     private Process? ownedProcess;
     private NamedPipeServerStream? controlPipe;
     private StreamWriter? controlWriter;
     private NinaDirectPipeServer? directPipeServer;
     private string statusMessage = "Local runtime is stopped.";
 
-    internal ChatstronomyRuntimeController(INinaDirectDataProvider? directDataProvider = null)
+    internal ChatstronomyRuntimeController(INinaDirectDataProvider directDataProvider)
     {
         this.directDataProvider = directDataProvider;
     }
@@ -91,23 +91,16 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                     "The configured Chatstronomy runtime executable was not found.");
             }
 
-            NinaDirectPipeServer? pendingDirectPipe = null;
-            if (runtime.Source is NinaDirectSourceConfiguration)
-            {
-                var provider = directDataProvider
-                    ?? throw new InvalidOperationException(
-                        "The native N.I.N.A. Direct provider is unavailable.");
-                pendingDirectPipe = new NinaDirectPipeServer(
-                    provider,
-                    NinaDirectPipeServer.CreatePipeName());
-                pendingDirectPipe.Start();
-            }
+            NinaDirectPipeServer? pendingDirectPipe = new NinaDirectPipeServer(
+                directDataProvider,
+                NinaDirectPipeServer.CreatePipeName());
+            pendingDirectPipe.Start();
 
             var payload = PluginRuntimeBootstrap.Serialize(
                 configuration,
                 identity,
-                pendingDirectPipe?.PipeName,
-                pendingDirectPipe is null ? null : directDataProvider?.Capabilities);
+                pendingDirectPipe.PipeName,
+                directDataProvider.Capabilities);
             var pipeName = $"chatstronomy-bootstrap-{Guid.NewGuid():N}";
             var pipe = new NamedPipeServerStream(
                 pipeName,
@@ -276,31 +269,6 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
 
             ClearOwnedProcess(process);
             SetStatus("Local runtime stopped.");
-        }
-        finally
-        {
-            lifecycleGate.Release();
-        }
-    }
-
-    public async Task DetachAsync(CancellationToken cancellationToken)
-    {
-        await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            Process? process;
-            lock (stateGate)
-            {
-                process = ownedProcess;
-            }
-
-            if (process is null)
-            {
-                return;
-            }
-
-            ClearOwnedProcess(process);
-            SetStatus("Local runtime was left running independently of N.I.N.A.");
         }
         finally
         {
