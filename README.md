@@ -48,6 +48,11 @@ Local Discord/Matrix secrets and hosted credentials are stored with Windows
 Credential Manager. Matrix homeserver URLs must use HTTPS. Remote control uses a
 closed typed-command allowlist and rejects expired commands.
 
+Hosted Direct v1 connections advertise payload contract version 2 separately
+from the WebSocket protocol version. Hubs that predate the marker remain
+compatible: a missing marker is treated and displayed as legacy payload version
+1, while additive fields continue to be ignored safely by older clients.
+
 Guider and autofocus payloads use the shared Rust chart renderer in both local
 and hosted modes:
 
@@ -113,7 +118,7 @@ inner plugin ZIP, a manual install uses:
 $destination = Join-Path $env:LOCALAPPDATA 'NINA\Plugins\3.0.0\Chatstronomy'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Expand-Archive `
-  -LiteralPath .\Chatstronomy.NINA.0.1.0.12.zip `
+  -LiteralPath .\Chatstronomy.NINA.0.1.0.13.zip `
   -DestinationPath $destination `
   -Force
 ```
@@ -124,7 +129,7 @@ To build the same package from source instead of downloading the CI artifact:
 git clone https://github.com/theatrus/chatstronomy-nina-plugin.git
 cd chatstronomy-nina-plugin
 ./fetch-runtime.ps1
-./build-package.ps1 -Version 0.1.0.12
+./build-package.ps1 -Version 0.1.0.13
 ```
 
 The resulting ZIP is under `artifacts/nina-plugin/`. `fetch-runtime.ps1`
@@ -183,7 +188,7 @@ After the runtime lock is complete:
 
 ```powershell
 ./fetch-runtime.ps1
-./build-package.ps1 -Version 0.1.0.12
+./build-package.ps1 -Version 0.1.0.13
 ```
 
 The ZIP has the N.I.N.A. `ARCHIVE` layout:
@@ -199,7 +204,7 @@ runtime. There is no implicit Cargo fallback.
 
 ## Distribution
 
-Dedicated plugin tags use four numeric parts, for example `v0.1.0.12`. The
+Dedicated plugin tags use four numeric parts, for example `v0.1.0.13`. The
 release workflow downloads only the locked, backend-signed artifacts, runs the
 full C# and cross-process compatibility suite, signs the plugin DLL, builds the
 checksummed plugin ZIP, and publishes its N.I.N.A. manifest. Official N.I.N.A.

@@ -587,6 +587,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
         return new ClientHello(
             ProtocolVersion: DirectProtocol.CurrentVersion,
+            PayloadVersion: DirectProtocol.CurrentPayloadVersion,
             NodeId: nodeId,
             SessionId: sessionId,
             ProcessId: Environment.ProcessId,

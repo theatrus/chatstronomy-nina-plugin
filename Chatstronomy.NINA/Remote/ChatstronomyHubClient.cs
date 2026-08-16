@@ -250,9 +250,12 @@ internal sealed class ChatstronomyHubClient
                 throw new HubFatalException("The hub returned an unexpected authentication response.");
         }
 
+        var payloadStatus = serverHello.PayloadVersion < DirectProtocol.CurrentPayloadVersion
+            ? $", legacy payload v{serverHello.PayloadVersion}"
+            : $", payload v{serverHello.PayloadVersion}";
         SetState(
             true,
-            $"Connected to {configuration.ServiceUrl.Host} (connection {serverHello.ConnectionId:D}).");
+            $"Connected to {configuration.ServiceUrl.Host} (connection {serverHello.ConnectionId:D}{payloadStatus}).");
         using var connected = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var sendGate = new SemaphoreSlim(1, 1);
         var receiveTask = ReceiveLoopAsync(socket, sendGate, connected.Token);
@@ -417,6 +420,12 @@ internal sealed class ChatstronomyHubClient
         {
             throw new HubFatalException(
                 $"The hub uses Direct protocol {server.ProtocolVersion}; this plugin uses {DirectProtocol.CurrentVersion}.");
+        }
+        if (server.PayloadVersion < DirectProtocol.LegacyPayloadVersion
+            || server.PayloadVersion > client.PayloadVersion)
+        {
+            throw new HubFatalException(
+                $"The hub selected unsupported Direct payload version {server.PayloadVersion}; this plugin supports {DirectProtocol.LegacyPayloadVersion} through {client.PayloadVersion}.");
         }
         if (server.NodeId != client.NodeId || server.ProfileId != client.ProfileId)
         {
