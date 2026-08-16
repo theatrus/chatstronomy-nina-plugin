@@ -25,6 +25,7 @@ internal static class Program
         Run("Discord rejects incomplete webhook URLs", DiscordRejectsIncompleteWebhookUrls);
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
+        Run("Hosted Hub is the first chat delivery option", HostedHubIsFirstDeliveryOption);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
         Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
@@ -288,6 +289,26 @@ internal static class Program
         AssertEqual(
             "wss://hub.chatstronomy.com/v1/direct",
             HubConnectionConfiguration.BuildWebSocketUrl(serviceUrl).AbsoluteUri);
+    }
+
+    private static void HostedHubIsFirstDeliveryOption()
+    {
+        var optionsPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Options.xaml");
+        var document = System.Xml.Linq.XDocument.Load(optionsPath);
+        System.Xml.Linq.XNamespace presentation =
+            "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var deliveryOptions = document
+            .Descendants(presentation + "RadioButton")
+            .Where(element => (string?)element.Attribute("GroupName") == "ChatstronomyDelivery")
+            .ToArray();
+
+        AssertEqual(4, deliveryOptions.Length);
+        AssertEqual(
+            "{Binding UseHostedService}",
+            (string?)deliveryOptions[0].Attribute("IsChecked"));
+        AssertEqual(
+            "Chatstronomy Hub — hosted service",
+            (string?)deliveryOptions[0].Attribute("Content"));
     }
 
     private static void NewProfilesDefaultToHostedDelivery()
