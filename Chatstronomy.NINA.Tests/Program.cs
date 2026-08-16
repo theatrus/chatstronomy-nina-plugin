@@ -25,6 +25,7 @@ internal static class Program
         Run("Discord rejects incomplete webhook URLs", DiscordRejectsIncompleteWebhookUrls);
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
+        Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
         await RunAsync(
@@ -284,6 +285,19 @@ internal static class Program
         AssertEqual(
             "wss://hub.chatstronomy.com/v1/direct",
             HubConnectionConfiguration.BuildWebSocketUrl(serviceUrl).AbsoluteUri);
+    }
+
+    private static void NewProfilesDefaultToHostedDelivery()
+    {
+        AssertEqual(
+            ChatDeliveryMode.HostedService,
+            ChatstronomySettings.ParseDeliveryMode(null));
+        AssertEqual(
+            ChatDeliveryMode.HostedService,
+            ChatstronomySettings.ParseDeliveryMode("not-a-mode"));
+        AssertEqual(
+            ChatDeliveryMode.DiscordWebhook,
+            ChatstronomySettings.ParseDeliveryMode(nameof(ChatDeliveryMode.DiscordWebhook)));
     }
 
     private static void LegacyHostedDefaultsMigrateToHub()

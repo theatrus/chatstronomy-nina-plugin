@@ -31,13 +31,16 @@ internal sealed class ChatstronomySettings
         {
             var value = options.GetValueString(
                 nameof(DeliveryMode),
-                ChatDeliveryMode.DiscordWebhook.ToString());
-            return Enum.TryParse<ChatDeliveryMode>(value, out var mode)
-                ? mode
-                : ChatDeliveryMode.DiscordWebhook;
+                ChatDeliveryMode.HostedService.ToString());
+            return ParseDeliveryMode(value);
         }
         set => options.SetValueString(nameof(DeliveryMode), value.ToString());
     }
+
+    internal static ChatDeliveryMode ParseDeliveryMode(string? value) =>
+        Enum.TryParse<ChatDeliveryMode>(value, out var mode)
+            ? mode
+            : ChatDeliveryMode.HostedService;
 
     public string DiscordWebhookUrl
     {
