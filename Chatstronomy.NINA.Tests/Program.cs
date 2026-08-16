@@ -26,6 +26,7 @@ internal static class Program
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Hosted Hub is the first chat delivery option", HostedHubIsFirstDeliveryOption);
+        Run("Hosted setup links to the Hub pairing flow", HostedSetupLinksToHubPairingFlow);
         Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
@@ -310,6 +311,20 @@ internal static class Program
         AssertEqual(
             "Chatstronomy Hub — hosted service",
             (string?)deliveryOptions[0].Attribute("Content"));
+    }
+
+    private static void HostedSetupLinksToHubPairingFlow()
+    {
+        var optionsPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Options.xaml");
+        var document = System.Xml.Linq.XDocument.Load(optionsPath);
+        System.Xml.Linq.XNamespace presentation =
+            "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var link = document
+            .Descendants(presentation + "Hyperlink")
+            .Single(element => element.Value.Trim() == "Open Chatstronomy Hub");
+
+        AssertEqual("https://hub.chatstronomy.com/", (string?)link.Attribute("NavigateUri"));
+        AssertEqual("Hyperlink_RequestNavigate", (string?)link.Attribute("RequestNavigate"));
     }
 
     private static void EventDeliverySwitchesHaveVisibleLabels()
