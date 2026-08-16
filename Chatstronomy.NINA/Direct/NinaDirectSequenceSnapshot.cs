@@ -95,6 +95,11 @@ internal static class NinaDirectSequenceSnapshot
             && itemType is not "SmartExposure" and not "TakeManyExposures";
         var result = BaseEntity(item, expandContainer ? "_Container" : string.Empty);
 
+        if (item is IDeepSkyObjectContainer)
+        {
+            result["IsTargetContainer"] = true;
+        }
+
         if (expandContainer && item is ISequenceContainer container)
         {
             result["Items"] = container.GetItemsSnapshot().Select(BuildItem).ToArray();
