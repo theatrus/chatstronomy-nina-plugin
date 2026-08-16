@@ -12,7 +12,8 @@ account, or connect outbound to the hosted
 
 Install **Chatstronomy** from N.I.N.A.'s plugin manager and restart N.I.N.A.
 Use the official N.I.N.A. repository when the release is listed there. For
-development builds, open **Options → General → Plugin Repositories**, add the
+the current release through our development repository, open
+**Options → General → Plugin Repositories**, add the
 following feed (N.I.N.A. appends `/plugins/manifests`), then install
 Chatstronomy from **Plugins → Available**:
 
