@@ -172,6 +172,7 @@ internal static class NinaDirectSequenceSnapshot
         var typeName = item.GetType().Name;
         if (typeName == "CoolCamera")
         {
+            result["OperationKind"] = "camera_cooling";
             AddIfPresent(item, result, "Duration", "MinCoolingTime");
         }
         else if (typeName == "WarmCamera")
@@ -218,6 +219,7 @@ internal static class NinaDirectSequenceSnapshot
 
         if (typeName == "WaitForTime")
         {
+            result["OperationKind"] = "time_wait";
             var duration = OptionalMethod(item, "GetEstimatedDuration");
             if (duration is TimeSpan wait)
             {
@@ -227,6 +229,15 @@ internal static class NinaDirectSequenceSnapshot
                 {
                     result["TargetTime"] = now + wait;
                 }
+            }
+        }
+        else if (typeName == "WaitForTimeSpan")
+        {
+            result["OperationKind"] = "time_wait";
+            var duration = OptionalMethod(item, "GetEstimatedDuration");
+            if (duration is TimeSpan wait)
+            {
+                result["CalculatedWaitDuration"] = wait;
             }
         }
     }

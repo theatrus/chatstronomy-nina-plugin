@@ -5,7 +5,7 @@ param(
     [string] $RuntimePath = 'runtime-cache/chatstronomy.exe',
 
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.11',
+    [string] $Version = '0.1.0.12',
 
     [ValidatePattern('^https?://')]
     [string] $RegistryBaseUrl = 'http://127.0.0.1:8765'

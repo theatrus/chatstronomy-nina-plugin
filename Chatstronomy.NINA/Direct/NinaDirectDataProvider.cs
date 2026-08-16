@@ -242,6 +242,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
                     await GetLastAutofocusAsync(cancellationToken).ConfigureAwait(false)),
             DirectQueryKind.MountInfo =>
                 DirectApiEnvelope<IReadOnlyDictionary<string, object?>>.Ok(GetMountInfo()),
+            DirectQueryKind.CameraInfo =>
+                DirectApiEnvelope<DirectCameraInfo>.Ok(GetCameraInfo()),
             DirectQueryKind.FilterwheelInfo =>
                 DirectApiEnvelope<DirectFilterWheelInfo>.Ok(GetFilterWheelInfo()),
             DirectQueryKind.GuiderInfo =>
@@ -837,6 +839,21 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             available);
     }
 
+    private DirectCameraInfo GetCameraInfo()
+    {
+        var info = camera.GetInfo();
+        return new DirectCameraInfo(
+            info.Connected,
+            info.CanSetTemperature,
+            info.CoolerOn,
+            info.CoolerPower,
+            info.Temperature,
+            info.TemperatureSetPoint,
+            info.Connected && info.CanSetTemperature && camera.AtTargetTemp,
+            info.Name ?? string.Empty,
+            info.DisplayName ?? string.Empty);
+    }
+
     private DirectGuiderInfo GetGuiderInfo()
     {
         var info = guider.GetInfo();
@@ -1134,6 +1151,17 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 }
 
 internal sealed record DirectFilterInfo(string Name, int Id);
+
+internal sealed record DirectCameraInfo(
+    bool Connected,
+    bool CanSetTemperature,
+    bool CoolerOn,
+    double CoolerPower,
+    double Temperature,
+    double TemperatureSetPoint,
+    bool AtTargetTemp,
+    string Name,
+    string DisplayName);
 
 internal sealed record DirectFilterWheelInfo(
     bool Connected,
