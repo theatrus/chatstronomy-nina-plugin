@@ -100,8 +100,17 @@ internal sealed record DirectEventDeliveryOptions(
             "INFO" or "INFORMATION" => NinaLogInformation,
             "DEBUG" => NinaLogDebug,
             "TRACE" or "VERBOSE" => NinaLogTrace,
-            _ => OtherEvents,
+            // Log forwarding is opt-in because log lines can carry equipment
+            // paths and other private details, so an unrecognised level must
+            // stay silent. Falling back to OtherEvents (which defaults to
+            // true) would forward it with every log checkbox unticked.
+            _ => false,
         };
+
+    /// True when at least one log level is selected. Nothing needs to tail the
+    /// N.I.N.A. log until one is.
+    internal bool AnyLogLevelEnabled =>
+        NinaLogErrors || NinaLogWarnings || NinaLogInformation || NinaLogDebug || NinaLogTrace;
 }
 
 internal sealed class DirectEventDeliveryPolicy

@@ -26,6 +26,9 @@ internal static class Program
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
+        Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
+        Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
+        Run("Oversized log messages are truncated", OversizedLogMessagesAreTruncated);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
         await RunAsync(
@@ -499,6 +502,46 @@ internal static class Program
         AssertTrue(options.ShouldSendEvent("MOUNT-CENTER"));
         AssertTrue(options.ShouldSendLogLevel("WARNING"));
         AssertFalse(options.ShouldSendLogLevel("INFO"));
+    }
+
+    private static void UnknownLogLevelsStaySilent()
+    {
+        // Log forwarding is opt-in: an unrecognised level must not ride in on
+        // the OtherEvents default, which is true.
+        var allLogsOff = DirectEventDeliveryOptions.Default;
+        AssertTrue(allLogsOff.OtherEvents);
+        AssertFalse(allLogsOff.AnyLogLevelEnabled);
+        AssertFalse(allLogsOff.ShouldSendLogLevel("NOTICE"));
+        AssertFalse(allLogsOff.ShouldSendLogLevel(string.Empty));
+        AssertFalse(allLogsOff.ShouldSendLogLevel("ERROR"));
+
+        var errorsOn = allLogsOff with { NinaLogErrors = true };
+        AssertTrue(errorsOn.AnyLogLevelEnabled);
+        AssertTrue(errorsOn.ShouldSendLogLevel("ERROR"));
+        AssertFalse(errorsOn.ShouldSendLogLevel("NOTICE"));
+    }
+
+    private static void OversizedLogMessagesAreTruncated()
+    {
+        // One absurd line must not sit in the ring being re-sent every poll.
+        var giant = new string('x', 50_000);
+        AssertTrue(NinaLogWatcher.TryParseLine(
+            $"2026-08-16 21:04:05.123|Error|A.cs|M|1|{giant}",
+            out var record));
+        AssertTrue(record.Message.Length < 2_100);
+    }
+
+    private static void ExistingWebhookProfilesKeepLocalDelivery()
+    {
+        // A profile that accepted the old webhook default never persisted a
+        // DeliveryMode, and must not be read as hosted on upgrade.
+        AssertEqual(
+            ChatDeliveryMode.DiscordWebhook,
+            ChatstronomySettings.ParseDeliveryMode(
+                nameof(ChatDeliveryMode.DiscordWebhook)));
+        AssertEqual(
+            ChatDeliveryMode.HostedService,
+            ChatstronomySettings.ParseDeliveryMode(null));
     }
 
     private static void NinaLogLinesAreStructured()
@@ -1509,6 +1552,10 @@ internal static class Program
         }
 
         public void Reset()
+        {
+        }
+
+        public void ApplyLogDeliveryOptions()
         {
         }
 

@@ -63,12 +63,24 @@ may include device or filesystem details.
 
 ```powershell
 dotnet run --project Chatstronomy.NINA.Tests\Chatstronomy.NINA.Tests.csproj -c Release
+./fetch-runtime.ps1
 ./build-package.ps1
 ```
 
-The package build downloads the pinned signed Rust runtime artifact from the
-main Chatstronomy repository, verifies its checksum/signature metadata, and
-places it in the N.I.N.A. plugin archive. Rust is not compiled in this
-repository.
+`fetch-runtime.ps1` downloads the exact backend release pinned by
+`runtime.lock.json`, rejecting identity, protocol, size, or checksum
+mismatches, and leaves the signed runtime in `runtime-cache/`.
+`build-package.ps1` then copies it into the N.I.N.A. plugin archive — it does
+not download anything itself and fails if the runtime is missing. Rust is never
+compiled in this repository.
+
+Two optional environment variables widen the test suite; without them the
+process-level runtime, hub, and cross-repo contract checks report `SKIP`
+rather than failing, so it is easy to believe you ran more than you did:
+
+```powershell
+$env:CHATSTRONOMY_RUNTIME_EXE = "$PWD/runtime-cache/chatstronomy.exe"
+$env:CHATSTRONOMY_CONTRACTS_DIR = "<path to chatstronomy>/contracts"
+```
 
 Author: Yann Ramin. License: Apache-2.0.

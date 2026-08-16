@@ -633,6 +633,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
                 await runtimeController.StopAsync(CancellationToken.None);
             }
             eventDelivery.Update(settings.EventDeliveryOptions);
+            directDataProvider.ApplyLogDeliveryOptions();
             directDataProvider.Reset();
             RefreshAllProperties();
             await StartConfiguredModeCoreAsync(CancellationToken.None);
@@ -1004,6 +1005,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         update();
         eventDelivery.Update(settings.EventDeliveryOptions);
+        directDataProvider.ApplyLogDeliveryOptions();
         RaisePropertyChanged(propertyName);
     }
 
