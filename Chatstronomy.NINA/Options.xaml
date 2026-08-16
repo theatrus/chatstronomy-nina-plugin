@@ -120,12 +120,21 @@
                         Margin="0,4"
                         Text="{Binding HostedServiceUrl, UpdateSourceTrigger=LostFocus}" />
                     <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="One-time pairing code" />
-                    <PasswordBox
+                    <StackPanel
                         Grid.Row="1"
                         Grid.Column="1"
-                        Margin="0,4"
-                        ui:PasswordBoxBinding.Attach="True"
-                        ui:PasswordBoxBinding.Password="{Binding HostedPairingToken, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                        Margin="0,4">
+                        <PasswordBox
+                            ui:PasswordBoxBinding.Attach="True"
+                            ui:PasswordBoxBinding.Password="{Binding HostedPairingToken, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                        <TextBlock Margin="0,6,0,2" TextWrapping="Wrap">
+                            <Run Text="Need a code? " />
+                            <Hyperlink
+                                NavigateUri="https://hub.chatstronomy.com/"
+                                RequestNavigate="Hyperlink_RequestNavigate">Open Chatstronomy Hub</Hyperlink>
+                            <Run Text=", add or select your telescope, and choose Connect rig…" />
+                        </TextBlock>
+                    </StackPanel>
                     <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Top" Text="Connection credential" />
                     <TextBlock
                         Grid.Row="2"
