@@ -129,7 +129,7 @@ jobs:
 
       - name: Sign the Chatstronomy plugin DLL
         if: env.SIGN_WINDOWS == 'true'
-        uses: azure/trusted-signing-action@v0
+        uses: azure/trusted-signing-action@v2
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
