@@ -4,7 +4,11 @@ using Chatstronomy.NINA.Protocol;
 using Chatstronomy.NINA.Remote;
 using Chatstronomy.NINA.Runtime;
 using Chatstronomy.NINA.Settings;
+using Newtonsoft.Json.Linq;
+using NINA.Plugin;
+using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Text.Json;
 
 namespace Chatstronomy.NINA.Tests;
@@ -24,6 +28,9 @@ internal static class Program
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
+        await RunAsync(
+            "Development repository manifest matches N.I.N.A.'s plugin contract",
+            DevelopmentRepositoryManifestMatchesNinaContract);
         Run("Hosted pair and auth frames match the Rust contract", HostedHandshakeFramesMatchRust);
         Run("Hosted secrets are scoped to profile and hub origin", HostedSecretsAreOriginScoped);
         Run("Direct query deadlines match the hub clock-skew contract", DirectQueryDeadlinesMatchHub);
@@ -106,6 +113,29 @@ internal static class Program
 
         Console.Error.WriteLine($"{failures} Chatstronomy N.I.N.A. configuration test(s) failed.");
         return 1;
+    }
+
+    private static async Task DevelopmentRepositoryManifestMatchesNinaContract()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "registry", "plugins", "manifests");
+        var entries = JArray.Parse(await File.ReadAllTextAsync(path));
+        AssertEqual(1, entries.Count);
+
+        var fetcher = new PluginFetcher("https://example.invalid");
+        var method = typeof(PluginFetcher).GetMethod(
+            "ValidateAndParseManifest",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("N.I.N.A. manifest parser was not found.");
+        var parse = (Task<PluginManifest>?)method.Invoke(fetcher, new object[] { entries[0] })
+            ?? throw new InvalidOperationException("N.I.N.A. manifest parser did not return a task.");
+        var manifest = await parse
+            ?? throw new InvalidOperationException("N.I.N.A. rejected the development manifest.");
+
+        AssertEqual("Chatstronomy", manifest.Name);
+        AssertEqual("0.1.0.10", manifest.Version.ToString());
+        AssertEqual("3.2.0.9001", manifest.MinimumApplicationVersion.ToString());
+        AssertEqual(InstallerType.ARCHIVE, manifest.Installer.Type);
+        AssertEqual(InstallerChecksum.SHA256, manifest.Installer.ChecksumType);
     }
 
     private static void PinnedDirectFixturesMatch(string contractsDirectory)

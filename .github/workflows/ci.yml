@@ -50,6 +50,36 @@ jobs:
           }
           ./build-package.ps1 @arguments -PackageOnly
 
+      - name: Validate GitHub development plugin repository
+        shell: pwsh
+        run: |
+          $entries = @(Get-Content -LiteralPath 'registry/plugins/manifests' -Raw | ConvertFrom-Json)
+          if ($entries.Count -ne 1 -or
+              $entries[0].Identifier -ne '5e7c25c4-f654-4e22-9e21-3127048221c0') {
+            throw 'Development repository must contain exactly the Chatstronomy manifest.'
+          }
+          $installer = $entries[0].Installer
+          if ($installer.URL -notmatch '^https://github\.com/theatrus/chatstronomy-nina-plugin/releases/download/' -or
+              $installer.Checksum -notmatch '^[0-9A-Fa-f]{64}$' -or
+              $installer.ChecksumType -ne 'SHA256' -or
+              $installer.Type -ne 'ARCHIVE') {
+            throw 'Development repository installer metadata is invalid.'
+          }
+          $archive = Join-Path $env:RUNNER_TEMP 'chatstronomy-development-plugin.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri $installer.URL -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if (-not $actual.Equals([string] $installer.Checksum, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Development package checksum mismatch: $actual"
+          }
+          $expanded = Join-Path $env:RUNNER_TEMP 'chatstronomy-development-plugin'
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded
+          $runtime = Join-Path $expanded 'runtime/chatstronomy.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $runtime
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -notlike '*StackFoundry LLC*') {
+            throw "Development runtime signature is $($signature.Status): $($signature.SignerCertificate.Subject)"
+          }
+
       - name: Inspect runtime lock
         id: runtime_lock
         shell: pwsh

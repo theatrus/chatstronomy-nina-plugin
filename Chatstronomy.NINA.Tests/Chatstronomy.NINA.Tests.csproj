@@ -10,6 +10,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="NINA.Plugin" Version="3.2.0.9001">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <ProjectReference Include="..\Chatstronomy.NINA\Chatstronomy.NINA.csproj" />
     <!-- Match the version carried by NINA.Plugin so the standalone harness
          exercises the same JSON runtime N.I.N.A. loads in production. -->
@@ -18,5 +21,6 @@
 
   <ItemGroup>
     <None Include="Fixtures\example_last_af.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\registry\plugins\manifests" Link="registry\plugins\manifests" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
