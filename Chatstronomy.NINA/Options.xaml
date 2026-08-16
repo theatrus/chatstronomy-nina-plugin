@@ -1,0 +1,334 @@
+<ResourceDictionary
+    x:Class="Chatstronomy.NINA.Options"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ui="clr-namespace:Chatstronomy.NINA.UI">
+    <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
+    <DataTemplate x:Key="Chatstronomy_Options">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel MaxWidth="780" Margin="0,0,12,16">
+                <TextBlock FontSize="20" FontWeight="SemiBold" Text="Chat delivery" />
+                <TextBlock
+                    Margin="0,4,0,14"
+                    Text="Choose who owns the chat connection. This is independent of whether Chatstronomy reads N.I.N.A. through Direct or Advanced API mode."
+                    TextWrapping="Wrap" />
+
+                <Border Padding="12" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <RadioButton
+                            GroupName="ChatstronomyDelivery"
+                            Content="Discord webhook — simple local notifications"
+                            IsChecked="{Binding UseDiscordWebhook}" />
+                        <TextBlock
+                            Margin="22,2,0,10"
+                            Text="Run Chatstronomy on this computer and post through an existing Discord webhook."
+                            TextWrapping="Wrap" />
+
+                        <RadioButton
+                            GroupName="ChatstronomyDelivery"
+                            Content="Discord app / bot — full local bot"
+                            IsChecked="{Binding UseDiscordBot}" />
+                        <TextBlock
+                            Margin="22,2,0,10"
+                            Text="Run Chatstronomy in the background with your Discord application credentials and slash commands."
+                            TextWrapping="Wrap" />
+
+                        <RadioButton
+                            GroupName="ChatstronomyDelivery"
+                            Content="Matrix only — local Matrix account"
+                            IsChecked="{Binding UseMatrixOnly}" />
+                        <TextBlock
+                            Margin="22,2,0,10"
+                            Text="Run Chatstronomy on this computer using Matrix without requiring Discord."
+                            TextWrapping="Wrap" />
+
+                        <RadioButton
+                            GroupName="ChatstronomyDelivery"
+                            Content="Chatstronomy.com — hosted bot"
+                            IsChecked="{Binding UseHostedService}" />
+                        <TextBlock
+                            Margin="22,2,0,0"
+                            Text="Connect this N.I.N.A. profile outbound to the hosted service; no Discord credential or local bot is needed."
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Grid
+                    Margin="0,14,0,0"
+                    Visibility="{Binding UseDiscordWebhook, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock VerticalAlignment="Center" Text="Discord webhook URL" />
+                    <PasswordBox
+                        Grid.Column="1"
+                        MinWidth="420"
+                        ui:PasswordBoxBinding.Attach="True"
+                        ui:PasswordBoxBinding.Password="{Binding DiscordWebhookUrl, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                </Grid>
+
+                <Grid
+                    Margin="0,14,0,0"
+                    Visibility="{Binding UseDiscordBot, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Margin="0,4,12,4" VerticalAlignment="Center" Text="Discord bot token" />
+                    <PasswordBox
+                        Grid.Column="1"
+                        Margin="0,4"
+                        ui:PasswordBoxBinding.Attach="True"
+                        ui:PasswordBoxBinding.Password="{Binding DiscordBotToken, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="Application ID (optional)" />
+                    <TextBox
+                        Grid.Row="1"
+                        Grid.Column="1"
+                        Margin="0,4"
+                        Text="{Binding DiscordApplicationId, UpdateSourceTrigger=LostFocus}" />
+                    <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Center" Text="Default channel ID" />
+                    <TextBox
+                        Grid.Row="2"
+                        Grid.Column="1"
+                        Margin="0,4"
+                        Text="{Binding DiscordChannelId, UpdateSourceTrigger=LostFocus}" />
+                </Grid>
+
+                <Grid
+                    Margin="0,14,0,0"
+                    Visibility="{Binding UseHostedService, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Margin="0,4,12,4" VerticalAlignment="Center" Text="HTTPS / WSS hub URL" />
+                    <TextBox
+                        Grid.Column="1"
+                        Margin="0,4"
+                        Text="{Binding HostedServiceUrl, UpdateSourceTrigger=LostFocus}" />
+                    <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="One-time pairing code" />
+                    <PasswordBox
+                        Grid.Row="1"
+                        Grid.Column="1"
+                        Margin="0,4"
+                        ui:PasswordBoxBinding.Attach="True"
+                        ui:PasswordBoxBinding.Password="{Binding HostedPairingToken, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                    <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Top" Text="Connection credential" />
+                    <TextBlock
+                        Grid.Row="2"
+                        Grid.Column="1"
+                        Margin="0,4"
+                        Text="{Binding HostedCredentialStatus}"
+                        TextWrapping="Wrap" />
+                    <StackPanel
+                        Grid.Row="3"
+                        Grid.Column="1"
+                        Margin="0,8,0,0"
+                        HorizontalAlignment="Right"
+                        Orientation="Horizontal">
+                        <Button
+                            MinWidth="120"
+                            Margin="0,0,8,0"
+                            Command="{Binding ConnectHostedCommand}"
+                            Content="Pair / reconnect" />
+                        <Button
+                            MinWidth="90"
+                            Margin="0,0,8,0"
+                            Command="{Binding DisconnectHostedCommand}"
+                            Content="Disconnect" />
+                        <Button
+                            MinWidth="110"
+                            Command="{Binding ForgetHostedCredentialCommand}"
+                            Content="Forget credential" />
+                    </StackPanel>
+                </Grid>
+
+                <Border
+                    Margin="0,16,0,0"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1"
+                    Visibility="{Binding UsesLocalRuntime, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Matrix delivery" />
+                        <TextBlock
+                            Margin="0,3,0,10"
+                            Text="Use Matrix by itself, or connect it alongside the selected local Discord delivery."
+                            TextWrapping="Wrap" />
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock VerticalAlignment="Center" Text="Enable Matrix alongside Discord" />
+                            <CheckBox
+                                Grid.Column="1"
+                                IsEnabled="{Binding CanToggleLocalMatrix}"
+                                IsChecked="{Binding UseLocalMatrix}" />
+                        </Grid>
+                        <Grid Visibility="{Binding UseLocalMatrix, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="180" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Margin="0,4,12,4" VerticalAlignment="Center" Text="HTTPS homeserver URL" />
+                            <TextBox
+                                Grid.Column="1"
+                                Margin="0,4"
+                                Text="{Binding MatrixHomeserverUrl, UpdateSourceTrigger=LostFocus}" />
+                            <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="Username" />
+                            <TextBox
+                                Grid.Row="1"
+                                Grid.Column="1"
+                                Margin="0,4"
+                                Text="{Binding MatrixUsername, UpdateSourceTrigger=LostFocus}" />
+                            <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Center" Text="Password" />
+                            <PasswordBox
+                                Grid.Row="2"
+                                Grid.Column="1"
+                                Margin="0,4"
+                                ui:PasswordBoxBinding.Attach="True"
+                                ui:PasswordBoxBinding.Password="{Binding MatrixPassword, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                            <TextBlock Grid.Row="3" Margin="0,4,12,4" VerticalAlignment="Center" Text="Default room ID" />
+                            <TextBox
+                                Grid.Row="3"
+                                Grid.Column="1"
+                                Margin="0,4"
+                                Text="{Binding MatrixRoomId, UpdateSourceTrigger=LostFocus}" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Margin="0,16,0,0"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1"
+                    Visibility="{Binding UsesLocalRuntime, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Local Chatstronomy runtime" />
+                        <TextBlock
+                            Margin="0,3,0,10"
+                            Text="The plugin can own a bundled or separately installed Chatstronomy process. Credentials are handed over a current-user-only named pipe, never command-line arguments or a temporary configuration file."
+                            TextWrapping="Wrap" />
+                        <TextBlock FontWeight="SemiBold" Text="N.I.N.A. data source" />
+                        <RadioButton
+                            Margin="0,6,0,0"
+                            GroupName="ChatstronomySource"
+                            Content="Direct â€” use this plugin (recommended)"
+                            IsChecked="{Binding UseDirectSource}" />
+                        <TextBlock
+                            Margin="22,2,0,6"
+                            Text="Reads N.I.N.A. mediators directly. The Advanced API plugin and HTTP endpoint are not required."
+                            TextWrapping="Wrap" />
+                        <RadioButton
+                            GroupName="ChatstronomySource"
+                            Content="Advanced API â€” compatibility mode"
+                            IsChecked="{Binding UseAdvancedApiSource}" />
+                        <TextBlock
+                            Margin="22,2,0,12"
+                            Text="Polls an existing Advanced API installation and preserves the legacy integration."
+                            TextWrapping="Wrap" />
+                        <Grid Margin="0,0,0,5">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock VerticalAlignment="Center" Text="Start Chatstronomy with N.I.N.A." />
+                            <CheckBox
+                                Grid.Column="1"
+                                IsEnabled="{Binding UseAdvancedApiSource}"
+                                IsChecked="{Binding StartLocalRuntime}" />
+                        </Grid>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                Text="Stop the plugin-owned runtime when N.I.N.A. exits" />
+                            <CheckBox
+                                Grid.Column="1"
+                                IsEnabled="{Binding UseAdvancedApiSource}"
+                                IsChecked="{Binding StopLocalRuntimeWithNina}" />
+                        </Grid>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="180" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock VerticalAlignment="Center" Text="Runtime executable" />
+                            <TextBox
+                                Grid.Column="1"
+                                Text="{Binding LocalRuntimePath, UpdateSourceTrigger=LostFocus}" />
+                        </Grid>
+                        <StackPanel Visibility="{Binding UseAdvancedApiSource, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="180" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Advanced API URL" />
+                                <TextBox
+                                    Grid.Column="1"
+                                    Text="{Binding AdvancedApiBaseUrl, UpdateSourceTrigger=LostFocus}" />
+                            </Grid>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="180" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Polling interval (seconds)" />
+                                <TextBox
+                                    Grid.Column="1"
+                                    Text="{Binding PollingIntervalSeconds, UpdateSourceTrigger=LostFocus}" />
+                            </Grid>
+                        </StackPanel>
+                        <StackPanel
+                            Margin="0,12,0,0"
+                            HorizontalAlignment="Right"
+                            Orientation="Horizontal">
+                            <Button
+                                MinWidth="110"
+                                Margin="0,0,8,0"
+                                Command="{Binding StartRuntimeCommand}"
+                                Content="Start / restart" />
+                            <Button
+                                MinWidth="80"
+                                Command="{Binding StopRuntimeCommand}"
+                                Content="Stop" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Margin="0,14,0,0"
+                    Padding="10"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1">
+                    <TextBlock Text="{Binding ConfigurationStatus}" TextWrapping="Wrap" />
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </DataTemplate>
+</ResourceDictionary>

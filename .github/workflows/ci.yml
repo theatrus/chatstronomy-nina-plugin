@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  test:
+    name: Build, test, and package
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build plugin
+        shell: pwsh
+        run: dotnet build Chatstronomy.NINA/Chatstronomy.NINA.csproj --configuration Release
+
+      - name: Run standalone compatibility tests
+        shell: pwsh
+        run: dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
+
+      - name: Validate archive and manifest generation
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Version = '0.1.0.10'
+            SkipRuntime = $true
+            InstallerUrl = 'https://example.invalid/Chatstronomy.NINA.0.1.0.10.zip'
+            FeaturedImageUrl = 'https://example.invalid/chatstronomy-featured.png'
+          }
+          ./build-package.ps1 @arguments -StageOnly
+          if (-not (Test-Path -LiteralPath 'artifacts/nina-plugin/package/Chatstronomy/Chatstronomy.dll' -PathType Leaf)) {
+            throw 'StageOnly did not produce the plugin DLL.'
+          }
+          ./build-package.ps1 @arguments -PackageOnly
+
+      - name: Inspect runtime lock
+        id: runtime_lock
+        shell: pwsh
+        run: |
+          $lock = Get-Content -LiteralPath runtime.lock.json -Raw | ConvertFrom-Json
+          $locked = if ($lock.state -eq 'locked') { 'true' } else { 'false' }
+          "locked=$locked" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Runtime lock state: $($lock.state)"
+
+      - name: Run pinned backend integration tests
+        if: steps.runtime_lock.outputs.locked == 'true'
+        shell: pwsh
+        run: |
+          $runtime = ./fetch-runtime.ps1 | Select-Object -Last 1
+          $signature = Get-AuthenticodeSignature -LiteralPath $runtime.Runtime
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -notlike '*StackFoundry LLC*') {
+            throw "Pinned runtime signature is $($signature.Status): $($signature.SignerCertificate.Subject)"
+          }
+          $env:CHATSTRONOMY_RUNTIME_EXE = $runtime.Runtime
+          $env:CHATSTRONOMY_HUB_EXE = $runtime.HubProbe
+          $env:CHATSTRONOMY_CONTRACTS_DIR = $runtime.Contracts
+          dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
+          ./build-package.ps1 -Version 0.1.0.10 -RuntimePath $runtime.Runtime
+
+      - name: Upload package smoke-test
+        uses: actions/upload-artifact@v7
+        with:
+          name: chatstronomy-nina-package-smoke-test
+          path: |
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.10.zip
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.10.manifest.json

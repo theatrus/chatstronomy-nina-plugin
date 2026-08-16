@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Plugin version to stage and sign (four numeric parts)
+        required: true
+        default: 0.1.0.10
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  release:
+    name: Test and publish plugin
+    runs-on: windows-latest
+    # The Azure federated credential is scoped to this environment.
+    environment: release
+    env:
+      SIGN_WINDOWS: >-
+        ${{ ((github.event_name == 'push' && github.ref_type == 'tag')
+        || github.event_name == 'workflow_dispatch')
+        && vars.AZURE_CLIENT_ID != ''
+        && 'true' || 'false' }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve plugin version
+        id: version
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $tag = $env:GITHUB_REF_NAME
+            if ($tag -notmatch '^v(\d+\.\d+\.\d+\.\d+)$') {
+              throw "Plugin release tags must be v followed by four numeric parts. Got: $tag"
+            }
+            $Matches[1]
+          } else {
+            $env:REQUESTED_VERSION
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Plugin versions must contain four numeric parts. Got: $version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Require signing for canonical releases
+        if: github.repository == 'theatrus/chatstronomy-nina-plugin' && env.SIGN_WINDOWS != 'true'
+        shell: pwsh
+        run: throw 'Official Chatstronomy plugin releases require the Azure signing configuration.'
+
+      - name: Fetch pinned backend artifacts
+        id: runtime
+        shell: pwsh
+        run: |
+          $runtime = ./fetch-runtime.ps1 | Select-Object -Last 1
+          "runtime=$($runtime.Runtime)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "hub_probe=$($runtime.HubProbe)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "contracts=$($runtime.Contracts)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Run full compatibility suite
+        shell: pwsh
+        env:
+          CHATSTRONOMY_RUNTIME_EXE: ${{ steps.runtime.outputs.runtime }}
+          CHATSTRONOMY_HUB_EXE: ${{ steps.runtime.outputs.hub_probe }}
+          CHATSTRONOMY_CONTRACTS_DIR: ${{ steps.runtime.outputs.contracts }}
+        run: dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
+
+      # Build and stage first. The archive checksum goes into the N.I.N.A.
+      # manifest, so the DLL must be signed before the archive is created.
+      - name: Stage N.I.N.A. package
+        shell: pwsh
+        env:
+          PINNED_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $archiveName = "Chatstronomy.NINA.$version.zip"
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/v$version/$archiveName"
+          "PLUGIN_INSTALLER_URL=$installerUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          ./build-package.ps1 `
+            -Version $version `
+            -RuntimePath $env:PINNED_RUNTIME `
+            -InstallerUrl $installerUrl `
+            -Channel Beta `
+            -StageOnly
+
+      # The backend owns and signs its lean runtime before hashing it into the
+      # pinned release manifest. Verify that exact copy, but do not sign it a
+      # second time in this repository.
+      - name: Verify pinned backend runtime signature
+        shell: pwsh
+        run: |
+          $runtime = 'artifacts/nina-plugin/package/Chatstronomy/runtime/chatstronomy.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $runtime
+          if ($signature.Status -ne 'Valid') {
+            throw "Pinned backend runtime signature is $($signature.Status)"
+          }
+          if ($signature.SignerCertificate.Subject -notlike '*StackFoundry LLC*') {
+            throw "Pinned backend runtime has unexpected signer: $($signature.SignerCertificate.Subject)"
+          }
+          Write-Output "Runtime OK: $($signature.SignerCertificate.Subject)"
+
+      # Keep authentication adjacent to signing: the OIDC assertion used by
+      # Azure is short-lived and the compatibility suite above can run longer.
+      - name: Authenticate to Azure
+        if: env.SIGN_WINDOWS == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the Chatstronomy plugin DLL
+        if: env.SIGN_WINDOWS == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\artifacts\nina-plugin\package\Chatstronomy\Chatstronomy.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify signed plugin DLL
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          $plugin = 'artifacts/nina-plugin/package/Chatstronomy/Chatstronomy.dll'
+          $signature = Get-AuthenticodeSignature -LiteralPath $plugin
+          if ($signature.Status -ne 'Valid') {
+            throw "Chatstronomy.dll signature is $($signature.Status)"
+          }
+          if ($signature.SignerCertificate.Subject -notlike '*StackFoundry LLC*') {
+            throw "Chatstronomy.dll has unexpected signer: $($signature.SignerCertificate.Subject)"
+          }
+          Write-Output "Plugin OK: $($signature.SignerCertificate.Subject)"
+
+      - name: Archive signed package and write N.I.N.A. manifest
+        shell: pwsh
+        run: |
+          ./build-package.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -InstallerUrl $env:PLUGIN_INSTALLER_URL `
+            -Channel Beta `
+            -PackageOnly
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Chatstronomy for N.I.N.A. ${{ steps.version.outputs.version }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.zip
+            artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.manifest.json
+
+      - name: Upload signed release candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Chatstronomy.NINA.${{ steps.version.outputs.version }}
+          path: |
+            artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.zip
+            artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.manifest.json
