@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.10',
+    [string] $Version = '0.1.0.11',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',
@@ -13,9 +13,6 @@ param(
     [string] $OutputDirectory = 'artifacts/nina-plugin',
 
     [string] $RuntimePath = 'runtime-cache/chatstronomy.exe',
-
-    [ValidateSet('Beta', 'Stable')]
-    [string] $Channel = 'Beta',
 
     [switch] $SkipRuntime,
 
@@ -178,7 +175,6 @@ $manifest = [ordered]@{
         Checksum = $checksum
         ChecksumType = 'SHA256'
     }
-    Channel = $Channel
 }
 
 $json = $manifest | ConvertTo-Json -Depth 10
