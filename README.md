@@ -57,10 +57,9 @@ signs `Chatstronomy.dll`, verifies both signatures, and only then creates the ZI
 and N.I.N.A. checksum. `build-package.ps1 -StageOnly` and `-PackageOnly` expose
 that signing seam without changing the normal one-command development build.
 
-The initial lock remains `pending_backend_release` until backend artifact PR
-[#136](https://github.com/theatrus/chatstronomy/pull/136) is merged and the
-corresponding `v0.3.0` artifacts exist. The fetcher intentionally refuses a
-pending lock.
+The lock currently resolves backend release `v0.3.0` by the SHA-256 of its
+runtime manifest. Updating the backend tag requires an explicit review and lock
+change; the fetcher intentionally refuses pending or incomplete locks.
 
 ## Build and test
 
