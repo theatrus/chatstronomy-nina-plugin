@@ -1104,7 +1104,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.18",
+        "0.1.0.19",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
