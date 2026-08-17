@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.18',
+    [string] $Version = '0.1.0.19',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',
@@ -150,7 +150,7 @@ $manifest = [ordered]@{
         Build = $versionParts[3]
     }
     Author = 'Yann Ramin'
-    Homepage = 'https://github.com/theatrus/chatstronomy-nina-plugin'
+    Homepage = 'https://chatstronomy.com/'
     Repository = 'https://github.com/theatrus/chatstronomy-nina-plugin'
     License = 'Apache-2.0'
     LicenseURL = 'https://github.com/theatrus/chatstronomy-nina-plugin/blob/main/LICENSE'
