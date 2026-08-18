@@ -165,7 +165,7 @@ internal static class Program
             ?? throw new InvalidOperationException("N.I.N.A. rejected the development manifest.");
 
         AssertEqual("Chatstronomy", manifest.Name);
-        AssertEqual("0.1.0.19", manifest.Version.ToString());
+        AssertEqual("0.1.0.20", manifest.Version.ToString());
         AssertEqual("3.2.0.9001", manifest.MinimumApplicationVersion.ToString());
         AssertEqual(InstallerType.ARCHIVE, manifest.Installer.Type);
         AssertEqual(InstallerChecksum.SHA256, manifest.Installer.ChecksumType);
