@@ -8,8 +8,10 @@ using Newtonsoft.Json.Linq;
 using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace Chatstronomy.NINA.Tests;
 
@@ -53,6 +55,24 @@ internal static class Program
         await RunAsync(
             "Hosted stop finalizes cleanup before honoring caller cancellation",
             HostedStopFinalizesBeforeCallerCancellation);
+        await RunAsync(
+            "Hosted client reconnects when heartbeat acknowledgements stop",
+            HostedMissingHeartbeatAcknowledgementReconnects);
+        await RunAsync(
+            "Hosted heartbeat acknowledgements keep one connection alive",
+            HostedHeartbeatAcknowledgementsKeepConnectionAlive);
+        await RunAsync(
+            "Hosted stalled sends abort and reconnect",
+            HostedStalledSendReconnects);
+        await RunAsync(
+            "Hosted stop aborts cancellation-resistant sockets",
+            HostedStopAbortsCancellationResistantSocket);
+        await RunAsync(
+            "Hosted concurrent starts leave one owned connection",
+            HostedConcurrentStartsLeaveOneConnection);
+        await RunAsync(
+            "Hosted queries cannot block heartbeat liveness",
+            HostedBlockedQueryDoesNotBlockHeartbeats);
         Run("Local runtime requires an existing executable", LocalRuntimeRequiresExecutable);
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
@@ -1062,6 +1082,248 @@ internal static class Program
         }
     }
 
+    private static async Task HostedMissingHeartbeatAcknowledgementReconnects()
+    {
+        var hello = HostedHello();
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var sockets = new ControlledHubSocketFactory(index => new ControlledHubSocket(
+                AgentHelloJson(hello),
+                acknowledgeHeartbeats: index > 1));
+            var client = new ChatstronomyHubClient(
+                provider,
+                sockets,
+                timings: FastHubTimings(),
+                jitterSource: () => 0.5);
+            var configuration = HostedConfiguration(hello);
+
+            await client.StartAsync(configuration, hello, CancellationToken.None);
+            await WaitUntilAsync(() => sockets.CreateCount >= 2, TimeSpan.FromSeconds(2));
+
+            var first = sockets.Sockets.First();
+            AssertTrue(first.HeartbeatCount >= 1);
+            AssertTrue(first.AbortCount >= 1);
+            await WaitUntilAsync(
+                () => sockets.Sockets.ElementAtOrDefault(1)?.HeartbeatCount >= 3,
+                TimeSpan.FromSeconds(2));
+            AssertTrue(client.IsConnected);
+            await Task.Delay(100);
+            AssertEqual(2, sockets.CreateCount);
+
+            await client.StopAsync(CancellationToken.None);
+            AssertFalse(client.IsConnected);
+            AssertFalse(client.IsRunning);
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
+    private static async Task HostedHeartbeatAcknowledgementsKeepConnectionAlive()
+    {
+        var hello = HostedHello();
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+                AgentHelloJson(hello),
+                acknowledgeHeartbeats: true));
+            var client = new ChatstronomyHubClient(
+                provider,
+                sockets,
+                timings: FastHubTimings(),
+                jitterSource: () => 0.5);
+
+            await client.StartAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None);
+            await WaitUntilAsync(
+                () => sockets.Sockets.FirstOrDefault()?.HeartbeatCount >= 3,
+                TimeSpan.FromSeconds(2));
+
+            AssertEqual(1, sockets.CreateCount);
+            AssertTrue(client.IsConnected);
+            await client.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
+    private static async Task HostedStalledSendReconnects()
+    {
+        var hello = HostedHello();
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var sockets = new ControlledHubSocketFactory(index => new ControlledHubSocket(
+                AgentHelloJson(hello),
+                acknowledgeHeartbeats: index > 1,
+                stallHeartbeatSends: index == 1));
+            var client = new ChatstronomyHubClient(
+                provider,
+                sockets,
+                timings: FastHubTimings(),
+                jitterSource: () => 0.5);
+
+            await client.StartAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None);
+            await WaitUntilAsync(() => sockets.CreateCount >= 2, TimeSpan.FromSeconds(2));
+
+            AssertTrue(sockets.Sockets.First().AbortCount >= 1);
+            await WaitUntilAsync(
+                () => sockets.Sockets.ElementAtOrDefault(1)?.HeartbeatCount >= 3,
+                TimeSpan.FromSeconds(2));
+            AssertTrue(client.IsConnected);
+            await Task.Delay(100);
+            AssertEqual(2, sockets.CreateCount);
+            await client.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
+    private static async Task HostedStopAbortsCancellationResistantSocket()
+    {
+        var hello = HostedHello();
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+                AgentHelloJson(hello),
+                acknowledgeHeartbeats: true));
+            var timings = FastHubTimings() with
+            {
+                HeartbeatAcknowledgementTimeout = TimeSpan.FromSeconds(5),
+            };
+            var client = new ChatstronomyHubClient(
+                provider,
+                sockets,
+                timings: timings,
+                jitterSource: () => 0.5);
+
+            await client.StartAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None);
+            await WaitUntilAsync(() => client.IsConnected, TimeSpan.FromSeconds(1));
+            var elapsed = Stopwatch.StartNew();
+            await client.StopAsync(CancellationToken.None);
+            elapsed.Stop();
+
+            AssertTrue(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+            AssertTrue(sockets.Sockets.Single().AbortCount >= 1);
+            AssertFalse(client.IsConnected);
+            AssertFalse(client.IsRunning);
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
+    private static async Task HostedBlockedQueryDoesNotBlockHeartbeats()
+    {
+        var hello = HostedHello();
+        var query = QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            expiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        var provider = new BlockingDirectDataProvider();
+        var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+            AgentHelloJson(hello),
+            acknowledgeHeartbeats: true,
+            additionalInbound: new[] { query }));
+        var client = new ChatstronomyHubClient(
+            provider,
+            sockets,
+            timings: FastHubTimings(),
+            jitterSource: () => 0.5);
+        try
+        {
+            await client.StartAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None);
+            await provider.Started.WaitAsync(TimeSpan.FromSeconds(1));
+            await WaitUntilAsync(
+                () => sockets.Sockets.Single().HeartbeatCount >= 3,
+                TimeSpan.FromSeconds(2));
+
+            AssertTrue(client.IsConnected);
+            AssertEqual(1, sockets.CreateCount);
+            await client.StopAsync(CancellationToken.None);
+            AssertFalse(client.IsConnected);
+
+            // A replacement connection may keep reading/acking, but it must
+            // not overtake the old N.I.N.A. provider call that ignored
+            // cancellation.
+            await client.StartAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None);
+            await WaitUntilAsync(
+                () => sockets.Sockets.ElementAtOrDefault(1)?.HeartbeatCount >= 2,
+                TimeSpan.FromSeconds(2));
+            AssertEqual(1, provider.QueryCount);
+
+            provider.Release();
+            await WaitUntilAsync(() => provider.QueryCount == 2, TimeSpan.FromSeconds(1));
+            await client.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            provider.Release();
+            provider.Dispose();
+        }
+    }
+
+    private static async Task HostedConcurrentStartsLeaveOneConnection()
+    {
+        var hello = HostedHello();
+        var provider = new FakeDirectDataProvider();
+        provider.Start();
+        try
+        {
+            var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+                AgentHelloJson(hello),
+                acknowledgeHeartbeats: true));
+            var client = new ChatstronomyHubClient(
+                provider,
+                sockets,
+                timings: FastHubTimings(),
+                jitterSource: () => 0.5);
+            var configuration = HostedConfiguration(hello);
+
+            await Task.WhenAll(
+                client.StartAsync(configuration, hello, CancellationToken.None),
+                client.StartAsync(configuration, hello, CancellationToken.None));
+            await WaitUntilAsync(
+                () => client.IsConnected
+                    && sockets.Sockets.LastOrDefault()?.HeartbeatCount >= 2,
+                TimeSpan.FromSeconds(2));
+
+            AssertEqual(1, sockets.Sockets.Count(socket => socket.AbortCount == 0));
+            await client.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            provider.Dispose();
+        }
+    }
+
     private static async Task HostedPluginRejectsExpiredCommands()
     {
         var hello = HostedHello();
@@ -1108,6 +1370,38 @@ internal static class Program
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
+    private static HubConnectionConfiguration HostedConfiguration(ClientHello hello) => new(
+        new Uri("https://hub.example.test/"),
+        Credential: "csrc_existing",
+        PairingToken: null,
+        hello.ProfileId);
+
+    private static HubClientTimings FastHubTimings() => HubClientTimings.Default with
+    {
+        ConnectionAttemptTimeout = TimeSpan.FromMilliseconds(100),
+        HeartbeatInterval = TimeSpan.FromMilliseconds(20),
+        HeartbeatAcknowledgementTimeout = TimeSpan.FromMilliseconds(40),
+        SocketOperationTimeout = TimeSpan.FromMilliseconds(40),
+        ShutdownTimeout = TimeSpan.FromMilliseconds(100),
+        InitialReconnectDelay = TimeSpan.FromMilliseconds(10),
+        MaximumReconnectDelay = TimeSpan.FromMilliseconds(40),
+        StableConnectionDuration = TimeSpan.FromMilliseconds(100),
+        QueryQueueCapacity = 2,
+    };
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (elapsed.Elapsed >= timeout)
+            {
+                throw new TimeoutException("Timed out waiting for the test condition.");
+            }
+            await Task.Delay(5);
+        }
+    }
+
     private static string QueryJson(Guid id, string kind, long? expiresAt = null) =>
         JsonSerializer.Serialize(
             new
@@ -1139,6 +1433,13 @@ internal static class Program
 
     private static string AgentHelloJson(ClientHello hello) =>
         JsonSerializer.Serialize(new { type = "agent_hello", payload = AgentHelloPayload(hello) });
+
+    private static string HeartbeatAcknowledgementJson(ulong sequence) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "heartbeat_ack",
+            payload = new { seq = sequence },
+        });
 
     private static string LegacyAgentHelloJson(ClientHello hello) =>
         JsonSerializer.Serialize(new
@@ -1554,6 +1855,125 @@ internal static class Program
             $"Expected {typeof(TException).Name} to be thrown.");
     }
 
+    private sealed class ControlledHubSocketFactory(
+        Func<int, ControlledHubSocket> createSocket) : IHubSocketFactory
+    {
+        private readonly ConcurrentQueue<ControlledHubSocket> sockets = new();
+        private int createCount;
+
+        internal int CreateCount => Volatile.Read(ref createCount);
+
+        internal IReadOnlyList<ControlledHubSocket> Sockets => sockets.ToArray();
+
+        public IHubSocket Create()
+        {
+            var socket = createSocket(Interlocked.Increment(ref createCount));
+            sockets.Enqueue(socket);
+            return socket;
+        }
+    }
+
+    private sealed class ControlledHubSocket : IHubSocket
+    {
+        private readonly Channel<string> inbound = Channel.CreateUnbounded<string>(
+            new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+            });
+        private readonly TaskCompletionSource aborted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool acknowledgeHeartbeats;
+        private readonly bool stallHeartbeatSends;
+        private int heartbeatCount;
+        private int abortCount;
+
+        internal ControlledHubSocket(
+            string handshake,
+            bool acknowledgeHeartbeats,
+            bool stallHeartbeatSends = false,
+            IEnumerable<string>? additionalInbound = null)
+        {
+            this.acknowledgeHeartbeats = acknowledgeHeartbeats;
+            this.stallHeartbeatSends = stallHeartbeatSends;
+            inbound.Writer.TryWrite(handshake);
+            if (additionalInbound is not null)
+            {
+                foreach (var message in additionalInbound)
+                {
+                    inbound.Writer.TryWrite(message);
+                }
+            }
+        }
+
+        internal ConcurrentQueue<string> SentMessages { get; } = new();
+
+        internal int HeartbeatCount => Volatile.Read(ref heartbeatCount);
+
+        internal int AbortCount => Volatile.Read(ref abortCount);
+
+        public void Abort()
+        {
+            Interlocked.Increment(ref abortCount);
+            aborted.TrySetResult();
+            inbound.Writer.TryComplete();
+        }
+
+        public Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public async Task SendTextAsync(string message, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SentMessages.Enqueue(message);
+            using var document = JsonDocument.Parse(message);
+            if (document.RootElement.GetProperty("type").GetString() != "heartbeat")
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref heartbeatCount);
+            if (stallHeartbeatSends)
+            {
+                await aborted.Task.ConfigureAwait(false);
+                throw new IOException("Socket send was aborted.");
+            }
+            if (acknowledgeHeartbeats)
+            {
+                var sequence = document.RootElement
+                    .GetProperty("payload")
+                    .GetProperty("seq")
+                    .GetUInt64();
+                inbound.Writer.TryWrite(HeartbeatAcknowledgementJson(sequence));
+            }
+        }
+
+        public async Task<string?> ReceiveTextAsync(CancellationToken cancellationToken)
+        {
+            // Deliberately ignore cancellation: the lifecycle code must use
+            // Abort to make cleanup bounded when a socket implementation or
+            // network stack does not cooperate with its token.
+            try
+            {
+                return await inbound.Reader.ReadAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (ChannelClosedException)
+            {
+                return null;
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Abort();
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private sealed class ScriptedHubSocketFactory(params string[] inbound)
         : IHubSocketFactory
     {
@@ -1569,6 +1989,10 @@ internal static class Program
         internal ConcurrentQueue<string> SentMessages { get; } = new();
 
         internal Uri? Endpoint { get; private set; }
+
+        public void Abort()
+        {
+        }
 
         public Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken)
         {
@@ -1601,6 +2025,10 @@ internal static class Program
 
     private sealed class HangingHubSocket(bool hangDuringConnect) : IHubSocket
     {
+        public void Abort()
+        {
+        }
+
         public async Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken)
         {
             if (hangDuringConnect)
@@ -1622,6 +2050,61 @@ internal static class Program
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class BlockingDirectDataProvider : INinaDirectDataProvider
+    {
+        private readonly TaskCompletionSource started = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<object?> release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int queryCount;
+
+        public DirectCapabilities Capabilities { get; } = new(
+            EventHistory: true,
+            ImageHistory: true,
+            Thumbnails: true,
+            Sequence: true,
+            EquipmentSnapshots: true,
+            AutofocusDetails: true,
+            GuiderGraph: true,
+            Commands: true);
+
+        internal Task Started => started.Task;
+
+        internal int QueryCount => Volatile.Read(ref queryCount);
+
+        internal void Release() => release.TrySetResult(
+            DirectApiEnvelope<object>.Ok(new { Connected = true }));
+
+        public void Start()
+        {
+        }
+
+        public void Stop()
+        {
+        }
+
+        public void Reset()
+        {
+        }
+
+        public void ApplyLogDeliveryOptions()
+        {
+        }
+
+        public async Task<object?> ExecuteAsync(
+            DirectQuery query,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref queryCount);
+            started.TrySetResult();
+            // Model a synchronous UI/provider call that cannot honor the
+            // connection token until N.I.N.A. gives control back.
+            return await release.Task.ConfigureAwait(false);
+        }
+
+        public void Dispose() => Release();
     }
 
     private sealed class FakeDirectDataProvider : INinaDirectDataProvider
