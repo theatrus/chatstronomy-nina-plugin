@@ -6,6 +6,8 @@ namespace Chatstronomy.NINA.Remote;
 
 internal interface IHubSocket : IAsyncDisposable
 {
+    void Abort();
+
     Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken);
 
     Task SendTextAsync(string message, CancellationToken cancellationToken);
@@ -33,6 +35,8 @@ internal sealed class ClientWebSocketAdapter : IHubSocket
     {
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
     }
+
+    public void Abort() => socket.Abort();
 
     public Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken) =>
         socket.ConnectAsync(endpoint, cancellationToken);
