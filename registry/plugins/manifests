@@ -6,7 +6,7 @@
       "Major": "0",
       "Minor": "1",
       "Patch": "0",
-      "Build": "22"
+      "Build": "23"
     },
     "Author": "Yann Ramin",
     "Homepage": "https://chatstronomy.com/",
@@ -28,15 +28,15 @@
     },
     "Descriptions": {
       "ShortDescription": "Bridge NINA with Discord and Matrix, supporting bot slash commands for control",
-      "LongDescription": "Routes native N.I.N.A. status, events, images, popup notifications, selected logs, and approved commands through Discord and Matrix. Supports a supervised local runtime or multi-system Chatstronomy Hub.",
+      "LongDescription": "Routes selected N.I.N.A. status, events, images, popup notifications, logs, and approved commands to the hosted Discord Hub or a supervised local Discord/Matrix runtime.",
       "FeaturedImageURL": "https://raw.githubusercontent.com/theatrus/chatstronomy-nina-plugin/main/assets/branding/chatstronomy-featured.png",
       "ScreenshotURL": "",
       "AltScreenshotURL": ""
     },
     "Installer": {
-      "URL": "https://github.com/theatrus/chatstronomy-nina-plugin/releases/download/v0.1.0.22/Chatstronomy.NINA.0.1.0.22.zip",
+      "URL": "https://github.com/theatrus/chatstronomy-nina-plugin/releases/download/v0.1.0.23/Chatstronomy.NINA.0.1.0.23.zip",
       "Type": "ARCHIVE",
-      "Checksum": "C3FD911029F2C6D5BF5C5F7C9EFC13B9A3B29BB14CB8C18F338317F22F323069",
+      "Checksum": "37AD42D93FAB1DAC3D9AE1AE8BBC80E890DAA8BFDBE1EF416C9D8D7858E0DE58",
       "ChecksumType": "SHA256"
     }
   }
