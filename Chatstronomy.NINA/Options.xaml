@@ -426,7 +426,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="Choose which N.I.N.A. events become chat messages. Disabling a chat notification does not prevent that event from being transmitted to the Hub or local bot for status and target tracking."
+                            Text="Choose which N.I.N.A. events may leave this computer. Disabled event categories are never sent to the Hub or local bot; disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
                             <Grid Margin="0,3,18,3">

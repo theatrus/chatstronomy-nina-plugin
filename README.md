@@ -60,10 +60,12 @@ sharing is enabled. Images, selected log lines, notifications, user-entered
 target names, and ordinary network connection information can still contain
 identifying information; review them before enabling forwarding.
 
-Hosted connections transmit native equipment and observing events to the Hub so
-it can reconstruct current state. Event-delivery switches control which events
-become chat messages; they do not prevent those events from reaching the Hub.
-Raw N.I.N.A. logs remain opt-in. Before pairing, review the hosted
+Hosted connections transmit only event categories explicitly enabled in the
+active N.I.N.A. profile. Turning a category off prevents its underlying events
+from reaching the Hub or local bot, including events already buffered before
+the setting changed. Turning off images also blocks image history and
+thumbnails. Equipment/status queries remain available; raw N.I.N.A. logs remain
+opt-in. Before pairing, review the hosted
 [privacy policy](https://chatstronomy.com/hub-privacy.html) and
 [terms of service](https://chatstronomy.com/hub-terms.html).
 
@@ -76,16 +78,17 @@ The plugin provides bounded native histories and typed command handling for:
 - autofocus results and charts;
 - guider state, dithers, history, and graphs;
 - sequence lifecycle, waits, camera cooling, slew, center, and plate-solve
-  output/images;
+  results;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
 
-Event families can be enabled per N.I.N.A. profile. Disabled events are still
-consumed for state reconstruction, so suppressing a chat message does not break
-target, sequence, wait, cooling, or equipment status. Popup notifications are
-enabled by default. Raw log levels are opt-in because logs can be frequent and
-may include device or filesystem details.
+Event families can be enabled per N.I.N.A. profile. Disabled categories never
+leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
+turning a category off immediately removes its buffered events from subsequent
+queries. Images and thumbnails are also withheld when their category is off.
+Popup notifications are enabled by default. Raw log levels are opt-in because
+logs can be frequent and may include device or filesystem details.
 
 ## Development
 

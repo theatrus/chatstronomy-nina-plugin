@@ -1,8 +1,4 @@
 using System.Reflection;
-using System.IO;
-using System.Runtime.CompilerServices;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using NINA.Sequencer;
 using NINA.Sequencer.Conditions;
 using NINA.Sequencer.Container;
@@ -21,11 +17,6 @@ namespace Chatstronomy.NINA.Direct;
 /// </summary>
 internal static class NinaDirectSequenceSnapshot
 {
-    private static readonly ConditionalWeakTable<BitmapSource, EncodedThumbnail>
-        EncodedThumbnails = new();
-
-    private sealed record EncodedThumbnail(byte[] Data);
-
     private static readonly IReadOnlyDictionary<string, string> DetailNames =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -320,44 +311,38 @@ internal static class NinaDirectSequenceSnapshot
     {
         var status = OptionalProperty(item, "PlateSolveStatusVM");
         var solve = OptionalProperty(status, "PlateSolveResult");
-        var thumbnail = OptionalProperty(status, "Thumbnail") as BitmapSource;
-        if (solve is null && thumbnail is null)
+        if (solve is null)
         {
             return;
         }
 
         var output = new Dictionary<string, object?>();
-        if (solve is not null)
+        AddIfPresent(solve, output, "SolveTime", "SolveTime");
+        AddIfPresent(solve, output, "Success", "Success");
+        AddFiniteIfPresent(solve, output, "PositionAngle", "PositionAngle");
+        AddFiniteIfPresent(solve, output, "Pixscale", "PixelScale");
+        AddFiniteIfPresent(solve, output, "Radius", "RadiusDegrees");
+        AddIfPresent(solve, output, "Flipped", "Flipped");
+
+        var coordinates = OptionalProperty(solve, "Coordinates");
+        if (coordinates is not null)
         {
-            AddIfPresent(solve, output, "SolveTime", "SolveTime");
-            AddIfPresent(solve, output, "Success", "Success");
-            AddFiniteIfPresent(solve, output, "PositionAngle", "PositionAngle");
-            AddFiniteIfPresent(solve, output, "Pixscale", "PixelScale");
-            AddFiniteIfPresent(solve, output, "Radius", "RadiusDegrees");
-            AddIfPresent(solve, output, "Flipped", "Flipped");
-
-            var coordinates = OptionalProperty(solve, "Coordinates");
-            if (coordinates is not null)
-            {
-                output["Coordinates"] = CompactCoordinates(coordinates);
-            }
-
-            var separation = OptionalProperty(solve, "Separation");
-            var distance = OptionalProperty(separation, "Distance");
-            AddFiniteIfPresent(distance, output, "ArcSeconds", "SeparationArcseconds");
-            AddIfPresent(solve, output, "RaErrorString", "RaError");
-            AddIfPresent(solve, output, "DecErrorString", "DecError");
-            AddFiniteIfPresent(solve, output, "RaPixError", "RaPixelError");
-            AddFiniteIfPresent(solve, output, "DecPixError", "DecPixelError");
+            output["Coordinates"] = CompactCoordinates(coordinates);
         }
 
-        var encoded = EncodeThumbnail(thumbnail);
-        if (encoded is not null)
-        {
-            output["ThumbnailBase64"] = Convert.ToBase64String(encoded);
-            output["ThumbnailMediaType"] = "image/jpeg";
-        }
+        var separation = OptionalProperty(solve, "Separation");
+        var distance = OptionalProperty(separation, "Distance");
+        AddFiniteIfPresent(distance, output, "ArcSeconds", "SeparationArcseconds");
+        AddIfPresent(solve, output, "RaErrorString", "RaError");
+        AddIfPresent(solve, output, "DecErrorString", "DecError");
+        AddFiniteIfPresent(solve, output, "RaPixError", "RaPixelError");
+        AddFiniteIfPresent(solve, output, "DecPixError", "DecPixelError");
 
+        // N.I.N.A. keeps plate-solve thumbnails on sequence instructions long
+        // after capture. Their origin carries no image-consent provenance, so
+        // embedding one in a routinely polled state snapshot could disclose
+        // an image created while sharing was disabled. Consented image bytes
+        // are available only through the guarded image-history/thumbnail API.
         result["PlateSolveOutput"] = output;
     }
 
@@ -387,49 +372,6 @@ internal static class NinaDirectSequenceSnapshot
         AddFiniteIfPresent(coordinates, result, "Altitude", "Altitude");
         AddFiniteIfPresent(coordinates, result, "Azimuth", "Azimuth");
         return result;
-    }
-
-    private static byte[]? EncodeThumbnail(BitmapSource? source)
-    {
-        if (source is null)
-        {
-            return null;
-        }
-        if (EncodedThumbnails.TryGetValue(source, out var cached))
-        {
-            return cached.Data;
-        }
-
-        try
-        {
-            var scale = source.PixelWidth > 256 ? 256d / source.PixelWidth : 1d;
-            BitmapSource thumbnail = source;
-            if (scale < 1)
-            {
-                thumbnail = new TransformedBitmap(source, new ScaleTransform(scale, scale));
-            }
-
-            var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
-            encoder.Frames.Add(BitmapFrame.Create(thumbnail));
-            using var stream = new MemoryStream();
-            encoder.Save(stream);
-            var encoded = stream.ToArray();
-            try
-            {
-                EncodedThumbnails.Add(source, new EncodedThumbnail(encoded));
-            }
-            catch (ArgumentException)
-            {
-                // Another query cached this same WPF image concurrently.
-            }
-            return encoded;
-        }
-        catch
-        {
-            // Solve metadata remains useful if a third-party image source
-            // cannot be encoded by WPF.
-            return null;
-        }
     }
 
     private static void AddAggregateExposureDetails(

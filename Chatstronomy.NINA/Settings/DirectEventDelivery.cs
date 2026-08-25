@@ -1,9 +1,9 @@
 namespace Chatstronomy.NINA.Settings;
 
 /// <summary>
-/// Per-profile controls for which native Direct events produce chat messages.
-/// Events still cross the Direct boundary for state reconstruction; the
-/// <c>ChatEnabled</c> wire flag only suppresses their user-facing delivery.
+/// Per-profile privacy controls for which native events and image data may
+/// leave N.I.N.A. A disabled category never crosses either Direct transport;
+/// local history is retained separately and rechecked at every query.
 /// </summary>
 internal sealed record DirectEventDeliveryOptions(
     bool Images,

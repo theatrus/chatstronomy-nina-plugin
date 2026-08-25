@@ -334,7 +334,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
                     SnapshotEventHistory()),
             DirectQueryKind.ImageHistory =>
                 DirectApiEnvelope<IReadOnlyList<DirectImageMetadata>>.Ok(
-                    images.Snapshot().Select(image => image.Metadata).ToArray()),
+                    SnapshotSharedImages().Select(image => image.Metadata).ToArray()),
             DirectQueryKind.Sequence =>
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
                     RunOnUiThread(() => NinaDirectSequenceSnapshot.Build(
@@ -888,7 +888,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         AddEventCore(
             DateTime.Now,
             "CHATSTRONOMY-COMMAND-FAILED",
-            chatEnabled: true,
+            chatEnabled: eventDelivery.Current.ShouldSendEvent(
+                "CHATSTRONOMY-COMMAND-FAILED"),
             ("Command", commandName),
             ("Error", RedactCommandError(error)));
 
@@ -1181,19 +1182,39 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 
     private DirectThumbnail GetThumbnail(uint? index)
     {
-        if (!index.HasValue || index.Value > int.MaxValue
-            || !images.TryGetAt((int)index.Value, out var savedImage)
-            || savedImage is null)
+        if (!eventDelivery.Current.Images)
+        {
+            throw new InvalidOperationException(
+                "Image sharing is disabled in this N.I.N.A. profile.");
+        }
+        var sharedImages = SnapshotSharedImages();
+        if (!index.HasValue || index.Value >= sharedImages.Count)
         {
             throw new InvalidOperationException("The requested image is no longer in history.");
         }
 
+        var savedImage = sharedImages[(int)index.Value];
         var data = savedImage.ThumbnailData;
         if (data is null)
         {
             throw new InvalidOperationException("The image thumbnail is still being prepared.");
         }
         return new DirectThumbnail(data, "image/jpeg", 200);
+    }
+
+    private IReadOnlyList<DirectSavedImage> SnapshotSharedImages()
+    {
+        if (!eventDelivery.Current.Images)
+        {
+            return Array.Empty<DirectSavedImage>();
+        }
+
+        // Consent at capture time and at query time are both required. An
+        // image taken while forwarding was disabled must not reappear after
+        // the user enables a later imaging session.
+        return images.Snapshot()
+            .Where(image => image.Metadata.ChatEnabled)
+            .ToArray();
     }
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
@@ -1223,7 +1244,13 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         var savedImage = new DirectSavedImage(image);
         images.Add(savedImage);
         AddEvent("IMAGE-SAVE");
-        QueueThumbnail(args.Image, savedImage);
+        if (image.ChatEnabled)
+        {
+            // Images captured without consent can never leave N.I.N.A. Avoid
+            // cloning/freezing their large WPF source on its UI thread or
+            // retaining a private JPEG in a needless background encoding job.
+            QueueThumbnail(args.Image, savedImage);
+        }
     }
 
     private static void QueueThumbnail(BitmapSource? source, DirectSavedImage savedImage)
@@ -1339,6 +1366,11 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         // level off takes effect immediately without destroying history the
         // user may explicitly choose to share again later.
         var equipment = events.Snapshot()
+            .Where(item => item.TryGetValue("Event", out var eventName)
+                && eventName is string name
+                && delivery.ShouldSendEvent(name)
+                && item.TryGetValue("ChatEnabled", out var chatEnabled)
+                && chatEnabled is true)
             .Select(item => DirectPrivacyProjection.RedactedCopy(item, access))
             .ToArray();
         var logs = logEvents.Snapshot()

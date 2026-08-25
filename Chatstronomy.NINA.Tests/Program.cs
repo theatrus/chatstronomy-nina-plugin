@@ -105,11 +105,17 @@ internal static class Program
             "Synchronous local Direct failures never expose observatory filesystem paths",
             LocalDirectPipesRedactSynchronousFailures);
         await RunAsync(
+            "Disabled events and images never cross the local Direct pipe",
+            LocalDirectPipesDoNotTransmitDisabledEvents);
+        await RunAsync(
             "Hosted Direct connections cannot bypass local command consent",
             HostedDirectConnectionsEnforceConsent);
         await RunAsync(
             "Synchronous hosted Direct failures never expose observatory filesystem paths",
             HostedDirectConnectionsRedactSynchronousFailures);
+        await RunAsync(
+            "Disabled events and images never cross the hosted Hub WebSocket",
+            HostedConnectionsDoNotTransmitDisabledEvents);
         Run("Observatory location is safely redacted without breaking legacy runtimes", ObservatoryLocationIsRedacted);
         Run("Nested device identifiers and sequence paths never leave N.I.N.A.", NestedSensitiveDataIsRedacted);
         await RunAsync(
@@ -118,6 +124,12 @@ internal static class Program
         await RunAsync(
             "Cached N.I.N.A. logs immediately honor live per-level consent",
             CachedLogHistoryHonorsLiveLevelConsent);
+        await RunAsync(
+            "Every event family requires consent at capture and transmission",
+            EveryEventFamilyRequiresCaptureAndTransmissionConsent);
+        await RunAsync(
+            "Image history and thumbnails require consent at capture and transmission",
+            ImageDataRequiresCaptureAndTransmissionConsent);
         Run("Equipment snapshots contain only approved operational fields", EquipmentSnapshotsUseSafeProjections);
         Run("Asynchronous commands are acknowledged without claiming completion", AsyncCommandsUseAcceptedEnvelopes);
         await RunAsync(
@@ -126,6 +138,9 @@ internal static class Program
         await RunAsync(
             "Asynchronous command cancellations produce a visible terminal notification",
             CommandCancellationsAreVisible);
+        await RunAsync(
+            "Disabled command-failure notifications never leave N.I.N.A.",
+            CommandFailuresHonorOtherEventConsent);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
         Run("Direct event delivery categories are independently configurable", DirectEventDeliveryIsConfigurable);
@@ -491,7 +506,8 @@ internal static class Program
         AssertTrue(descriptions.Any(value =>
             value.Contains("master switch alone grants no command access", StringComparison.Ordinal)));
         AssertTrue(descriptions.Any(value =>
-            value.Contains("transmitted to the Hub", StringComparison.Ordinal)));
+            value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)
+            && value.Contains("blocks image history and thumbnails", StringComparison.Ordinal)));
     }
 
     private static void EventDeliverySwitchesHaveVisibleLabels()
@@ -1194,6 +1210,138 @@ internal static class Program
         AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
     }
 
+    private static async Task LocalDirectPipesDoNotTransmitDisabledEvents()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        RecordInternalEvent(provider, "GUIDER-DITHER", "private guider movement");
+        RecordInternalEvent(provider, "NINA-NOTIFICATION", "private popup");
+        RecordInternalEvent(provider, "IMAGE-SAVE", "private image");
+        RecordInternalEvent(provider, "MOUNT-PARKED", "approved mount event");
+        AddInternalImage(provider, chatEnabled: true, value: 77);
+        delivery.Update(delivery.Current with
+        {
+            Guiding = false,
+            NinaNotifications = false,
+            Images = false,
+        });
+        RecordInternalEvent(provider, "GUIDER-START", "captured without consent");
+
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+
+        await writer.WriteLineAsync(QueryJson(Guid.NewGuid(), "event_history"));
+        var eventsJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local event history was not returned.");
+        using var events = JsonDocument.Parse(eventsJson);
+        var eventPayload = events.RootElement.GetProperty("payload")
+            .GetProperty("payload")
+            .GetProperty("Response");
+        AssertEqual(1, eventPayload.GetArrayLength());
+        AssertEqual("MOUNT-PARKED", eventPayload[0].GetProperty("Event").GetString());
+        AssertFalse(eventsJson.Contains("private", StringComparison.Ordinal));
+
+        await writer.WriteLineAsync(QueryJson(Guid.NewGuid(), "image_history"));
+        var imagesJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local image history was not returned.");
+        using var images = JsonDocument.Parse(imagesJson);
+        AssertEqual(0, images.RootElement.GetProperty("payload")
+            .GetProperty("payload")
+            .GetProperty("Response")
+            .GetArrayLength());
+
+        await writer.WriteLineAsync(ThumbnailQueryJson(Guid.NewGuid(), 0));
+        var thumbnailJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local thumbnail denial was not returned.");
+        using var thumbnail = JsonDocument.Parse(thumbnailJson);
+        var thumbnailResult = thumbnail.RootElement.GetProperty("payload");
+        AssertFalse(thumbnailResult.GetProperty("ok").GetBoolean());
+        AssertTrue(thumbnailResult.GetProperty("error").GetString()!
+            .Contains("Image sharing is disabled", StringComparison.Ordinal));
+    }
+
+    private static async Task HostedConnectionsDoNotTransmitDisabledEvents()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "private autofocus");
+        RecordInternalEvent(provider, "TS-TARGETSTART", "private target");
+        RecordInternalEvent(provider, "IMAGE-SAVE", "private image");
+        RecordInternalEvent(provider, "MOUNT-PARKED", "approved mount event");
+        AddInternalImage(provider, chatEnabled: true, value: 88);
+        delivery.Update(delivery.Current with
+        {
+            Autofocus = false,
+            TargetScheduler = false,
+            Images = false,
+        });
+        RecordInternalEvent(provider, "AUTOFOCUS-POINT-ADDED", "captured without consent");
+
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        var eventQuery = Guid.NewGuid();
+        var imageQuery = Guid.NewGuid();
+        var thumbnailQuery = Guid.NewGuid();
+        var sockets = new ScriptedHubSocketFactory(
+            AgentHelloJson(hello),
+            QueryJson(eventQuery, "event_history"),
+            QueryJson(imageQuery, "image_history"),
+            ThumbnailQueryJson(thumbnailQuery, 0));
+        var client = new ChatstronomyHubClient(provider, sockets);
+        await AssertThrowsAsync<HubDisconnectedException>(() =>
+            client.RunSingleConnectionAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None));
+
+        var results = sockets.Socket.SentMessages
+            .Select(message => JsonDocument.Parse(message))
+            .Where(document => document.RootElement.GetProperty("type").GetString()
+                == "query_result")
+            .ToDictionary(document =>
+                document.RootElement.GetProperty("payload").GetProperty("id").GetGuid());
+        try
+        {
+            var eventPayload = results[eventQuery].RootElement.GetProperty("payload")
+                .GetProperty("payload")
+                .GetProperty("Response");
+            AssertEqual(1, eventPayload.GetArrayLength());
+            AssertEqual("MOUNT-PARKED", eventPayload[0].GetProperty("Event").GetString());
+            AssertFalse(results[eventQuery].RootElement.GetRawText()
+                .Contains("private", StringComparison.Ordinal));
+
+            AssertEqual(0, results[imageQuery].RootElement.GetProperty("payload")
+                .GetProperty("payload")
+                .GetProperty("Response")
+                .GetArrayLength());
+
+            var denied = results[thumbnailQuery].RootElement.GetProperty("payload");
+            AssertFalse(denied.GetProperty("ok").GetBoolean());
+            AssertTrue(denied.GetProperty("error").GetString()!
+                .Contains("Image sharing is disabled", StringComparison.Ordinal));
+        }
+        finally
+        {
+            foreach (var document in results.Values)
+            {
+                document.Dispose();
+            }
+        }
+    }
+
     private static void ObservatoryLocationIsRedacted()
     {
         static Dictionary<string, object?> Mount() => new()
@@ -1473,6 +1621,16 @@ internal static class Program
         var errorsOnly = await SnapshotEvents(provider);
         AssertEqual(1, errorsOnly.Length);
         AssertEqual("ERROR", errorsOnly[0].GetProperty("Level").GetString());
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow.AddSeconds(2),
+                "WARNING",
+                "Telescope",
+                "Move",
+                99,
+                "Warning captured without consent"),
+        });
 
         delivery.Update(DirectEventDeliveryOptions.Default);
         AssertEqual(0, (await SnapshotEvents(provider)).Length);
@@ -1487,6 +1645,176 @@ internal static class Program
 
         delivery.Update(initial);
         AssertEqual(2, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task EveryEventFamilyRequiresCaptureAndTransmissionConsent()
+    {
+        var cases = new (
+            string Category,
+            string[] Events,
+            Func<DirectEventDeliveryOptions, DirectEventDeliveryOptions> Disable)[]
+        {
+            ("images", new[] { "IMAGE-SAVE", "API-CAPTURE-FINISHED" },
+                options => options with { Images = false }),
+            ("autofocus", new[] { "AUTOFOCUS-FINISHED", "ERROR-AF", "FOCUSER-USER-FOCUSED" },
+                options => options with { Autofocus = false }),
+            ("guiding", new[] { "GUIDER-START", "GUIDER-DITHER" },
+                options => options with { Guiding = false }),
+            ("mount", new[] { "MOUNT-PARKED", "MOUNT-CENTER", "ERROR-PLATESOLVE" },
+                options => options with { Mount = false }),
+            ("sequence", new[] { "SEQUENCE-STARTING", "SEQUENCE-FINISHED" },
+                options => options with { Sequence = false }),
+            ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
+                options => options with { TargetScheduler = false }),
+            ("filter, focuser, and rotator", new[]
+                { "FILTERWHEEL-CHANGED", "FOCUSER-MOVED", "ROTATOR-MOVED" },
+                options => options with { FilterFocuserRotator = false }),
+            ("connections", new[]
+                { "MOUNT-CONNECTED", "GUIDER-DISCONNECTED", "CAMERA-DOWNLOAD-TIMEOUT" },
+                options => options with { EquipmentConnections = false }),
+            ("other", new[] { "UNKNOWN-NINA-EVENT", "CHATSTRONOMY-COMMAND-FAILED" },
+                options => options with { OtherEvents = false }),
+            ("popup notifications", new[] { "NINA-NOTIFICATION" },
+                options => options with { NinaNotifications = false }),
+        };
+
+        foreach (var (category, eventNames, disable) in cases)
+        {
+            var initial = DirectEventDeliveryOptions.Default;
+            var delivery = new DirectEventDeliveryPolicy(initial);
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+
+            foreach (var eventName in eventNames)
+            {
+                RecordInternalEvent(provider, eventName, $"{category}: consented");
+            }
+            var allowed = await SnapshotEvents(provider);
+            AssertEqual(eventNames.Length, allowed.Length);
+
+            delivery.Update(disable(initial));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+            foreach (var eventName in eventNames)
+            {
+                RecordInternalEvent(provider, eventName, $"{category}: captured while off");
+            }
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            delivery.Update(initial);
+            var restored = await SnapshotEvents(provider);
+            AssertEqual(eventNames.Length, restored.Length);
+            AssertTrue(restored.All(item =>
+                item.GetProperty("Marker").GetString() == $"{category}: consented"));
+        }
+    }
+
+    private static async Task ImageDataRequiresCaptureAndTransmissionConsent()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var approvedImage = AddInternalImage(provider, chatEnabled: true, value: 11);
+        var history = await SnapshotImageHistory(provider);
+        AssertEqual(1, history.Length);
+        AssertEqual(11, history[0].GetProperty("Gain").GetInt32());
+        var originalThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+            CancellationToken.None))!);
+        AssertEqual(approvedImage.ThumbnailData![0], originalThumbnail.Data[0]);
+
+        delivery.Update(delivery.Current with { Images = false });
+        AssertEqual(0, (await SnapshotImageHistory(provider)).Length);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+                CancellationToken.None));
+        AddInternalImage(provider, chatEnabled: false, value: 22);
+
+        delivery.Update(delivery.Current with { Images = true });
+        var laterApprovedImage = AddInternalImage(provider, chatEnabled: true, value: 33);
+        var restored = await SnapshotImageHistory(provider);
+        AssertEqual(2, restored.Length);
+        AssertEqual(11, restored[0].GetProperty("Gain").GetInt32());
+        AssertEqual(33, restored[1].GetProperty("Gain").GetInt32());
+        var restoredThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+            CancellationToken.None))!);
+        AssertEqual(approvedImage.ThumbnailData![0], restoredThumbnail.Data[0]);
+        var laterApprovedThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 1),
+            CancellationToken.None))!);
+        AssertEqual(laterApprovedImage.ThumbnailData![0], laterApprovedThumbnail.Data[0]);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 2),
+                CancellationToken.None));
+    }
+
+    private static void RecordInternalEvent(
+        NinaDirectDataProvider provider,
+        string eventName,
+        string marker)
+    {
+        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
+            "AddEvent",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("N.I.N.A. event recorder was not found.");
+        addEvent.Invoke(provider, new object[]
+        {
+            eventName,
+            new (string Name, object? Value)[] { ("Marker", marker) },
+        });
+    }
+
+    private static DirectSavedImage AddInternalImage(
+        NinaDirectDataProvider provider,
+        bool chatEnabled,
+        int value)
+    {
+        var history = typeof(NinaDirectDataProvider).GetField(
+            "images",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            as BoundedHistory<DirectSavedImage>
+            ?? throw new InvalidOperationException("Native image history was not found.");
+        var image = new DirectSavedImage(new DirectImageMetadata(
+            ExposureTime: 120,
+            ImageType: "LIGHT",
+            Filter: "Luminance",
+            RmsText: "0.7",
+            Temperature: -10,
+            CameraName: "Test camera",
+            Gain: value,
+            Offset: 50,
+            Date: DateTime.UtcNow,
+            TelescopeName: "Test telescope",
+            FocalLength: 500,
+            StDev: 1,
+            Mean: 2,
+            Median: 3,
+            Stars: 20,
+            HFR: 1.5,
+            IsBayered: false,
+            ChatEnabled: chatEnabled))
+        {
+            ThumbnailData = new byte[] { (byte)value, 0xff },
+        };
+        history.Add(image);
+        return image;
+    }
+
+    private static async Task<JsonElement[]> SnapshotImageHistory(NinaDirectDataProvider provider)
+    {
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.ImageHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        return response.RootElement.GetProperty("Response")
+            .EnumerateArray()
+            .Select(item => item.Clone())
+            .ToArray();
     }
 
     private static async Task<JsonElement[]> SnapshotEvents(NinaDirectDataProvider provider)
@@ -1521,7 +1849,7 @@ internal static class Program
 
     private static async Task CommandFailuresAreVisibleAndRedacted()
     {
-        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = false };
+        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = true };
         using var provider = CreateSecurityTestProvider(
             new DirectAccessPolicy(DirectAccessOptions.Default),
             delivery);
@@ -1553,7 +1881,7 @@ internal static class Program
 
     private static async Task CommandCancellationsAreVisible()
     {
-        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = false };
+        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = true };
         using var provider = CreateSecurityTestProvider(
             new DirectAccessPolicy(DirectAccessOptions.Default),
             delivery);
@@ -1577,6 +1905,32 @@ internal static class Program
         AssertEqual(
             "Command canceled before completion",
             failure.GetProperty("Error").GetString());
+    }
+
+    private static async Task CommandFailuresHonorOtherEventConsent()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { OtherEvents = false });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var addFailure = typeof(NinaDirectDataProvider).GetMethod(
+            "AddCommandFailure",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Command failure projector was not found.");
+
+        addFailure.Invoke(provider, new object[] { "Cool camera", "Private observatory failure" });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(delivery.Current with { OtherEvents = true });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+        addFailure.Invoke(provider, new object[] { "Warm camera", "Explicitly shared failure" });
+        var allowed = await SnapshotEvents(provider);
+        AssertEqual(1, allowed.Length);
+        AssertEqual("Warm camera", allowed[0].GetProperty("Command").GetString());
+
+        delivery.Update(delivery.Current with { OtherEvents = false });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
     }
 
     private static NinaDirectDataProvider CreateSecurityTestProvider(
@@ -1832,8 +2186,10 @@ internal static class Program
         AssertEqual(true, Convert.ToBoolean(output["Success"]));
         AssertEqual(91.5, Convert.ToDouble(output["PositionAngle"]));
         AssertEqual(60.0, Convert.ToDouble(output["SeparationArcseconds"]));
-        AssertTrue(!string.IsNullOrWhiteSpace(output["ThumbnailBase64"] as string));
-        AssertEqual("image/jpeg", output["ThumbnailMediaType"] as string);
+        AssertFalse(output.ContainsKey("ThumbnailBase64"));
+        AssertFalse(output.ContainsKey("ThumbnailMediaType"));
+        var wire = JsonSerializer.Serialize(centerDetails, DirectProtocol.JsonOptions);
+        AssertFalse(wire.Contains("Thumbnail", StringComparison.Ordinal));
     }
 
     private static void DirectGuiderPayloadMatchesRustChart()
@@ -2572,6 +2928,13 @@ internal static class Program
                 payload = new { id, expires_at = expiresAt, kind },
             },
             DirectProtocol.JsonOptions);
+
+    private static string ThumbnailQueryJson(Guid id, uint index) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "query",
+            payload = new { id, kind = "thumbnail", index },
+        });
 
     private static string CommandQueryJson(Guid id, long expiresAt, string commandKind) =>
         JsonSerializer.Serialize(new
