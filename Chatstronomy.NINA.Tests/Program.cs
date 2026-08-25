@@ -10,7 +10,10 @@ using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -178,6 +181,9 @@ internal static class Program
             await RunAsync(
                 "Plugin runtime starts and stops over its control pipe",
                 () => PluginRuntimeStartsAndStops(runtimePath));
+            await RunAsync(
+                "Failed webhook requests never expose credentials in the local runtime log",
+                () => PluginRuntimeRedactsFailedWebhookDeliveries(runtimePath));
             await RunAsync(
                 "Plugin runtime queries the native Direct data pipe",
                 () => PluginRuntimeUsesDirectPipe(runtimePath));
@@ -3000,20 +3006,28 @@ internal static class Program
                     profileId,
                     "Controller Integration Test"),
                 CancellationToken.None);
-            AssertTrue(controller.IsRunning);
-            AssertTrue(controller.ProcessId.HasValue);
+            if (!controller.IsRunning)
+            {
+                throw new InvalidOperationException(
+                    "The local runtime exited immediately after acknowledging startup.");
+            }
+            if (!controller.ProcessId.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "The running local runtime did not expose its Windows process ID.");
+            }
 
             await controller.StopAsync(CancellationToken.None);
-            AssertFalse(controller.IsRunning);
+            if (controller.IsRunning)
+            {
+                throw new InvalidOperationException(
+                    "The local runtime was still running after graceful shutdown completed.");
+            }
 
-            var logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Chatstronomy",
-                "logs",
-                $"nina-runtime-{profileId:N}.log");
+            var logPath = RuntimeLogPath(profileId);
             var log = await ReadAllTextWhenUnlockedAsync(logPath);
-            AssertFalse(log.Contains("api/webhooks", StringComparison.OrdinalIgnoreCase));
-            AssertFalse(log.Contains("token", StringComparison.OrdinalIgnoreCase));
+            AssertRuntimeLogDoesNotContain(log, "api/webhooks", "a Discord webhook URL");
+            AssertRuntimeLogDoesNotContain(log, "token", "a possible delivery credential");
         }
         finally
         {
@@ -3022,6 +3036,137 @@ internal static class Program
                 await controller.StopAsync(CancellationToken.None);
             }
             provider.Dispose();
+        }
+    }
+
+    private static async Task PluginRuntimeRedactsFailedWebhookDeliveries(string runtimePath)
+    {
+        const string privateWebhookProbe = "chatstronomy-private-webhook-probe";
+        const string deliveryFailure = "Failed to send message to Discord";
+        var provider = new FakeDirectDataProvider();
+        var controller = new ChatstronomyRuntimeController(provider);
+        var profileId = Guid.NewGuid();
+        var listener = new TcpListener(IPAddress.Loopback, port: 0);
+        listener.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var proxyRequest = RejectWebhookProxyRequestAsync(listener, timeout.Token);
+        var proxy = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
+        var previousProxy = Environment.GetEnvironmentVariable("HTTPS_PROXY");
+        var previousNoProxy = Environment.GetEnvironmentVariable("NO_PROXY");
+
+        try
+        {
+            try
+            {
+                // The child receives a copy of this environment at process
+                // creation. Restore our own settings as soon as its secure
+                // bootstrap completes so no other integration uses the proxy.
+                Environment.SetEnvironmentVariable("HTTPS_PROXY", proxy);
+                Environment.SetEnvironmentVariable("NO_PROXY", string.Empty);
+                await controller.StartAsync(
+                    BuildDirectRuntimeConfiguration(runtimePath, privateWebhookProbe),
+                    new LocalRuntimeIdentity(
+                        Guid.NewGuid(),
+                        profileId,
+                        "Webhook Privacy Integration Test"),
+                    timeout.Token);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("HTTPS_PROXY", previousProxy);
+                Environment.SetEnvironmentVariable("NO_PROXY", previousNoProxy);
+            }
+
+            // Waiting for the loopback CONNECT and the resulting runtime log
+            // proves a request really failed before shutdown: the privacy
+            // assertion cannot pass merely because startup was interrupted.
+            await proxyRequest.WaitAsync(timeout.Token);
+            var logPath = RuntimeLogPath(profileId);
+            await WaitForRuntimeLogEntryAsync(logPath, deliveryFailure, timeout.Token);
+            await controller.StopAsync(CancellationToken.None);
+            var log = await ReadAllTextWhenUnlockedAsync(logPath);
+            AssertRuntimeLogDoesNotContain(log, "api/webhooks", "a Discord webhook URL");
+            AssertRuntimeLogDoesNotContain(log, privateWebhookProbe, "a Discord webhook credential");
+        }
+        finally
+        {
+            timeout.Cancel();
+            listener.Stop();
+            if (controller.IsRunning)
+            {
+                await controller.StopAsync(CancellationToken.None);
+            }
+            provider.Dispose();
+        }
+    }
+
+    private static async Task RejectWebhookProxyRequestAsync(
+        TcpListener listener,
+        CancellationToken cancellationToken)
+    {
+        using var client = await listener.AcceptTcpClientAsync(cancellationToken);
+        using var stream = client.GetStream();
+        var requestBytes = new byte[1024];
+        var read = await stream.ReadAsync(requestBytes, cancellationToken);
+        var request = Encoding.ASCII.GetString(requestBytes, 0, read);
+        if (!request.StartsWith("CONNECT discord.com:443 ", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The local runtime did not route its webhook request through the isolated proxy.");
+        }
+
+        var response = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        await stream.WriteAsync(response, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+    }
+
+    private static string RuntimeLogPath(Guid profileId) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Chatstronomy",
+        "logs",
+        $"nina-runtime-{profileId:N}.log");
+
+    private static async Task WaitForRuntimeLogEntryAsync(
+        string path,
+        string marker,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                using var stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                var log = await reader.ReadToEndAsync(cancellationToken);
+                if (log.Contains(marker, StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+            catch (IOException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Process startup may not have opened its log yet.
+            }
+
+            await Task.Delay(25, cancellationToken);
+        }
+    }
+
+    private static void AssertRuntimeLogDoesNotContain(
+        string log,
+        string privateValue,
+        string description)
+    {
+        if (log.Contains(privateValue, StringComparison.OrdinalIgnoreCase))
+        {
+            // Never print the offending log line or credential in CI output.
+            throw new InvalidOperationException($"The local runtime log exposed {description}.");
         }
     }
 
@@ -3283,10 +3428,12 @@ internal static class Program
         }
     }
 
-    private static ChatstronomyConfiguration BuildDirectRuntimeConfiguration(string runtimePath) =>
+    private static ChatstronomyConfiguration BuildDirectRuntimeConfiguration(
+        string runtimePath,
+        string webhookToken = "token") =>
         new(
             new DiscordWebhookDeliveryConfiguration(
-                new Uri("https://discord.com/api/webhooks/123/token")),
+                new Uri($"https://discord.com/api/webhooks/123/{webhookToken}")),
             Matrix: null,
             new LocalRuntimeConfiguration(runtimePath));
 
