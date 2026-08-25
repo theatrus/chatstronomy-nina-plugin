@@ -47,8 +47,6 @@ internal static class NinaDirectSequenceSnapshot
             ["PositionAngle"] = "Rotation",
             ["Value"] = "Value",
             ["Text"] = "Text",
-            ["Script"] = "Script",
-            ["FilePath"] = "FilePath",
             ["Time"] = "Delay",
             ["Iterations"] = "Iterations",
             ["CompletedIterations"] = "CompletedIterations",
@@ -56,7 +54,8 @@ internal static class NinaDirectSequenceSnapshot
 
     internal static IReadOnlyList<Dictionary<string, object?>> Build(
         ISequenceMediator sequence,
-        DirectEventDeliveryOptions? delivery = null)
+        DirectEventDeliveryOptions? delivery = null,
+        DirectAccessOptions? access = null)
     {
         if (!sequence.Initialized)
         {
@@ -75,6 +74,11 @@ internal static class NinaDirectSequenceSnapshot
         };
         var options = delivery ?? DirectEventDeliveryOptions.Default;
         result.AddRange(root.GetItemsSnapshot().Select(item => BuildItem(item, options)));
+        var privacy = access ?? DirectAccessOptions.Default;
+        foreach (var entity in result)
+        {
+            DirectPrivacyProjection.Redact(entity, privacy);
+        }
         return result;
     }
 
@@ -172,7 +176,15 @@ internal static class NinaDirectSequenceSnapshot
             trigger.GetType().Name == "DitherAfterExposures"
                 ? "TargetExposures"
                 : "DeltaExposures");
-        AddIfPresent(trigger, result, "Coordinates", "Coordinates");
+        var triggerCoordinates = OptionalProperty(trigger, "Coordinates");
+        if (triggerCoordinates is not null)
+        {
+            var projected = CompactCoordinates(triggerCoordinates);
+            if (projected.Count != 0)
+            {
+                result["Coordinates"] = projected;
+            }
+        }
         AddIfPresent(trigger, result, "LastDistanceArcMinutes", "Drift");
         AddIfPresent(trigger, result, "DistanceArcMinutes", "TargetDrift");
         return result;
@@ -242,7 +254,12 @@ internal static class NinaDirectSequenceSnapshot
         var coordinates = OptionalProperty(item, "Coordinates");
         if (coordinates is not null)
         {
-            result["Coordinates"] = OptionalProperty(coordinates, "Coordinates") ?? coordinates;
+            var projected = CompactCoordinates(
+                OptionalProperty(coordinates, "Coordinates") ?? coordinates);
+            if (projected.Count != 0)
+            {
+                result["Coordinates"] = projected;
+            }
         }
 
         var filter = OptionalProperty(item, "Filter");
@@ -344,6 +361,20 @@ internal static class NinaDirectSequenceSnapshot
         result["PlateSolveOutput"] = output;
     }
 
+    internal static Dictionary<string, object?>? ProjectCoordinates(
+        object? coordinates,
+        DirectAccessOptions access)
+    {
+        if (coordinates is null)
+        {
+            return null;
+        }
+
+        var projected = CompactCoordinates(coordinates);
+        DirectPrivacyProjection.Redact(projected, access);
+        return projected.Count == 0 ? null : projected;
+    }
+
     private static Dictionary<string, object?> CompactCoordinates(object coordinates)
     {
         var result = new Dictionary<string, object?>();
@@ -353,6 +384,8 @@ internal static class NinaDirectSequenceSnapshot
         AddFiniteIfPresent(coordinates, result, "Dec", "Dec");
         AddIfPresent(coordinates, result, "DecString", "DecString");
         AddIfPresent(coordinates, result, "Epoch", "Epoch");
+        AddFiniteIfPresent(coordinates, result, "Altitude", "Altitude");
+        AddFiniteIfPresent(coordinates, result, "Azimuth", "Azimuth");
         return result;
     }
 

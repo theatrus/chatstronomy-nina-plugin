@@ -12,6 +12,13 @@ is an Apache-2.0 Rust application and includes its own transitive open-source
 dependencies. The exact backend release and SHA-256 hashes are recorded in
 `runtime.lock.json` and the downloaded `chatstronomy-runtime-manifest.json`.
 
+The bundled runtime embeds Liberation Sans when rendering autofocus and guider
+charts. Liberation Sans includes digitized data copyright (c) 2010 Google
+Corporation and copyright (c) 2012 Red Hat, Inc., and is distributed under the
+SIL Open Font License, Version 1.1. The complete copyright notice and license
+are included beside the runtime at `runtime/LiberationSans-LICENSE`; the source
+copy is maintained at `licenses/LiberationSans-LICENSE`.
+
 Development may use AI-assisted tools. All changes remain subject to human
 review, repository tests, and the same licensing and contribution requirements
 as manually authored changes.

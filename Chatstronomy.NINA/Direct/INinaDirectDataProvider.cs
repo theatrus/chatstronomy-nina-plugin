@@ -16,5 +16,9 @@ internal interface INinaDirectDataProvider : IDisposable
     /// tail so it only runs while at least one level is selected.
     void ApplyLogDeliveryOptions();
 
+    /// Cancel cancellable hardware operations after local control consent is
+    /// revoked. Queued commands are independently rejected by the live policy.
+    void RevokeRemoteControl();
+
     Task<object?> ExecuteAsync(DirectQuery query, CancellationToken cancellationToken);
 }

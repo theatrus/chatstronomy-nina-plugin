@@ -833,7 +833,8 @@ internal sealed class ChatstronomyHubClient
     private static string SafeMessage(Exception exception) =>
         string.IsNullOrWhiteSpace(exception.Message)
             ? exception.GetType().Name
-            : exception.Message.Replace('\r', ' ').Replace('\n', ' ');
+            : NinaDirectDataProvider.RedactCommandError(
+                exception.Message.Replace('\r', ' ').Replace('\n', ' '));
 
     private void SetState(bool connected, string message)
     {

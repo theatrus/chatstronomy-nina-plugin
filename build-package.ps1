@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.20',
+    [string] $Version = '0.1.0.21',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',
@@ -79,6 +79,9 @@ foreach ($file in @($archivePath, $manifestPath)) {
 
 $packagedRuntime = $null
 $pluginDll = Join-Path $packageDirectory 'Chatstronomy.dll'
+$pluginLicense = Join-Path $packageDirectory 'LICENSE'
+$thirdPartyNotices = Join-Path $packageDirectory 'THIRD-PARTY-NOTICES.md'
+$runtimeFontLicense = Join-Path $packageDirectory 'runtime/LiberationSans-LICENSE'
 
 if (-not $PackageOnly) {
     dotnet build $project `
@@ -97,6 +100,8 @@ if (-not $PackageOnly) {
     }
 
     Copy-Item -LiteralPath $builtPluginDll -Destination $pluginDll
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination $pluginLicense
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'THIRD-PARTY-NOTICES.md') -Destination $thirdPartyNotices
 
     if (-not $SkipRuntime) {
         if ([string]::IsNullOrWhiteSpace($RuntimePath)) {
@@ -113,6 +118,7 @@ if (-not $PackageOnly) {
         New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
         $packagedRuntime = Join-Path $runtimeDirectory 'chatstronomy.exe'
         Copy-Item -LiteralPath $RuntimePath -Destination $packagedRuntime
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licenses/LiberationSans-LICENSE') -Destination $runtimeFontLicense
     }
 
 } else {
@@ -124,6 +130,22 @@ if (-not $PackageOnly) {
         if (-not (Test-Path -LiteralPath $packagedRuntime -PathType Leaf)) {
             throw "The staged package does not contain $packagedRuntime."
         }
+    }
+}
+
+foreach ($notice in @($pluginLicense, $thirdPartyNotices)) {
+    if (-not (Test-Path -LiteralPath $notice -PathType Leaf)) {
+        throw "The staged package does not contain required redistribution notice $notice."
+    }
+}
+
+$stagedRuntime = Join-Path $packageDirectory 'runtime/chatstronomy.exe'
+if (Test-Path -LiteralPath $stagedRuntime -PathType Leaf) {
+    if ($SkipRuntime) {
+        throw "-SkipRuntime cannot package a staged runtime at $stagedRuntime."
+    }
+    if (-not (Test-Path -LiteralPath $runtimeFontLicense -PathType Leaf)) {
+        throw "The staged runtime does not contain its required Liberation Sans license at $runtimeFontLicense."
     }
 }
 

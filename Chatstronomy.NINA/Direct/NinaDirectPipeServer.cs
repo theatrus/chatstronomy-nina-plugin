@@ -104,7 +104,9 @@ internal sealed class NinaDirectPipeServer : IDisposable
                         exception is not OperationCanceledException
                         || !cancellationToken.IsCancellationRequested)
                     {
-                        response = DirectProtocol.SerializeFailure(query.Id, exception.Message);
+                        response = DirectProtocol.SerializeFailure(
+                            query.Id,
+                            NinaDirectDataProvider.RedactCommandError(exception.Message));
                     }
                 }
 
