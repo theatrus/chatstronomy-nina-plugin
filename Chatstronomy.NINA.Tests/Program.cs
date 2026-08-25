@@ -47,6 +47,7 @@ internal static class Program
         Run("Hosted pair and auth frames match the Rust contract", HostedHandshakeFramesMatchRust);
         Run("Hosted client accepts unmarked legacy hub payloads", HostedLegacyHubPayloadsAreAccepted);
         Run("Hosted secrets are scoped to profile and hub origin", HostedSecretsAreOriginScoped);
+        Run("Delivery and Direct diagnostics never reveal credentials", CredentialDiagnosticsAreRedacted);
         Run("Direct query deadlines match the hub clock-skew contract", DirectQueryDeadlinesMatchHub);
         await RunAsync(
             "Hosted credentials take precedence over stale pairing codes",
@@ -391,6 +392,137 @@ internal static class Program
         AssertEqual(
             "wss://hub.chatstronomy.com/v1/direct",
             HubConnectionConfiguration.BuildWebSocketUrl(serviceUrl).AbsoluteUri);
+    }
+
+    private static void CredentialDiagnosticsAreRedacted()
+    {
+        const string webhookSecret = "discord-webhook-sensitive-probe";
+        const string botSecret = "discord-bot-sensitive-probe";
+        const string matrixPassword = "matrix-password-sensitive-probe";
+        const string matrixUrlUser = "matrix-url-user-sensitive-probe";
+        const string matrixUrlPassword = "matrix-url-password-sensitive-probe";
+        const string matrixUrlToken = "matrix-url-token-sensitive-probe";
+        const string matrixFragment = "matrix-fragment-sensitive-probe";
+        const string hubUrlPassword = "hub-url-password-sensitive-probe";
+        const string hubUrlToken = "hub-url-token-sensitive-probe";
+        const string hostedCredential = "csrc-hosted-sensitive-probe";
+        const string hostedPairing = "cspt-hosted-sensitive-probe";
+        const string directPairing = "cspt-direct-sensitive-probe";
+        const string directCredential = "csrc-direct-sensitive-probe";
+        const string pairedCredential = "csrc-result-sensitive-probe";
+
+        var webhook = new DiscordWebhookDeliveryConfiguration(
+            new Uri($"https://discord.com/api/webhooks/123/{webhookSecret}"));
+        var bot = new DiscordBotDeliveryConfiguration(botSecret, ApplicationId: 42, DefaultChannelId: 84);
+        var matrix = new MatrixDeliveryConfiguration(
+            new Uri(
+                $"https://{matrixUrlUser}:{matrixUrlPassword}@matrix.example.test/base"
+                + $"?access_token={matrixUrlToken}#{matrixFragment}"),
+            Username: "@astronomer:matrix.example.test",
+            Password: matrixPassword,
+            DefaultRoomId: "!observatory:matrix.example.test");
+        var hubUrl = new Uri(
+            $"https://hub-user:{hubUrlPassword}@hub.example.test/"
+            + $"?access_token={hubUrlToken}");
+        var hostedDelivery = new HostedDeliveryConfiguration(hubUrl);
+        var hub = new HubConnectionConfiguration(
+            hubUrl,
+            hostedCredential,
+            hostedPairing,
+            Guid.NewGuid());
+        var topLevelWebhook = new ChatstronomyConfiguration(
+            webhook,
+            matrix,
+            new LocalRuntimeConfiguration("runtime.exe"));
+        var topLevelBot = topLevelWebhook with { Delivery = bot };
+        var hello = HostedHello();
+        var pair = new PairRequestPayload(directPairing, hello);
+        var auth = new AuthRequestPayload(directCredential, hello);
+        var paired = new HubPairResultMessage(
+            pairedCredential,
+            new AgentHello(
+                DirectProtocol.CurrentVersion,
+                DirectProtocol.CurrentPayloadVersion,
+                Guid.NewGuid(),
+                hello.NodeId,
+                hello.ProfileId));
+        var pairWire = new DirectWireMessage<PairRequestPayload>("pair", pair);
+        var authWire = new DirectWireMessage<AuthRequestPayload>("auth", auth);
+        (string Name, object Value)[] diagnostics =
+        [
+            ("Discord webhook delivery", webhook),
+            ("Discord bot delivery", bot),
+            ("Matrix delivery", matrix),
+            ("hosted delivery endpoint", hostedDelivery),
+            ("hosted connection", hub),
+            ("nested webhook configuration", topLevelWebhook),
+            ("nested Discord bot configuration", topLevelBot),
+            ("Direct pairing request", pair),
+            ("Direct authentication request", auth),
+            ("hosted pairing result", paired),
+            ("nested Direct pairing message", pairWire),
+            ("nested Direct authentication message", authWire),
+        ];
+        string[] privateValues =
+        [
+            webhookSecret,
+            botSecret,
+            matrixPassword,
+            matrixUrlUser,
+            matrixUrlPassword,
+            matrixUrlToken,
+            matrixFragment,
+            hubUrlPassword,
+            hubUrlToken,
+            hostedCredential,
+            hostedPairing,
+            directPairing,
+            directCredential,
+            pairedCredential,
+        ];
+
+        foreach (var (name, value) in diagnostics)
+        {
+            var rendered = value.ToString()
+                ?? throw new InvalidOperationException($"{name} did not render a diagnostic.");
+            if (!rendered.Contains("[redacted]", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"{name} did not mark its credential as redacted.");
+            }
+            if (privateValues.Any(secret => rendered.Contains(secret, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException($"{name} exposed a private credential.");
+            }
+        }
+
+        AssertTrue(webhook.ToString().Contains("discord.com", StringComparison.Ordinal));
+        AssertTrue(bot.ToString().Contains("DefaultChannelId = 84", StringComparison.Ordinal));
+        AssertTrue(matrix.ToString().Contains("matrix.example.test/base", StringComparison.Ordinal));
+        AssertTrue(hub.ToString().Contains("hub.example.test", StringComparison.Ordinal));
+
+        // Sanitizing diagnostics must never redact the secure, intentional
+        // transport that the local runtime and hosted handshake require.
+        using var serializedPair = JsonDocument.Parse(DirectProtocol.SerializePair(directPairing, hello));
+        AssertEqual(
+            directPairing,
+            serializedPair.RootElement.GetProperty("payload").GetProperty("pairing_token").GetString());
+        using var serializedAuth = JsonDocument.Parse(DirectProtocol.SerializeAuth(directCredential, hello));
+        AssertEqual(
+            directCredential,
+            serializedAuth.RootElement.GetProperty("payload").GetProperty("credential").GetString());
+        var bootstrap = PluginRuntimeBootstrap.Serialize(
+            topLevelBot,
+            new LocalRuntimeIdentity(Guid.NewGuid(), Guid.NewGuid(), "Private Rig"),
+            directPipeName: "chatstronomy-private-test",
+            directCapabilities: hello.Capabilities);
+        using var serializedBootstrap = JsonDocument.Parse(bootstrap);
+        AssertEqual(
+            botSecret,
+            serializedBootstrap.RootElement.GetProperty("delivery").GetProperty("bot_token").GetString());
+        AssertEqual(
+            matrixPassword,
+            serializedBootstrap.RootElement.GetProperty("matrix").GetProperty("password").GetString());
+        AssertEqual(webhook, new DiscordWebhookDeliveryConfiguration(webhook.WebhookUrl));
     }
 
     private static void HostedHubIsFirstDeliveryOption()

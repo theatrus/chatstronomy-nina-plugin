@@ -1,4 +1,5 @@
 using System.IO;
+using Chatstronomy.NINA.Security;
 using Chatstronomy.NINA.Settings;
 
 namespace Chatstronomy.NINA.Configuration;
@@ -6,22 +7,47 @@ namespace Chatstronomy.NINA.Configuration;
 internal abstract record ChatDeliveryConfiguration;
 
 internal sealed record DiscordWebhookDeliveryConfiguration(Uri WebhookUrl)
-    : ChatDeliveryConfiguration;
+    : ChatDeliveryConfiguration
+{
+    public override string ToString() =>
+        $"{nameof(DiscordWebhookDeliveryConfiguration)} {{ "
+        + $"{nameof(WebhookUrl)} = {SensitiveDiagnostic.Endpoint(WebhookUrl, redactPath: true)} }}";
+}
 
 internal sealed record DiscordBotDeliveryConfiguration(
     string BotToken,
     ulong? ApplicationId,
     ulong DefaultChannelId)
-    : ChatDeliveryConfiguration;
+    : ChatDeliveryConfiguration
+{
+    public override string ToString() =>
+        $"{nameof(DiscordBotDeliveryConfiguration)} {{ "
+        + $"{nameof(BotToken)} = {SensitiveDiagnostic.Secret(BotToken)}, "
+        + $"{nameof(ApplicationId)} = {ApplicationId}, "
+        + $"{nameof(DefaultChannelId)} = {DefaultChannelId} }}";
+}
 
 internal sealed record HostedDeliveryConfiguration(Uri ServiceUrl)
-    : ChatDeliveryConfiguration;
+    : ChatDeliveryConfiguration
+{
+    public override string ToString() =>
+        $"{nameof(HostedDeliveryConfiguration)} {{ "
+        + $"{nameof(ServiceUrl)} = {SensitiveDiagnostic.Endpoint(ServiceUrl)} }}";
+}
 
 internal sealed record MatrixDeliveryConfiguration(
     Uri HomeserverUrl,
     string Username,
     string Password,
-    string DefaultRoomId);
+    string DefaultRoomId)
+{
+    public override string ToString() =>
+        $"{nameof(MatrixDeliveryConfiguration)} {{ "
+        + $"{nameof(HomeserverUrl)} = {SensitiveDiagnostic.Endpoint(HomeserverUrl)}, "
+        + $"{nameof(Username)} = {Username}, "
+        + $"{nameof(Password)} = {SensitiveDiagnostic.Secret(Password)}, "
+        + $"{nameof(DefaultRoomId)} = {DefaultRoomId} }}";
+}
 
 internal sealed record LocalRuntimeConfiguration(string ExecutablePath);
 

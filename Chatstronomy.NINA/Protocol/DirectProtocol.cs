@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Chatstronomy.NINA.Security;
 
 namespace Chatstronomy.NINA.Protocol;
 
@@ -383,11 +384,23 @@ internal sealed record QueryResultPayload(
 
 internal sealed record PairRequestPayload(
     [property: JsonPropertyName("pairing_token")] string PairingToken,
-    [property: JsonPropertyName("hello")] ClientHello Hello);
+    [property: JsonPropertyName("hello")] ClientHello Hello)
+{
+    public override string ToString() =>
+        $"{nameof(PairRequestPayload)} {{ "
+        + $"{nameof(PairingToken)} = {SensitiveDiagnostic.Secret(PairingToken)}, "
+        + $"{nameof(Hello)} = {Hello} }}";
+}
 
 internal sealed record AuthRequestPayload(
     [property: JsonPropertyName("credential")] string Credential,
-    [property: JsonPropertyName("hello")] ClientHello Hello);
+    [property: JsonPropertyName("hello")] ClientHello Hello)
+{
+    public override string ToString() =>
+        $"{nameof(AuthRequestPayload)} {{ "
+        + $"{nameof(Credential)} = {SensitiveDiagnostic.Secret(Credential)}, "
+        + $"{nameof(Hello)} = {Hello} }}";
+}
 
 internal sealed record HeartbeatPayload(
     [property: JsonPropertyName("seq")] ulong Sequence);
@@ -403,7 +416,13 @@ internal abstract record HubMessage;
 
 internal sealed record HubAgentHelloMessage(AgentHello Hello) : HubMessage;
 
-internal sealed record HubPairResultMessage(string Credential, AgentHello Hello) : HubMessage;
+internal sealed record HubPairResultMessage(string Credential, AgentHello Hello) : HubMessage
+{
+    public override string ToString() =>
+        $"{nameof(HubPairResultMessage)} {{ "
+        + $"{nameof(Credential)} = {SensitiveDiagnostic.Secret(Credential)}, "
+        + $"{nameof(Hello)} = {Hello} }}";
+}
 
 internal sealed record HubQueryMessage(DirectQuery Query) : HubMessage;
 
