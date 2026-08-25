@@ -652,8 +652,9 @@ internal static class Program
             .Select(element => (string?)element.Attribute("Text") ?? string.Empty)
             .ToArray();
         AssertTrue(descriptions.Any(value =>
-            value.Contains("every individual command", StringComparison.Ordinal)
-            && value.Contains("default to off", StringComparison.Ordinal)));
+            value.Equals(
+                "Choose which controls and information to share with the Hub or local bots.",
+                StringComparison.Ordinal)));
         AssertTrue(descriptions.Any(value =>
             value.Contains("master switch alone grants no command access", StringComparison.Ordinal)));
         AssertTrue(descriptions.Any(value =>

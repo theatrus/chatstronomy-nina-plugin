@@ -63,7 +63,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Security and privacy" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="These safeguards are enforced inside this N.I.N.A. profile for both the hosted Hub and local chat bots. Hardware control, every individual command, sequence-validation bypass, and location sharing all default to off."
+                            Text="Choose which controls and information to share with the Hub or local bots."
                             TextWrapping="Wrap" />
                         <Grid Margin="0,0,0,4">
                             <Grid.ColumnDefinitions>
