@@ -1,4 +1,5 @@
 using Chatstronomy.NINA.Protocol;
+using Chatstronomy.NINA.Security;
 
 namespace Chatstronomy.NINA.Remote;
 
@@ -10,6 +11,14 @@ internal sealed record HubConnectionConfiguration(
     bool AllowInsecureLoopback = false)
 {
     internal Uri WebSocketUrl => BuildWebSocketUrl(ServiceUrl, AllowInsecureLoopback);
+
+    public override string ToString() =>
+        $"{nameof(HubConnectionConfiguration)} {{ "
+        + $"{nameof(ServiceUrl)} = {SensitiveDiagnostic.Endpoint(ServiceUrl)}, "
+        + $"{nameof(Credential)} = {SensitiveDiagnostic.Secret(Credential)}, "
+        + $"{nameof(PairingToken)} = {SensitiveDiagnostic.Secret(PairingToken)}, "
+        + $"{nameof(ProfileId)} = {ProfileId}, "
+        + $"{nameof(AllowInsecureLoopback)} = {AllowInsecureLoopback} }}";
 
     internal void Validate()
     {

@@ -10,7 +10,10 @@ using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -44,6 +47,7 @@ internal static class Program
         Run("Hosted pair and auth frames match the Rust contract", HostedHandshakeFramesMatchRust);
         Run("Hosted client accepts unmarked legacy hub payloads", HostedLegacyHubPayloadsAreAccepted);
         Run("Hosted secrets are scoped to profile and hub origin", HostedSecretsAreOriginScoped);
+        Run("Delivery and Direct diagnostics never reveal credentials", CredentialDiagnosticsAreRedacted);
         Run("Direct query deadlines match the hub clock-skew contract", DirectQueryDeadlinesMatchHub);
         await RunAsync(
             "Hosted credentials take precedence over stale pairing codes",
@@ -178,6 +182,9 @@ internal static class Program
             await RunAsync(
                 "Plugin runtime starts and stops over its control pipe",
                 () => PluginRuntimeStartsAndStops(runtimePath));
+            await RunAsync(
+                "Failed webhook requests never expose credentials in the local runtime log",
+                () => PluginRuntimeRedactsFailedWebhookDeliveries(runtimePath));
             await RunAsync(
                 "Plugin runtime queries the native Direct data pipe",
                 () => PluginRuntimeUsesDirectPipe(runtimePath));
@@ -385,6 +392,137 @@ internal static class Program
         AssertEqual(
             "wss://hub.chatstronomy.com/v1/direct",
             HubConnectionConfiguration.BuildWebSocketUrl(serviceUrl).AbsoluteUri);
+    }
+
+    private static void CredentialDiagnosticsAreRedacted()
+    {
+        const string webhookSecret = "discord-webhook-sensitive-probe";
+        const string botSecret = "discord-bot-sensitive-probe";
+        const string matrixPassword = "matrix-password-sensitive-probe";
+        const string matrixUrlUser = "matrix-url-user-sensitive-probe";
+        const string matrixUrlPassword = "matrix-url-password-sensitive-probe";
+        const string matrixUrlToken = "matrix-url-token-sensitive-probe";
+        const string matrixFragment = "matrix-fragment-sensitive-probe";
+        const string hubUrlPassword = "hub-url-password-sensitive-probe";
+        const string hubUrlToken = "hub-url-token-sensitive-probe";
+        const string hostedCredential = "csrc-hosted-sensitive-probe";
+        const string hostedPairing = "cspt-hosted-sensitive-probe";
+        const string directPairing = "cspt-direct-sensitive-probe";
+        const string directCredential = "csrc-direct-sensitive-probe";
+        const string pairedCredential = "csrc-result-sensitive-probe";
+
+        var webhook = new DiscordWebhookDeliveryConfiguration(
+            new Uri($"https://discord.com/api/webhooks/123/{webhookSecret}"));
+        var bot = new DiscordBotDeliveryConfiguration(botSecret, ApplicationId: 42, DefaultChannelId: 84);
+        var matrix = new MatrixDeliveryConfiguration(
+            new Uri(
+                $"https://{matrixUrlUser}:{matrixUrlPassword}@matrix.example.test/base"
+                + $"?access_token={matrixUrlToken}#{matrixFragment}"),
+            Username: "@astronomer:matrix.example.test",
+            Password: matrixPassword,
+            DefaultRoomId: "!observatory:matrix.example.test");
+        var hubUrl = new Uri(
+            $"https://hub-user:{hubUrlPassword}@hub.example.test/"
+            + $"?access_token={hubUrlToken}");
+        var hostedDelivery = new HostedDeliveryConfiguration(hubUrl);
+        var hub = new HubConnectionConfiguration(
+            hubUrl,
+            hostedCredential,
+            hostedPairing,
+            Guid.NewGuid());
+        var topLevelWebhook = new ChatstronomyConfiguration(
+            webhook,
+            matrix,
+            new LocalRuntimeConfiguration("runtime.exe"));
+        var topLevelBot = topLevelWebhook with { Delivery = bot };
+        var hello = HostedHello();
+        var pair = new PairRequestPayload(directPairing, hello);
+        var auth = new AuthRequestPayload(directCredential, hello);
+        var paired = new HubPairResultMessage(
+            pairedCredential,
+            new AgentHello(
+                DirectProtocol.CurrentVersion,
+                DirectProtocol.CurrentPayloadVersion,
+                Guid.NewGuid(),
+                hello.NodeId,
+                hello.ProfileId));
+        var pairWire = new DirectWireMessage<PairRequestPayload>("pair", pair);
+        var authWire = new DirectWireMessage<AuthRequestPayload>("auth", auth);
+        (string Name, object Value)[] diagnostics =
+        [
+            ("Discord webhook delivery", webhook),
+            ("Discord bot delivery", bot),
+            ("Matrix delivery", matrix),
+            ("hosted delivery endpoint", hostedDelivery),
+            ("hosted connection", hub),
+            ("nested webhook configuration", topLevelWebhook),
+            ("nested Discord bot configuration", topLevelBot),
+            ("Direct pairing request", pair),
+            ("Direct authentication request", auth),
+            ("hosted pairing result", paired),
+            ("nested Direct pairing message", pairWire),
+            ("nested Direct authentication message", authWire),
+        ];
+        string[] privateValues =
+        [
+            webhookSecret,
+            botSecret,
+            matrixPassword,
+            matrixUrlUser,
+            matrixUrlPassword,
+            matrixUrlToken,
+            matrixFragment,
+            hubUrlPassword,
+            hubUrlToken,
+            hostedCredential,
+            hostedPairing,
+            directPairing,
+            directCredential,
+            pairedCredential,
+        ];
+
+        foreach (var (name, value) in diagnostics)
+        {
+            var rendered = value.ToString()
+                ?? throw new InvalidOperationException($"{name} did not render a diagnostic.");
+            if (!rendered.Contains("[redacted]", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"{name} did not mark its credential as redacted.");
+            }
+            if (privateValues.Any(secret => rendered.Contains(secret, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException($"{name} exposed a private credential.");
+            }
+        }
+
+        AssertTrue(webhook.ToString().Contains("discord.com", StringComparison.Ordinal));
+        AssertTrue(bot.ToString().Contains("DefaultChannelId = 84", StringComparison.Ordinal));
+        AssertTrue(matrix.ToString().Contains("matrix.example.test/base", StringComparison.Ordinal));
+        AssertTrue(hub.ToString().Contains("hub.example.test", StringComparison.Ordinal));
+
+        // Sanitizing diagnostics must never redact the secure, intentional
+        // transport that the local runtime and hosted handshake require.
+        using var serializedPair = JsonDocument.Parse(DirectProtocol.SerializePair(directPairing, hello));
+        AssertEqual(
+            directPairing,
+            serializedPair.RootElement.GetProperty("payload").GetProperty("pairing_token").GetString());
+        using var serializedAuth = JsonDocument.Parse(DirectProtocol.SerializeAuth(directCredential, hello));
+        AssertEqual(
+            directCredential,
+            serializedAuth.RootElement.GetProperty("payload").GetProperty("credential").GetString());
+        var bootstrap = PluginRuntimeBootstrap.Serialize(
+            topLevelBot,
+            new LocalRuntimeIdentity(Guid.NewGuid(), Guid.NewGuid(), "Private Rig"),
+            directPipeName: "chatstronomy-private-test",
+            directCapabilities: hello.Capabilities);
+        using var serializedBootstrap = JsonDocument.Parse(bootstrap);
+        AssertEqual(
+            botSecret,
+            serializedBootstrap.RootElement.GetProperty("delivery").GetProperty("bot_token").GetString());
+        AssertEqual(
+            matrixPassword,
+            serializedBootstrap.RootElement.GetProperty("matrix").GetProperty("password").GetString());
+        AssertEqual(webhook, new DiscordWebhookDeliveryConfiguration(webhook.WebhookUrl));
     }
 
     private static void HostedHubIsFirstDeliveryOption()
@@ -3000,20 +3138,28 @@ internal static class Program
                     profileId,
                     "Controller Integration Test"),
                 CancellationToken.None);
-            AssertTrue(controller.IsRunning);
-            AssertTrue(controller.ProcessId.HasValue);
+            if (!controller.IsRunning)
+            {
+                throw new InvalidOperationException(
+                    "The local runtime exited immediately after acknowledging startup.");
+            }
+            if (!controller.ProcessId.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "The running local runtime did not expose its Windows process ID.");
+            }
 
             await controller.StopAsync(CancellationToken.None);
-            AssertFalse(controller.IsRunning);
+            if (controller.IsRunning)
+            {
+                throw new InvalidOperationException(
+                    "The local runtime was still running after graceful shutdown completed.");
+            }
 
-            var logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Chatstronomy",
-                "logs",
-                $"nina-runtime-{profileId:N}.log");
+            var logPath = RuntimeLogPath(profileId);
             var log = await ReadAllTextWhenUnlockedAsync(logPath);
-            AssertFalse(log.Contains("api/webhooks", StringComparison.OrdinalIgnoreCase));
-            AssertFalse(log.Contains("token", StringComparison.OrdinalIgnoreCase));
+            AssertRuntimeLogDoesNotContain(log, "api/webhooks", "a Discord webhook URL");
+            AssertRuntimeLogDoesNotContain(log, "token", "a possible delivery credential");
         }
         finally
         {
@@ -3022,6 +3168,137 @@ internal static class Program
                 await controller.StopAsync(CancellationToken.None);
             }
             provider.Dispose();
+        }
+    }
+
+    private static async Task PluginRuntimeRedactsFailedWebhookDeliveries(string runtimePath)
+    {
+        const string privateWebhookProbe = "chatstronomy-private-webhook-probe";
+        const string deliveryFailure = "Failed to send message to Discord";
+        var provider = new FakeDirectDataProvider();
+        var controller = new ChatstronomyRuntimeController(provider);
+        var profileId = Guid.NewGuid();
+        var listener = new TcpListener(IPAddress.Loopback, port: 0);
+        listener.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var proxyRequest = RejectWebhookProxyRequestAsync(listener, timeout.Token);
+        var proxy = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
+        var previousProxy = Environment.GetEnvironmentVariable("HTTPS_PROXY");
+        var previousNoProxy = Environment.GetEnvironmentVariable("NO_PROXY");
+
+        try
+        {
+            try
+            {
+                // The child receives a copy of this environment at process
+                // creation. Restore our own settings as soon as its secure
+                // bootstrap completes so no other integration uses the proxy.
+                Environment.SetEnvironmentVariable("HTTPS_PROXY", proxy);
+                Environment.SetEnvironmentVariable("NO_PROXY", string.Empty);
+                await controller.StartAsync(
+                    BuildDirectRuntimeConfiguration(runtimePath, privateWebhookProbe),
+                    new LocalRuntimeIdentity(
+                        Guid.NewGuid(),
+                        profileId,
+                        "Webhook Privacy Integration Test"),
+                    timeout.Token);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("HTTPS_PROXY", previousProxy);
+                Environment.SetEnvironmentVariable("NO_PROXY", previousNoProxy);
+            }
+
+            // Waiting for the loopback CONNECT and the resulting runtime log
+            // proves a request really failed before shutdown: the privacy
+            // assertion cannot pass merely because startup was interrupted.
+            await proxyRequest.WaitAsync(timeout.Token);
+            var logPath = RuntimeLogPath(profileId);
+            await WaitForRuntimeLogEntryAsync(logPath, deliveryFailure, timeout.Token);
+            await controller.StopAsync(CancellationToken.None);
+            var log = await ReadAllTextWhenUnlockedAsync(logPath);
+            AssertRuntimeLogDoesNotContain(log, "api/webhooks", "a Discord webhook URL");
+            AssertRuntimeLogDoesNotContain(log, privateWebhookProbe, "a Discord webhook credential");
+        }
+        finally
+        {
+            timeout.Cancel();
+            listener.Stop();
+            if (controller.IsRunning)
+            {
+                await controller.StopAsync(CancellationToken.None);
+            }
+            provider.Dispose();
+        }
+    }
+
+    private static async Task RejectWebhookProxyRequestAsync(
+        TcpListener listener,
+        CancellationToken cancellationToken)
+    {
+        using var client = await listener.AcceptTcpClientAsync(cancellationToken);
+        using var stream = client.GetStream();
+        var requestBytes = new byte[1024];
+        var read = await stream.ReadAsync(requestBytes, cancellationToken);
+        var request = Encoding.ASCII.GetString(requestBytes, 0, read);
+        if (!request.StartsWith("CONNECT discord.com:443 ", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The local runtime did not route its webhook request through the isolated proxy.");
+        }
+
+        var response = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        await stream.WriteAsync(response, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+    }
+
+    private static string RuntimeLogPath(Guid profileId) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Chatstronomy",
+        "logs",
+        $"nina-runtime-{profileId:N}.log");
+
+    private static async Task WaitForRuntimeLogEntryAsync(
+        string path,
+        string marker,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                using var stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                var log = await reader.ReadToEndAsync(cancellationToken);
+                if (log.Contains(marker, StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+            catch (IOException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Process startup may not have opened its log yet.
+            }
+
+            await Task.Delay(25, cancellationToken);
+        }
+    }
+
+    private static void AssertRuntimeLogDoesNotContain(
+        string log,
+        string privateValue,
+        string description)
+    {
+        if (log.Contains(privateValue, StringComparison.OrdinalIgnoreCase))
+        {
+            // Never print the offending log line or credential in CI output.
+            throw new InvalidOperationException($"The local runtime log exposed {description}.");
         }
     }
 
@@ -3283,10 +3560,12 @@ internal static class Program
         }
     }
 
-    private static ChatstronomyConfiguration BuildDirectRuntimeConfiguration(string runtimePath) =>
+    private static ChatstronomyConfiguration BuildDirectRuntimeConfiguration(
+        string runtimePath,
+        string webhookToken = "token") =>
         new(
             new DiscordWebhookDeliveryConfiguration(
-                new Uri("https://discord.com/api/webhooks/123/token")),
+                new Uri($"https://discord.com/api/webhooks/123/{webhookToken}")),
             Matrix: null,
             new LocalRuntimeConfiguration(runtimePath));
 

@@ -3,8 +3,8 @@
   "state": "locked",
   "backend": {
     "repository": "theatrus/chatstronomy",
-    "tag": "v0.4.2",
-    "runtime_manifest_sha256": "8ead715f7877257cfdefc514de515c03f89347a70de194798735b206926d92d7"
+    "tag": "v0.4.3",
+    "runtime_manifest_sha256": "c05065f29b9471f158d6f400d5acb4556c82150976d4f3e937cd6e7a9c9ce3d7"
   },
   "protocols": {
     "direct": 1,
