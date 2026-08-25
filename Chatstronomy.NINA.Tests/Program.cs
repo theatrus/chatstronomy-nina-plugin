@@ -81,6 +81,7 @@ internal static class Program
         Run("Skipping sequence validation requires separate explicit consent", SequenceValidationBypassRequiresConsent);
         Run("Changing N.I.N.A. profiles immediately revokes in-flight hardware commands", ProfileChangesRevokeRemoteControl);
         Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
+        Run("Queued hardware commands cannot cross equally authorized N.I.N.A. profiles", QueuedHardwareActionsCannotCrossProfiles);
         await RunAsync(
             "Direct commands require explicit local N.I.N.A. consent",
             DirectCommandsRequireLocalConsent);
@@ -823,6 +824,44 @@ internal static class Program
             HardwareAction());
         AssertTrue(authorized());
         AssertTrue(touchedHardware);
+    }
+
+    private static void QueuedHardwareActionsCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = CreateSecurityTestProvider(access);
+        var query = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount),
+            ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        var touchedOldProfileHardware = false;
+        var queuedBeforeProfileChange = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            () => touchedOldProfileHardware = true);
+
+        ChatstronomyPlugin.ApplyProfileAccessChange(
+            access,
+            provider,
+            permittedInBothProfiles);
+
+        AssertTrue(provider.Capabilities.Commands);
+        access.RequireRemoteControl(query.Command!);
+        AssertThrows<InvalidOperationException>(() => queuedBeforeProfileChange());
+        AssertFalse(touchedOldProfileHardware);
+
+        var touchedCurrentProfileHardware = false;
+        var queuedAfterProfileChange = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            () => touchedCurrentProfileHardware = true);
+        AssertTrue(queuedAfterProfileChange());
+        AssertTrue(touchedCurrentProfileHardware);
     }
 
     private static async Task DirectCommandsRequireLocalConsent()

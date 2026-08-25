@@ -85,6 +85,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private CancellationTokenSource? autofocusCommandStop;
     private AutoFocusReport? lastAutofocusReport;
     private long guideStepId;
+    private long commandGeneration;
     private bool started;
 
     internal NinaDirectDataProvider(
@@ -216,7 +217,14 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         }
     }
 
-    public void RevokeRemoteControl() => CancelOutstandingCommands();
+    public void RevokeRemoteControl()
+    {
+        // A profile can grant the same command as its predecessor. Advancing
+        // the generation first still invalidates every callback captured by
+        // that predecessor, including callbacks not yet given a device token.
+        Interlocked.Increment(ref commandGeneration);
+        CancelOutstandingCommands();
+    }
 
     public void Stop()
     {
@@ -419,10 +427,11 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     {
         var command = query.Command ?? throw new InvalidOperationException(
             "The Direct command payload is missing.");
+        var generation = Volatile.Read(ref commandGeneration);
         // The negotiated capability is informational, not a trust boundary:
         // an old connection or compromised peer can still send a command.
         // Fail before inspecting any mediator or touching observatory gear.
-        RequireCurrentCommandConsent(query, cancellationToken);
+        RequireCurrentCommandConsent(query, cancellationToken, generation);
         var response = command.Kind switch
         {
             DirectRigCommandKind.UnparkMount => UnparkMount(),
@@ -432,13 +441,15 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             DirectRigCommandKind.StopGuiding => StopGuiding(),
             DirectRigCommandKind.CoolCamera => CoolCamera(command.Temperature, command.Minutes),
             DirectRigCommandKind.WarmCamera => WarmCamera(command.Minutes),
-            DirectRigCommandKind.StartAutofocus => StartAutofocus(query, cancellationToken),
+            DirectRigCommandKind.StartAutofocus =>
+                StartAutofocus(query, cancellationToken, generation),
             DirectRigCommandKind.CancelAutofocus => CancelAutofocus(),
             DirectRigCommandKind.ParkMount => ParkMount(),
             DirectRigCommandKind.AbortExposure => AbortExposure(),
-            DirectRigCommandKind.StopSequence => StopSequence(query, cancellationToken),
+            DirectRigCommandKind.StopSequence =>
+                StopSequence(query, cancellationToken, generation),
             DirectRigCommandKind.StartSequence =>
-                StartSequence(command.SkipValidation, query, cancellationToken),
+                StartSequence(command.SkipValidation, query, cancellationToken, generation),
             _ => throw new NotSupportedException(
                 $"Direct command '{command.Kind}' is not implemented."),
         };
@@ -447,9 +458,15 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 
     private void RequireCurrentCommandConsent(
         DirectQuery query,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long generation)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref commandGeneration) != generation)
+        {
+            throw new InvalidOperationException(
+                "Remote hardware command was revoked before execution.");
+        }
         if (query.IsExpiredAt(DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
         {
             throw new InvalidOperationException("query expired before execution");
@@ -465,16 +482,31 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     internal Func<T> GuardCommandAction<T>(
         DirectQuery query,
         CancellationToken cancellationToken,
+        Func<T> action) => GuardCommandAction(
+            query,
+            cancellationToken,
+            Volatile.Read(ref commandGeneration),
+            action);
+
+    private Func<T> GuardCommandAction<T>(
+        DirectQuery query,
+        CancellationToken cancellationToken,
+        long generation,
         Func<T> action) => () =>
     {
-        RequireCurrentCommandConsent(query, cancellationToken);
+        RequireCurrentCommandConsent(query, cancellationToken, generation);
         return action();
     };
 
     private T RunAuthorizedCommandOnUiThread<T>(
         DirectQuery query,
         CancellationToken cancellationToken,
-        Func<T> action) => RunOnUiThread(GuardCommandAction(query, cancellationToken, action));
+        long generation,
+        Func<T> action) => RunOnUiThread(GuardCommandAction(
+            query,
+            cancellationToken,
+            generation,
+            action));
 
     private DirectApiEnvelope<string> UnparkMount()
     {
@@ -646,7 +678,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 
     private DirectApiEnvelope<string> StartAutofocus(
         DirectQuery query,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long generation)
     {
         if (!focuser.GetInfo().Connected)
         {
@@ -656,7 +689,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         var stop = ReplaceCommandToken(ref autofocusCommandStop);
         IWindowService? window = null;
         Task<AutoFocusReport>? autofocus = null;
-        RunAuthorizedCommandOnUiThread(query, cancellationToken, () =>
+        RunAuthorizedCommandOnUiThread(query, cancellationToken, generation, () =>
         {
             window = windowFactory.Create();
             var viewModel = autoFocusFactory.Create();
@@ -700,10 +733,11 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
 
     private DirectApiEnvelope<string> StopSequence(
         DirectQuery query,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long generation)
     {
         EnsureSequenceReady();
-        RunAuthorizedCommandOnUiThread(query, cancellationToken, () =>
+        RunAuthorizedCommandOnUiThread(query, cancellationToken, generation, () =>
         {
             sequence.CancelAdvancedSequence();
             return true;
@@ -714,7 +748,8 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private DirectApiEnvelope<string> StartSequence(
         bool? skipValidation,
         DirectQuery query,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long generation)
     {
         EnsureSequenceReady();
         if (sequence.IsAdvancedSequenceRunning())
@@ -724,6 +759,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         var task = RunAuthorizedCommandOnUiThread(
             query,
             cancellationToken,
+            generation,
             () => sequence.StartAdvancedSequence(skipValidation ?? false));
         ObserveCommand(task, "Start sequence");
         return DirectApiEnvelope<string>.Accepted("Sequence start requested");
