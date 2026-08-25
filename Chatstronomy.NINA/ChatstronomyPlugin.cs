@@ -35,6 +35,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     private readonly IProfileService profileService;
     private readonly ChatstronomySettings settings;
     private readonly DirectEventDeliveryPolicy eventDelivery;
+    private readonly DirectAccessPolicy accessPolicy;
     private readonly IChatstronomyRuntimeController runtimeController;
     private readonly INinaDirectDataProvider directDataProvider;
     private readonly ChatstronomyHubClient hubClient;
@@ -69,6 +70,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         this.profileService = profileService;
         settings = new ChatstronomySettings(profileService);
         eventDelivery = new DirectEventDeliveryPolicy(settings.EventDeliveryOptions);
+        accessPolicy = new DirectAccessPolicy(settings.AccessOptions);
         directDataProvider = new NinaDirectDataProvider(
             profileService,
             telescope,
@@ -84,7 +86,8 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             imageHistory,
             windowFactory,
             messageBroker,
-            eventDelivery);
+            eventDelivery,
+            accessPolicy);
         runtimeController = new ChatstronomyRuntimeController(directDataProvider);
         hubClient = new ChatstronomyHubClient(directDataProvider);
         startRuntimeCommand = new AsyncCommand(
@@ -350,6 +353,137 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             RaisePropertyChanged();
             RefreshStatus();
         }
+    }
+
+    public bool AllowRemoteControl
+    {
+        get => settings.AllowRemoteControl;
+        set
+        {
+            if (settings.AllowRemoteControl == value)
+            {
+                return;
+            }
+
+            var previous = accessPolicy.Current;
+            settings.AllowRemoteControl = value;
+            var current = settings.AccessOptions;
+            accessPolicy.Update(current);
+            if (!value)
+            {
+                directDataProvider.RevokeRemoteControl();
+            }
+
+            RaisePropertyChanged();
+            if (initialized && previous.CommandsEnabled != current.CommandsEnabled)
+            {
+                // The trust boundary is already live above; reconnect so the
+                // Hub or local runtime also receives the revised capability.
+                _ = StartConfiguredModeAsync(CancellationToken.None);
+            }
+        }
+    }
+
+    public bool ShareObservatoryLocation
+    {
+        get => settings.ShareObservatoryLocation;
+        set
+        {
+            if (settings.ShareObservatoryLocation == value)
+            {
+                return;
+            }
+
+            settings.ShareObservatoryLocation = value;
+            // Queries project data at execution time, so privacy changes take
+            // effect immediately without disturbing the live connection.
+            accessPolicy.Update(settings.AccessOptions);
+            RaisePropertyChanged();
+        }
+    }
+
+    public bool AllowUnparkMount
+    {
+        get => settings.AllowUnparkMount;
+        set => SetCommandPermission(() => settings.AllowUnparkMount = value);
+    }
+
+    public bool AllowHomeMount
+    {
+        get => settings.AllowHomeMount;
+        set => SetCommandPermission(() => settings.AllowHomeMount = value);
+    }
+
+    public bool AllowChangeFilter
+    {
+        get => settings.AllowChangeFilter;
+        set => SetCommandPermission(() => settings.AllowChangeFilter = value);
+    }
+
+    public bool AllowStartGuiding
+    {
+        get => settings.AllowStartGuiding;
+        set => SetCommandPermission(() => settings.AllowStartGuiding = value);
+    }
+
+    public bool AllowStopGuiding
+    {
+        get => settings.AllowStopGuiding;
+        set => SetCommandPermission(() => settings.AllowStopGuiding = value);
+    }
+
+    public bool AllowCoolCamera
+    {
+        get => settings.AllowCoolCamera;
+        set => SetCommandPermission(() => settings.AllowCoolCamera = value);
+    }
+
+    public bool AllowWarmCamera
+    {
+        get => settings.AllowWarmCamera;
+        set => SetCommandPermission(() => settings.AllowWarmCamera = value);
+    }
+
+    public bool AllowStartAutofocus
+    {
+        get => settings.AllowStartAutofocus;
+        set => SetCommandPermission(() => settings.AllowStartAutofocus = value);
+    }
+
+    public bool AllowCancelAutofocus
+    {
+        get => settings.AllowCancelAutofocus;
+        set => SetCommandPermission(() => settings.AllowCancelAutofocus = value);
+    }
+
+    public bool AllowParkMount
+    {
+        get => settings.AllowParkMount;
+        set => SetCommandPermission(() => settings.AllowParkMount = value);
+    }
+
+    public bool AllowAbortExposure
+    {
+        get => settings.AllowAbortExposure;
+        set => SetCommandPermission(() => settings.AllowAbortExposure = value);
+    }
+
+    public bool AllowStopSequence
+    {
+        get => settings.AllowStopSequence;
+        set => SetCommandPermission(() => settings.AllowStopSequence = value);
+    }
+
+    public bool AllowStartSequence
+    {
+        get => settings.AllowStartSequence;
+        set => SetCommandPermission(() => settings.AllowStartSequence = value);
+    }
+
+    public bool AllowSkipSequenceValidation
+    {
+        get => settings.AllowSkipSequenceValidation;
+        set => SetCommandPermission(() => settings.AllowSkipSequenceValidation = value);
     }
 
     public bool SendImageEvents
@@ -624,6 +758,11 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
     private async void ProfileServiceProfileChanged(object? sender, EventArgs args)
     {
+        // Hardware operations belong to the originating profile, even when the
+        // next profile also permits control. End that trust window before any
+        // queued lifecycle work can delay connection teardown.
+        ApplyProfileAccessChange(accessPolicy, directDataProvider, settings.AccessOptions);
+
         await lifecycleGate.WaitAsync(CancellationToken.None);
         try
         {
@@ -646,6 +785,17 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         {
             lifecycleGate.Release();
         }
+    }
+
+    internal static void ApplyProfileAccessChange(
+        DirectAccessPolicy policy,
+        INinaDirectDataProvider provider,
+        DirectAccessOptions currentAccess)
+    {
+        // The old authenticated connection must be unusable before its new
+        // profile's state or equally permissive command policy is published.
+        provider.RevokeProfileAccess();
+        policy.Update(currentAccess);
     }
 
     private async Task StartConfiguredModeAsync(CancellationToken cancellationToken)
@@ -965,6 +1115,22 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(HostedPairingToken),
             nameof(HostedCredentialStatus),
             nameof(LocalRuntimePath),
+            nameof(AllowRemoteControl),
+            nameof(ShareObservatoryLocation),
+            nameof(AllowUnparkMount),
+            nameof(AllowHomeMount),
+            nameof(AllowChangeFilter),
+            nameof(AllowStartGuiding),
+            nameof(AllowStopGuiding),
+            nameof(AllowCoolCamera),
+            nameof(AllowWarmCamera),
+            nameof(AllowStartAutofocus),
+            nameof(AllowCancelAutofocus),
+            nameof(AllowParkMount),
+            nameof(AllowAbortExposure),
+            nameof(AllowStopSequence),
+            nameof(AllowStartSequence),
+            nameof(AllowSkipSequenceValidation),
             nameof(SendImageEvents),
             nameof(SendAutofocusEvents),
             nameof(SendGuidingEvents),
@@ -1007,6 +1173,30 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         eventDelivery.Update(settings.EventDeliveryOptions);
         directDataProvider.ApplyLogDeliveryOptions();
         RaisePropertyChanged(propertyName);
+    }
+
+    private void SetCommandPermission(
+        Action update,
+        [CallerMemberName] string? propertyName = null)
+    {
+        var previous = accessPolicy.Current;
+        update();
+        var current = settings.AccessOptions;
+        accessPolicy.Update(current);
+        if ((previous.EffectiveAllowedCommands & ~current.EffectiveAllowedCommands)
+            != DirectCommandPermissions.None)
+        {
+            directDataProvider.RevokeRemoteControl();
+        }
+
+        RaisePropertyChanged(propertyName);
+        if (initialized && previous.CommandsEnabled != current.CommandsEnabled)
+        {
+            // The handshake advertises one commands-capable bit, not an ACL.
+            // Existing connections see every individual permission change at
+            // execution time; restart only when that advertised bit changes.
+            _ = StartConfiguredModeAsync(CancellationToken.None);
+        }
     }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null) =>

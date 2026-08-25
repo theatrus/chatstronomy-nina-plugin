@@ -39,16 +39,55 @@ jobs:
         shell: pwsh
         run: |
           $arguments = @{
-            Version = '0.1.0.20'
+            Version = '0.1.0.21'
             SkipRuntime = $true
-            InstallerUrl = 'https://example.invalid/Chatstronomy.NINA.0.1.0.20.zip'
+            InstallerUrl = 'https://example.invalid/Chatstronomy.NINA.0.1.0.21.zip'
             FeaturedImageUrl = 'https://example.invalid/chatstronomy-featured.png'
           }
           ./build-package.ps1 @arguments -StageOnly
-          if (-not (Test-Path -LiteralPath 'artifacts/nina-plugin/package/Chatstronomy/Chatstronomy.dll' -PathType Leaf)) {
-            throw 'StageOnly did not produce the plugin DLL.'
+          foreach ($path in @('Chatstronomy.dll', 'LICENSE', 'THIRD-PARTY-NOTICES.md')) {
+            $staged = Join-Path 'artifacts/nina-plugin/package/Chatstronomy' $path
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) {
+              throw "StageOnly did not produce required package file $path."
+            }
           }
+
+          $fontNotice = Get-FileHash -LiteralPath 'licenses/LiberationSans-LICENSE' -Algorithm SHA256
+          if ($fontNotice.Hash -ne '93FED46019C38BBE566B479D22148E2E8A1E85ADA614ACCB0211C37B2C61C19B') {
+            throw 'Vendored Liberation Sans notice does not match the pinned backend font license.'
+          }
+
+          # -SkipRuntime must never bypass the font notice by archiving a
+          # runtime left behind in an existing package stage.
+          $stagedRoot = 'artifacts/nina-plugin/package/Chatstronomy'
+          $runtimeDirectory = Join-Path $stagedRoot 'runtime'
+          New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $stagedRoot 'Chatstronomy.dll') `
+            -Destination (Join-Path $runtimeDirectory 'chatstronomy.exe')
+          $rejected = $false
+          try {
+            ./build-package.ps1 @arguments -PackageOnly | Out-Null
+          } catch {
+            $rejected = $_.Exception.Message -match '-SkipRuntime cannot package a staged runtime'
+          }
+          if (-not $rejected) {
+            throw '-SkipRuntime incorrectly allowed a staged runtime without its font license.'
+          }
+
+          ./build-package.ps1 @arguments -StageOnly
           ./build-package.ps1 @arguments -PackageOnly
+          $archive = [IO.Compression.ZipFile]::OpenRead(
+            (Resolve-Path 'artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.21.zip'))
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+            foreach ($path in @('Chatstronomy.dll', 'LICENSE', 'THIRD-PARTY-NOTICES.md')) {
+              if ($path -notin $entries) {
+                throw "Generated archive does not contain required package file $path."
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: Validate GitHub development plugin repository
         shell: pwsh
@@ -103,12 +142,24 @@ jobs:
           $env:CHATSTRONOMY_HUB_EXE = $runtime.HubProbe
           $env:CHATSTRONOMY_CONTRACTS_DIR = $runtime.Contracts
           dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
-          ./build-package.ps1 -Version 0.1.0.20 -RuntimePath $runtime.Runtime
+          ./build-package.ps1 -Version 0.1.0.21 -RuntimePath $runtime.Runtime
+          $archive = [IO.Compression.ZipFile]::OpenRead(
+            (Resolve-Path 'artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.21.zip'))
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+            foreach ($path in @('LICENSE', 'THIRD-PARTY-NOTICES.md', 'runtime/chatstronomy.exe', 'runtime/LiberationSans-LICENSE')) {
+              if ($path -notin $entries) {
+                throw "Runtime archive does not contain required redistribution file $path."
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: Upload package smoke-test
         uses: actions/upload-artifact@v7
         with:
           name: chatstronomy-nina-package-smoke-test
           path: |
-            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.20.zip
-            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.20.manifest.json
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.21.zip
+            artifacts/nina-plugin/Chatstronomy.NINA.0.1.0.21.manifest.json

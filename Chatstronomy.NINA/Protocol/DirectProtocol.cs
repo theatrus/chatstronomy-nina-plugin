@@ -9,6 +9,7 @@ internal static class DirectProtocol
     internal const ushort LegacyPayloadVersion = 1;
     internal const ushort CurrentPayloadVersion = 3;
     internal const long ExpiryClockSkewGraceSeconds = 120;
+    internal const long CommandExpiryClockSkewGraceSeconds = 5;
     private const string PipePrefix = "chatstronomy-agent-v1";
     internal const string WebSocketPath = "/v1/direct";
 
@@ -335,8 +336,11 @@ internal sealed record DirectQuery(
         }
 
         var deadline = ExpiresAt.Value;
-        return deadline <= long.MaxValue - DirectProtocol.ExpiryClockSkewGraceSeconds
-            && unixTimeSeconds > deadline + DirectProtocol.ExpiryClockSkewGraceSeconds;
+        var clockSkewGrace = Kind == DirectQueryKind.Command
+            ? DirectProtocol.CommandExpiryClockSkewGraceSeconds
+            : DirectProtocol.ExpiryClockSkewGraceSeconds;
+        return deadline <= long.MaxValue - clockSkewGrace
+            && unixTimeSeconds > deadline + clockSkewGrace;
     }
 }
 
@@ -418,6 +422,13 @@ internal sealed record DirectApiEnvelope<T>(
 {
     internal static DirectApiEnvelope<T> Ok(T response) =>
         new(response, string.Empty, 200, true, "API");
+
+    /// A command was accepted by N.I.N.A., but its asynchronous hardware
+    /// operation has not completed. Keeping the existing envelope shape lets
+    /// older consumers read the response while newer bots avoid claiming
+    /// successful completion prematurely.
+    internal static DirectApiEnvelope<T> Accepted(T response) =>
+        new(response, string.Empty, 202, true, "API");
 }
 
 internal sealed record DirectCapabilities(

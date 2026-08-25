@@ -54,6 +54,185 @@
                     </StackPanel>
                 </Border>
 
+                <Border
+                    Margin="0,16,0,0"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlBorderBrush}"
+                    BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Security and privacy" />
+                        <TextBlock
+                            Margin="0,3,0,10"
+                            Text="These safeguards are enforced inside this N.I.N.A. profile for both the hosted Hub and local chat bots. Hardware control, every individual command, sequence-validation bypass, and location sharing all default to off."
+                            TextWrapping="Wrap" />
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                Text="Allow remote telescope and camera control"
+                                TextWrapping="Wrap" />
+                            <CheckBox
+                                Grid.Column="1"
+                                Margin="8,0,0,0"
+                                IsChecked="{Binding AllowRemoteControl}" />
+                        </Grid>
+                        <TextBlock
+                            Margin="0,0,30,10"
+                            Text="The master switch alone grants no command access. Also enable each exact operation you trust below. Turning off the master switch immediately returns this profile to read-only monitoring while preserving your individual selections."
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            Margin="0,0,0,6"
+                            FontWeight="SemiBold"
+                            Text="Individually permitted hardware commands" />
+                        <UniformGrid
+                            Margin="0,0,0,12"
+                            Columns="2"
+                            IsEnabled="{Binding AllowRemoteControl}">
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Unpark mount (/unpark)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowUnparkMount}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Home mount (/home)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowHomeMount}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Park mount (/park)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowParkMount}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Change filter (/change-filter)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowChangeFilter}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Start guiding (/guider-start)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStartGuiding}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Stop guiding (/guider-stop)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStopGuiding}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Cool camera (/cool)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowCoolCamera}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Warm camera (/warm)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowWarmCamera}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Start autofocus (/autofocus)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStartAutofocus}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Cancel autofocus (/autofocus)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowCancelAutofocus}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Abort exposure (/abort-capture)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowAbortExposure}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Stop sequence (/stop-sequence)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStopSequence}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Start sequence (/start-sequence)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStartSequence}" />
+                            </Grid>
+                            <Grid
+                                Margin="0,3,16,3"
+                                IsEnabled="{Binding AllowStartSequence}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    Text="Allow skipping sequence safety checks"
+                                    TextWrapping="Wrap" />
+                                <CheckBox
+                                    Grid.Column="1"
+                                    Margin="8,0,0,0"
+                                    IsChecked="{Binding AllowSkipSequenceValidation}" />
+                            </Grid>
+                        </UniformGrid>
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                Text="Share exact observatory coordinates and location-derived mount position"
+                                TextWrapping="Wrap" />
+                            <CheckBox
+                                Grid.Column="1"
+                                Margin="8,0,0,0"
+                                IsChecked="{Binding ShareObservatoryLocation}" />
+                        </Grid>
+                        <TextBlock
+                            Margin="0,0,30,0"
+                            Text="When disabled, latitude, longitude, elevation, local sidereal time, altitude, azimuth, and derived meridian timing are redacted before any data leaves N.I.N.A. Hardware device IDs and sequence script or file paths are always redacted."
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
                 <Grid
                     Margin="0,14,0,0"
                     Visibility="{Binding UseDiscordWebhook, Converter={StaticResource BooleanToVisibilityConverter}}">
@@ -133,6 +312,17 @@
                                 NavigateUri="https://hub.chatstronomy.com/"
                                 RequestNavigate="Hyperlink_RequestNavigate">Open Chatstronomy Hub</Hyperlink>
                             <Run Text=", add or select your telescope, and choose Connect rig…" />
+                        </TextBlock>
+                        <TextBlock Margin="0,6,0,2" TextWrapping="Wrap">
+                            <Run Text="Before pairing, review the " />
+                            <Hyperlink
+                                NavigateUri="https://chatstronomy.com/hub-privacy.html"
+                                RequestNavigate="Hyperlink_RequestNavigate">hosted privacy policy</Hyperlink>
+                            <Run Text=" and " />
+                            <Hyperlink
+                                NavigateUri="https://chatstronomy.com/hub-terms.html"
+                                RequestNavigate="Hyperlink_RequestNavigate">hosted service terms</Hyperlink>
+                            <Run Text="." />
                         </TextBlock>
                     </StackPanel>
                     <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Top" Text="Connection credential" />
@@ -236,7 +426,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="Choose which N.I.N.A. events become chat messages. Disabled events are still retained for status and target tracking."
+                            Text="Choose which N.I.N.A. events may leave this computer. Disabled event categories are never sent to the Hub or local bot; disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
                             <Grid Margin="0,3,18,3">

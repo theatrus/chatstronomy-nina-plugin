@@ -9,7 +9,7 @@ on:
       version:
         description: Plugin version to stage and sign (four numeric parts)
         required: true
-        default: 0.1.0.20
+        default: 0.1.0.21
 
 permissions:
   contents: write
@@ -99,6 +99,12 @@ jobs:
             -RuntimePath $env:PINNED_RUNTIME `
             -InstallerUrl $installerUrl `
             -StageOnly
+          foreach ($path in @('LICENSE', 'THIRD-PARTY-NOTICES.md', 'runtime/LiberationSans-LICENSE')) {
+            $staged = Join-Path 'artifacts/nina-plugin/package/Chatstronomy' $path
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) {
+              throw "Staged release does not include required redistribution file $path."
+            }
+          }
 
       # The backend owns and signs its lean runtime before hashing it into the
       # pinned release manifest. Verify that exact copy, but do not sign it a
@@ -159,6 +165,18 @@ jobs:
             -Version '${{ steps.version.outputs.version }}' `
             -InstallerUrl $env:PLUGIN_INSTALLER_URL `
             -PackageOnly
+          $archivePath = "artifacts/nina-plugin/Chatstronomy.NINA.${{ steps.version.outputs.version }}.zip"
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $archivePath))
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+            foreach ($path in @('LICENSE', 'THIRD-PARTY-NOTICES.md', 'runtime/chatstronomy.exe', 'runtime/LiberationSans-LICENSE')) {
+              if ($path -notin $entries) {
+                throw "Release archive does not contain required redistribution file $path."
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: Publish GitHub release
         if: github.event_name == 'push'

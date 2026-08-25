@@ -5,6 +5,7 @@ using Chatstronomy.NINA.Remote;
 using Chatstronomy.NINA.Runtime;
 using Chatstronomy.NINA.Settings;
 using Newtonsoft.Json.Linq;
+using NINA.Equipment.Interfaces.Mediator;
 using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
@@ -29,6 +30,7 @@ internal static class Program
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Hosted Hub is the first chat delivery option", HostedHubIsFirstDeliveryOption);
         Run("Hosted setup links to the Hub pairing flow", HostedSetupLinksToHubPairingFlow);
+        Run("Local security and privacy controls are visible", LocalSecurityOptionsAreVisible);
         Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
@@ -68,6 +70,9 @@ internal static class Program
             "Hosted stop aborts cancellation-resistant sockets",
             HostedStopAbortsCancellationResistantSocket);
         await RunAsync(
+            "Profile changes immediately invalidate authenticated hosted sessions",
+            HostedSessionsCannotCrossProfiles);
+        await RunAsync(
             "Hosted concurrent starts leave one owned connection",
             HostedConcurrentStartsLeaveOneConnection);
         await RunAsync(
@@ -75,6 +80,67 @@ internal static class Program
             HostedBlockedQueryDoesNotBlockHeartbeats);
         Run("Local runtime requires an existing executable", LocalRuntimeRequiresExecutable);
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
+        Run("Direct access defaults to local read-only monitoring", DirectAccessDefaultsToReadOnly);
+        Run("Each hardware command requires its own local consent", EveryCommandRequiresIndividualConsent);
+        Run("Skipping sequence validation requires separate explicit consent", SequenceValidationBypassRequiresConsent);
+        Run("Changing N.I.N.A. profiles immediately revokes in-flight hardware commands", ProfileChangesRevokeRemoteControl);
+        Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
+        Run("Queued hardware commands cannot cross equally authorized N.I.N.A. profiles", QueuedHardwareActionsCannotCrossProfiles);
+        await RunAsync(
+            "Hardware commands recheck consent and expiry after blocking device reads",
+            HardwareCommandsRecheckConsentAfterDeviceReads);
+        await RunAsync(
+            "Direct commands require explicit local N.I.N.A. consent",
+            DirectCommandsRequireLocalConsent);
+        await RunAsync(
+            "Local Direct pipes cannot bypass local command consent",
+            LocalDirectPipesEnforceConsent);
+        await RunAsync(
+            "Expired local Direct commands never reach authorized hardware providers",
+            LocalDirectPipesRejectExpiredCommands);
+        await RunAsync(
+            "Profile changes immediately invalidate authenticated local Direct pipes",
+            LocalDirectPipesCannotCrossProfiles);
+        await RunAsync(
+            "Synchronous local Direct failures never expose observatory filesystem paths",
+            LocalDirectPipesRedactSynchronousFailures);
+        await RunAsync(
+            "Disabled events and images never cross the local Direct pipe",
+            LocalDirectPipesDoNotTransmitDisabledEvents);
+        await RunAsync(
+            "Hosted Direct connections cannot bypass local command consent",
+            HostedDirectConnectionsEnforceConsent);
+        await RunAsync(
+            "Synchronous hosted Direct failures never expose observatory filesystem paths",
+            HostedDirectConnectionsRedactSynchronousFailures);
+        await RunAsync(
+            "Disabled events and images never cross the hosted Hub WebSocket",
+            HostedConnectionsDoNotTransmitDisabledEvents);
+        Run("Observatory location is safely redacted without breaking legacy runtimes", ObservatoryLocationIsRedacted);
+        Run("Nested device identifiers and sequence paths never leave N.I.N.A.", NestedSensitiveDataIsRedacted);
+        await RunAsync(
+            "Cached Target Scheduler events immediately honor live location consent",
+            CachedEventHistoryHonorsLiveLocationConsent);
+        await RunAsync(
+            "Cached N.I.N.A. logs immediately honor live per-level consent",
+            CachedLogHistoryHonorsLiveLevelConsent);
+        await RunAsync(
+            "Every event family requires consent at capture and transmission",
+            EveryEventFamilyRequiresCaptureAndTransmissionConsent);
+        await RunAsync(
+            "Image history and thumbnails require consent at capture and transmission",
+            ImageDataRequiresCaptureAndTransmissionConsent);
+        Run("Equipment snapshots contain only approved operational fields", EquipmentSnapshotsUseSafeProjections);
+        Run("Asynchronous commands are acknowledged without claiming completion", AsyncCommandsUseAcceptedEnvelopes);
+        await RunAsync(
+            "Asynchronous command failures stay visible without leaking local paths",
+            CommandFailuresAreVisibleAndRedacted);
+        await RunAsync(
+            "Asynchronous command cancellations produce a visible terminal notification",
+            CommandCancellationsAreVisible);
+        await RunAsync(
+            "Disabled command-failure notifications never leave N.I.N.A.",
+            CommandFailuresHonorOtherEventConsent);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
         Run("Direct event delivery categories are independently configurable", DirectEventDeliveryIsConfigurable);
@@ -163,9 +229,17 @@ internal static class Program
             ?? throw new InvalidOperationException("N.I.N.A. manifest parser did not return a task.");
         var manifest = await parse
             ?? throw new InvalidOperationException("N.I.N.A. rejected the development manifest.");
+        var version = entries[0]["Version"]
+            ?? throw new InvalidOperationException("Development manifest is missing its version.");
+        var expectedVersion = string.Join(
+            ".",
+            new[] { "Major", "Minor", "Patch", "Build" }.Select(part =>
+                version[part]?.Value<string>()
+                    ?? throw new InvalidOperationException(
+                        $"Development manifest version is missing '{part}'.")));
 
         AssertEqual("Chatstronomy", manifest.Name);
-        AssertEqual("0.1.0.20", manifest.Version.ToString());
+        AssertEqual(expectedVersion, manifest.Version.ToString());
         AssertEqual("3.2.0.9001", manifest.MinimumApplicationVersion.ToString());
         AssertEqual(InstallerType.ARCHIVE, manifest.Installer.Type);
         AssertEqual(InstallerChecksum.SHA256, manifest.Installer.ChecksumType);
@@ -345,6 +419,95 @@ internal static class Program
 
         AssertEqual("https://hub.chatstronomy.com/", (string?)link.Attribute("NavigateUri"));
         AssertEqual("Hyperlink_RequestNavigate", (string?)link.Attribute("RequestNavigate"));
+
+        var hostedLinks = document
+            .Descendants(presentation + "Hyperlink")
+            .ToArray();
+        AssertEqual(3, hostedLinks.Length);
+        AssertEqual(
+            "https://chatstronomy.com/hub-privacy.html",
+            (string?)hostedLinks.Single(element =>
+                element.Value.Trim() == "hosted privacy policy").Attribute("NavigateUri"));
+        AssertEqual(
+            "https://chatstronomy.com/hub-terms.html",
+            (string?)hostedLinks.Single(element =>
+                element.Value.Trim() == "hosted service terms").Attribute("NavigateUri"));
+        foreach (var hostedLink in hostedLinks)
+        {
+            AssertEqual(
+                "Hyperlink_RequestNavigate",
+                (string?)hostedLink.Attribute("RequestNavigate"));
+        }
+    }
+
+    private static void LocalSecurityOptionsAreVisible()
+    {
+        var optionsPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Options.xaml");
+        var document = System.Xml.Linq.XDocument.Load(optionsPath);
+        System.Xml.Linq.XNamespace presentation =
+            "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var labels = new Dictionary<string, string>
+        {
+            ["{Binding AllowRemoteControl}"] =
+                "Allow remote telescope and camera control",
+            ["{Binding ShareObservatoryLocation}"] =
+                "Share exact observatory coordinates and location-derived mount position",
+            ["{Binding AllowUnparkMount}"] = "Unpark mount (/unpark)",
+            ["{Binding AllowHomeMount}"] = "Home mount (/home)",
+            ["{Binding AllowParkMount}"] = "Park mount (/park)",
+            ["{Binding AllowChangeFilter}"] = "Change filter (/change-filter)",
+            ["{Binding AllowStartGuiding}"] = "Start guiding (/guider-start)",
+            ["{Binding AllowStopGuiding}"] = "Stop guiding (/guider-stop)",
+            ["{Binding AllowCoolCamera}"] = "Cool camera (/cool)",
+            ["{Binding AllowWarmCamera}"] = "Warm camera (/warm)",
+            ["{Binding AllowStartAutofocus}"] = "Start autofocus (/autofocus)",
+            ["{Binding AllowCancelAutofocus}"] = "Cancel autofocus (/autofocus)",
+            ["{Binding AllowAbortExposure}"] = "Abort exposure (/abort-capture)",
+            ["{Binding AllowStopSequence}"] = "Stop sequence (/stop-sequence)",
+            ["{Binding AllowStartSequence}"] = "Start sequence (/start-sequence)",
+            ["{Binding AllowSkipSequenceValidation}"] =
+                "Allow skipping sequence safety checks",
+        };
+
+        foreach (var (binding, expectedLabel) in labels)
+        {
+            var checkbox = document
+                .Descendants(presentation + "CheckBox")
+                .Single(element => (string?)element.Attribute("IsChecked") == binding);
+            AssertEqual(
+                expectedLabel,
+                (string?)checkbox.Parent?
+                    .Elements(presentation + "TextBlock")
+                    .Single()
+                    .Attribute("Text"));
+        }
+
+        var commandPermissions = document
+            .Descendants(presentation + "UniformGrid")
+            .Single(element =>
+                (string?)element.Attribute("IsEnabled") == "{Binding AllowRemoteControl}");
+        AssertEqual(14, commandPermissions.Elements(presentation + "Grid").Count());
+        var validationBypass = commandPermissions
+            .Descendants(presentation + "CheckBox")
+            .Single(element =>
+                (string?)element.Attribute("IsChecked")
+                == "{Binding AllowSkipSequenceValidation}");
+        AssertEqual(
+            "{Binding AllowStartSequence}",
+            (string?)validationBypass.Parent?.Attribute("IsEnabled"));
+
+        var descriptions = document
+            .Descendants(presentation + "TextBlock")
+            .Select(element => (string?)element.Attribute("Text") ?? string.Empty)
+            .ToArray();
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("every individual command", StringComparison.Ordinal)
+            && value.Contains("default to off", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("master switch alone grants no command access", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)
+            && value.Contains("blocks image history and thumbnails", StringComparison.Ordinal)));
     }
 
     private static void EventDeliverySwitchesHaveVisibleLabels()
@@ -485,9 +648,19 @@ internal static class Program
         AssertFalse(query.IsExpiredAt(220));
         AssertTrue(query.IsExpiredAt(221));
 
+        var command = DirectProtocol.ParseQuery(
+            CommandQueryJson(id, expiresAt: 100, commandKind: "unpark_mount"));
+        AssertFalse(command.IsExpiredAt(100));
+        AssertFalse(command.IsExpiredAt(105));
+        AssertTrue(command.IsExpiredAt(106));
+
         var noDeadline = DirectProtocol.ParseQuery(
             QueryJson(id, "guider_graph"));
         AssertFalse(noDeadline.IsExpiredAt(long.MaxValue));
+
+        var noCommandDeadline = DirectProtocol.ParseQuery(
+            """{"type":"query","payload":{"id":"363db028-9d79-4fdc-8940-1b1ff52b9e8d","kind":"command","command":{"kind":"unpark_mount"}}}""");
+        AssertFalse(noCommandDeadline.IsExpiredAt(long.MaxValue));
     }
 
     private static void LocalRuntimeRequiresExecutable()
@@ -500,6 +673,1288 @@ internal static class Program
             ChatstronomyConfigurationValidator.BuildLocalRuntime(
                 Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
     }
+
+    private static void DirectAccessDefaultsToReadOnly()
+    {
+        var access = new DirectAccessPolicy(DirectAccessOptions.Default);
+        AssertFalse(access.Current.AllowRemoteControl);
+        AssertFalse(access.Current.ShareObservatoryLocation);
+        AssertEqual(DirectCommandPermissions.None, access.Current.AllowedCommands);
+        AssertFalse(access.Current.AllowSkipSequenceValidation);
+        AssertThrows<InvalidOperationException>(access.RequireRemoteControl);
+
+        using var provider = CreateSecurityTestProvider(access);
+        AssertFalse(provider.Capabilities.Commands);
+        access.Update(access.Current with { AllowRemoteControl = true });
+        AssertFalse(provider.Capabilities.Commands);
+        AssertThrows<InvalidOperationException>(access.RequireRemoteControl);
+
+        access.Update(access.Current with
+        {
+            AllowedCommands = DirectCommandPermissions.UnparkMount,
+        });
+        access.RequireRemoteControl();
+        AssertTrue(provider.Capabilities.Commands);
+
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        using var authorized = JsonDocument.Parse(
+            DirectProtocol.SerializeAuth("csrc_test", hello));
+        AssertTrue(authorized.RootElement.GetProperty("payload")
+            .GetProperty("hello")
+            .GetProperty("capabilities")
+            .GetProperty("commands")
+            .GetBoolean());
+
+        access.Update(DirectAccessOptions.Default);
+        AssertFalse(provider.Capabilities.Commands);
+        AssertThrows<InvalidOperationException>(access.RequireRemoteControl);
+
+        access.Update(new DirectAccessOptions(
+            AllowRemoteControl: false,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount));
+        AssertFalse(provider.Capabilities.Commands);
+        AssertThrows<InvalidOperationException>(() => access.RequireRemoteControl(
+            new DirectRigCommand(DirectRigCommandKind.UnparkMount)));
+    }
+
+    private static void EveryCommandRequiresIndividualConsent()
+    {
+        var allKinds = Enum.GetValues<DirectRigCommandKind>();
+        AssertEqual(13, allKinds.Length);
+        var allPermissions = DirectCommandPermissions.None;
+
+        foreach (var kind in allKinds)
+        {
+            var permission = DirectAccessPolicy.PermissionFor(kind);
+            AssertFalse(allPermissions.HasFlag(permission));
+            allPermissions |= permission;
+
+            var allowed = new DirectAccessPolicy(new DirectAccessOptions(
+                AllowRemoteControl: true,
+                ShareObservatoryLocation: false,
+                AllowedCommands: permission));
+            allowed.RequireRemoteControl(new DirectRigCommand(kind));
+
+            var sibling = allKinds.First(candidate => candidate != kind);
+            AssertThrows<InvalidOperationException>(() =>
+                allowed.RequireRemoteControl(new DirectRigCommand(sibling)));
+        }
+
+        AssertEqual(13, Enum.GetValues<DirectCommandPermissions>().Length - 1);
+    }
+
+    private static void SequenceValidationBypassRequiresConsent()
+    {
+        var normalStart = new DirectRigCommand(
+            DirectRigCommandKind.StartSequence,
+            SkipValidation: false);
+        var unsafeStart = new DirectRigCommand(
+            DirectRigCommandKind.StartSequence,
+            SkipValidation: true);
+        var access = new DirectAccessPolicy(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.StartSequence));
+
+        access.RequireRemoteControl(normalStart);
+        AssertThrows<InvalidOperationException>(() =>
+            access.RequireRemoteControl(unsafeStart));
+
+        access.Update(access.Current with { AllowSkipSequenceValidation = true });
+        access.RequireRemoteControl(unsafeStart);
+
+        access.Update(access.Current with { AllowRemoteControl = false });
+        AssertThrows<InvalidOperationException>(() =>
+            access.RequireRemoteControl(unsafeStart));
+
+        access.Update(access.Current with
+        {
+            AllowRemoteControl = true,
+            AllowedCommands = DirectCommandPermissions.ParkMount,
+        });
+        AssertThrows<InvalidOperationException>(() =>
+            access.RequireRemoteControl(unsafeStart));
+    }
+
+    private static void ProfileChangesRevokeRemoteControl()
+    {
+        var access = new DirectAccessPolicy(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.CoolCamera));
+        using var provider = new FakeDirectDataProvider(access);
+
+        ChatstronomyPlugin.ApplyProfileAccessChange(
+            access,
+            provider,
+            new DirectAccessOptions(
+                AllowRemoteControl: true,
+                ShareObservatoryLocation: false,
+                AllowedCommands: DirectCommandPermissions.ParkMount));
+
+        AssertEqual(1, provider.RevocationCount);
+        AssertThrows<InvalidOperationException>(() => access.RequireRemoteControl(
+            new DirectRigCommand(DirectRigCommandKind.CoolCamera)));
+        access.RequireRemoteControl(new DirectRigCommand(DirectRigCommandKind.ParkMount));
+        AssertTrue(provider.Capabilities.Commands);
+
+        ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, access.Current);
+        AssertEqual(2, provider.RevocationCount);
+    }
+
+    private static void QueuedHardwareActionsRecheckConsent()
+    {
+        var access = new DirectAccessPolicy(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount));
+        using var provider = CreateSecurityTestProvider(access);
+        var touchedHardware = false;
+        var query = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount),
+            ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        Func<bool> HardwareAction() => () => touchedHardware = true;
+
+        var revokedWhileQueued = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            HardwareAction());
+        access.Update(DirectAccessOptions.Default);
+        AssertThrows<InvalidOperationException>(() => revokedWhileQueued());
+        AssertFalse(touchedHardware);
+
+        access.Update(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount));
+        var expiredWhileQueued = provider.GuardCommandAction(
+            query with
+            {
+                ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                    - DirectProtocol.CommandExpiryClockSkewGraceSeconds - 1,
+            },
+            CancellationToken.None,
+            HardwareAction());
+        AssertThrows<InvalidOperationException>(() => expiredWhileQueued());
+        AssertFalse(touchedHardware);
+
+        using var canceled = new CancellationTokenSource();
+        var canceledWhileQueued = provider.GuardCommandAction(
+            query,
+            canceled.Token,
+            HardwareAction());
+        canceled.Cancel();
+        AssertThrows<OperationCanceledException>(() => canceledWhileQueued());
+        AssertFalse(touchedHardware);
+
+        var authorized = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            HardwareAction());
+        AssertTrue(authorized());
+        AssertTrue(touchedHardware);
+    }
+
+    private static void QueuedHardwareActionsCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = CreateSecurityTestProvider(access);
+        var query = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount),
+            ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        var touchedOldProfileHardware = false;
+        var queuedBeforeProfileChange = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            () => touchedOldProfileHardware = true);
+
+        ChatstronomyPlugin.ApplyProfileAccessChange(
+            access,
+            provider,
+            permittedInBothProfiles);
+
+        AssertTrue(provider.Capabilities.Commands);
+        access.RequireRemoteControl(query.Command!);
+        AssertThrows<InvalidOperationException>(() => queuedBeforeProfileChange());
+        AssertFalse(touchedOldProfileHardware);
+
+        var touchedCurrentProfileHardware = false;
+        var queuedAfterProfileChange = provider.GuardCommandAction(
+            query,
+            CancellationToken.None,
+            () => touchedCurrentProfileHardware = true);
+        AssertTrue(queuedAfterProfileChange());
+        AssertTrue(touchedCurrentProfileHardware);
+    }
+
+    private static async Task HardwareCommandsRecheckConsentAfterDeviceReads()
+    {
+        var allowed = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(allowed);
+        var mediator = DispatchProxy.Create<ITelescopeMediator, GuardedTelescopeProxy>();
+        var telescope = (GuardedTelescopeProxy)(object)mediator;
+        using var provider = CreateSecurityTestProvider(access, telescope: mediator);
+        var command = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount),
+            ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+
+        // GetInfo can block while the owner switches to another profile with
+        // exactly the same permissions. A final generation check must still
+        // prevent the old request from actuating its replacement's mount.
+        telescope.BeforeGetInfo = () =>
+            ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, allowed);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+
+        telescope.BeforeGetInfo = () =>
+            access.Update(allowed with { AllowedCommands = DirectCommandPermissions.None });
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+
+        access.Update(allowed);
+        using var canceled = new CancellationTokenSource();
+        telescope.BeforeGetInfo = canceled.Cancel;
+        await AssertThrowsAsync<OperationCanceledException>(() =>
+            provider.ExecuteAsync(command, canceled.Token));
+        AssertEqual(0, telescope.ActuationCount);
+
+        var expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            - DirectProtocol.CommandExpiryClockSkewGraceSeconds;
+        var expiringCommand = command with { Id = Guid.NewGuid(), ExpiresAt = expiresAt };
+        telescope.BeforeGetInfo = () =>
+        {
+            while (DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                <= expiresAt + DirectProtocol.CommandExpiryClockSkewGraceSeconds)
+            {
+                Thread.Sleep(10);
+            }
+        };
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(expiringCommand, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+    }
+
+    private static async Task DirectCommandsRequireLocalConsent()
+    {
+        var access = new DirectAccessPolicy(DirectAccessOptions.Default);
+        using var provider = CreateSecurityTestProvider(access);
+        var command = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount));
+
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+
+        access.Update(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.ParkMount));
+        AssertTrue(provider.Capabilities.Commands);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+    }
+
+    private static async Task LocalDirectPipesEnforceConsent()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        var id = Guid.NewGuid();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            type = "query",
+            payload = new
+            {
+                id,
+                kind = "command",
+                command = new { kind = "unpark_mount" },
+            },
+        }));
+
+        var line = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Direct command returned no response.");
+        using var response = JsonDocument.Parse(line);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        AssertTrue(payload.GetProperty("error").GetString()!
+            .Contains("disabled in this N.I.N.A. profile", StringComparison.Ordinal));
+    }
+
+    private static async Task HostedDirectConnectionsEnforceConsent()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(new DirectAccessOptions(
+                AllowRemoteControl: true,
+                ShareObservatoryLocation: false,
+                AllowedCommands: DirectCommandPermissions.ParkMount)));
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        AssertTrue(hello.Capabilities.Commands);
+        var queryId = Guid.NewGuid();
+        var sockets = new ScriptedHubSocketFactory(
+            AgentHelloJson(hello),
+            CommandQueryJson(queryId, expiresAt: 4_102_444_800, "unpark_mount"));
+        var client = new ChatstronomyHubClient(provider, sockets);
+
+        await AssertThrowsAsync<HubDisconnectedException>(() =>
+            client.RunSingleConnectionAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None));
+
+        var responseJson = sockets.Socket.SentMessages.Single(message =>
+        {
+            using var candidate = JsonDocument.Parse(message);
+            return candidate.RootElement.GetProperty("type").GetString() == "query_result";
+        });
+        using var response = JsonDocument.Parse(responseJson);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertEqual(queryId, payload.GetProperty("id").GetGuid());
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        AssertTrue(payload.GetProperty("error").GetString()!
+            .Contains("individual permission", StringComparison.Ordinal));
+    }
+
+    private static async Task HostedDirectConnectionsRedactSynchronousFailures()
+    {
+        var hello = HostedHello();
+        var queryId = Guid.NewGuid();
+        using var provider = new FakeDirectDataProvider(
+            executeFailure: new InvalidOperationException(
+                "Cannot read C:\\Users\\astronomer\\secret.sequence"));
+        var sockets = new ScriptedHubSocketFactory(
+            AgentHelloJson(hello),
+            QueryJson(queryId, "camera_info", expiresAt: 4_102_444_800));
+        var client = new ChatstronomyHubClient(provider, sockets);
+
+        await AssertThrowsAsync<HubDisconnectedException>(() =>
+            client.RunSingleConnectionAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None));
+
+        var resultJson = sockets.Socket.SentMessages.Single(message =>
+        {
+            using var candidate = JsonDocument.Parse(message);
+            return candidate.RootElement.GetProperty("type").GetString() == "query_result";
+        });
+        using var response = JsonDocument.Parse(resultJson);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        var error = payload.GetProperty("error").GetString()!;
+        AssertTrue(error.Contains("[local path redacted]", StringComparison.Ordinal));
+        AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
+    }
+
+    private static async Task LocalDirectPipesRejectExpiredCommands()
+    {
+        var access = new DirectAccessPolicy(new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount));
+        using var provider = new FakeDirectDataProvider(access);
+        AssertTrue(provider.Capabilities.Commands);
+        access.RequireRemoteControl(new DirectRigCommand(DirectRigCommandKind.UnparkMount));
+
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        var id = Guid.NewGuid();
+        var expiredAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            - DirectProtocol.CommandExpiryClockSkewGraceSeconds - 1;
+        await writer.WriteLineAsync(CommandQueryJson(id, expiredAt, "unpark_mount"));
+
+        var line = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Expired Direct command returned no response.");
+        using var response = JsonDocument.Parse(line);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        AssertTrue(payload.GetProperty("error").GetString()!
+            .Contains("expired", StringComparison.Ordinal));
+        AssertEqual(0, provider.QueryCount);
+    }
+
+    private static async Task LocalDirectPipesCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = new FakeDirectDataProvider(access);
+        var previousSession = provider.ProfileSessionToken;
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName, previousSession);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        await writer.WriteLineAsync(QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds()));
+        var initial = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("The original Direct session did not respond.");
+        using var response = JsonDocument.Parse(initial);
+        AssertTrue(response.RootElement.GetProperty("payload").GetProperty("ok").GetBoolean());
+        AssertEqual(1, provider.QueryCount);
+        // StreamWriter.Dispose flushes even when its buffer is empty; close it
+        // while the session is healthy so the later intentional pipe abort
+        // cannot turn test cleanup into an unrelated broken-pipe failure.
+        writer.Dispose();
+
+        var elapsed = Stopwatch.StartNew();
+        ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, permittedInBothProfiles);
+        elapsed.Stop();
+        AssertTrue(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        AssertTrue(previousSession.IsCancellationRequested);
+        AssertFalse(provider.ProfileSessionToken.IsCancellationRequested);
+        AssertTrue(provider.Capabilities.Commands);
+
+        // EOF proves both fresh reads and an identically permitted hardware
+        // command can no longer be sent through the previous profile's pipe.
+        try
+        {
+            var disconnected = await reader.ReadLineAsync(timeout.Token);
+            AssertTrue(disconnected is null);
+        }
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+        {
+        }
+        AssertEqual(1, provider.QueryCount);
+
+        // The runtime's eventual lifecycle cleanup also disposes the server.
+        server.Dispose();
+        server.Dispose();
+
+        // A start queued before profile invalidation cannot resurrect its pipe.
+        using var alreadyExpired = new NinaDirectPipeServer(
+            provider,
+            NinaDirectPipeServer.CreatePipeName(),
+            previousSession);
+        alreadyExpired.Start();
+        alreadyExpired.Dispose();
+    }
+
+    private static async Task LocalDirectPipesRedactSynchronousFailures()
+    {
+        using var provider = new FakeDirectDataProvider(
+            executeFailure: new InvalidOperationException(
+                "Cannot read C:\\Users\\astronomer\\secret.sequence"));
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        await writer.WriteLineAsync(QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            expiresAt: 4_102_444_800));
+
+        var line = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Failed Direct query returned no response.");
+        using var response = JsonDocument.Parse(line);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        var error = payload.GetProperty("error").GetString()!;
+        AssertTrue(error.Contains("[local path redacted]", StringComparison.Ordinal));
+        AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
+    }
+
+    private static async Task LocalDirectPipesDoNotTransmitDisabledEvents()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        RecordInternalEvent(provider, "GUIDER-DITHER", "private guider movement");
+        RecordInternalEvent(provider, "NINA-NOTIFICATION", "private popup");
+        RecordInternalEvent(provider, "IMAGE-SAVE", "private image");
+        RecordInternalEvent(provider, "MOUNT-PARKED", "approved mount event");
+        AddInternalImage(provider, chatEnabled: true, value: 77);
+        delivery.Update(delivery.Current with
+        {
+            Guiding = false,
+            NinaNotifications = false,
+            Images = false,
+        });
+        RecordInternalEvent(provider, "GUIDER-START", "captured without consent");
+
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+
+        await writer.WriteLineAsync(QueryJson(Guid.NewGuid(), "event_history"));
+        var eventsJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local event history was not returned.");
+        using var events = JsonDocument.Parse(eventsJson);
+        var eventPayload = events.RootElement.GetProperty("payload")
+            .GetProperty("payload")
+            .GetProperty("Response");
+        AssertEqual(1, eventPayload.GetArrayLength());
+        AssertEqual("MOUNT-PARKED", eventPayload[0].GetProperty("Event").GetString());
+        AssertFalse(eventsJson.Contains("private", StringComparison.Ordinal));
+
+        await writer.WriteLineAsync(QueryJson(Guid.NewGuid(), "image_history"));
+        var imagesJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local image history was not returned.");
+        using var images = JsonDocument.Parse(imagesJson);
+        AssertEqual(0, images.RootElement.GetProperty("payload")
+            .GetProperty("payload")
+            .GetProperty("Response")
+            .GetArrayLength());
+
+        await writer.WriteLineAsync(ThumbnailQueryJson(Guid.NewGuid(), 0));
+        var thumbnailJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local thumbnail denial was not returned.");
+        using var thumbnail = JsonDocument.Parse(thumbnailJson);
+        var thumbnailResult = thumbnail.RootElement.GetProperty("payload");
+        AssertFalse(thumbnailResult.GetProperty("ok").GetBoolean());
+        AssertTrue(thumbnailResult.GetProperty("error").GetString()!
+            .Contains("Image sharing is disabled", StringComparison.Ordinal));
+    }
+
+    private static async Task HostedConnectionsDoNotTransmitDisabledEvents()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "private autofocus");
+        RecordInternalEvent(provider, "TS-TARGETSTART", "private target");
+        RecordInternalEvent(provider, "IMAGE-SAVE", "private image");
+        RecordInternalEvent(provider, "MOUNT-PARKED", "approved mount event");
+        AddInternalImage(provider, chatEnabled: true, value: 88);
+        delivery.Update(delivery.Current with
+        {
+            Autofocus = false,
+            TargetScheduler = false,
+            Images = false,
+        });
+        RecordInternalEvent(provider, "AUTOFOCUS-POINT-ADDED", "captured without consent");
+
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        var eventQuery = Guid.NewGuid();
+        var imageQuery = Guid.NewGuid();
+        var thumbnailQuery = Guid.NewGuid();
+        var sockets = new ScriptedHubSocketFactory(
+            AgentHelloJson(hello),
+            QueryJson(eventQuery, "event_history"),
+            QueryJson(imageQuery, "image_history"),
+            ThumbnailQueryJson(thumbnailQuery, 0));
+        var client = new ChatstronomyHubClient(provider, sockets);
+        await AssertThrowsAsync<HubDisconnectedException>(() =>
+            client.RunSingleConnectionAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None));
+
+        var results = sockets.Socket.SentMessages
+            .Select(message => JsonDocument.Parse(message))
+            .Where(document => document.RootElement.GetProperty("type").GetString()
+                == "query_result")
+            .ToDictionary(document =>
+                document.RootElement.GetProperty("payload").GetProperty("id").GetGuid());
+        try
+        {
+            var eventPayload = results[eventQuery].RootElement.GetProperty("payload")
+                .GetProperty("payload")
+                .GetProperty("Response");
+            AssertEqual(1, eventPayload.GetArrayLength());
+            AssertEqual("MOUNT-PARKED", eventPayload[0].GetProperty("Event").GetString());
+            AssertFalse(results[eventQuery].RootElement.GetRawText()
+                .Contains("private", StringComparison.Ordinal));
+
+            AssertEqual(0, results[imageQuery].RootElement.GetProperty("payload")
+                .GetProperty("payload")
+                .GetProperty("Response")
+                .GetArrayLength());
+
+            var denied = results[thumbnailQuery].RootElement.GetProperty("payload");
+            AssertFalse(denied.GetProperty("ok").GetBoolean());
+            AssertTrue(denied.GetProperty("error").GetString()!
+                .Contains("Image sharing is disabled", StringComparison.Ordinal));
+        }
+        finally
+        {
+            foreach (var document in results.Values)
+            {
+                document.Dispose();
+            }
+        }
+    }
+
+    private static void ObservatoryLocationIsRedacted()
+    {
+        static Dictionary<string, object?> Mount() => new()
+        {
+            ["SiteLatitude"] = 38.661,
+            ["SiteLongitude"] = -121.166,
+            ["SiteElevation"] = 100,
+            ["SiderealTime"] = 20.46,
+            ["SiderealTimeString"] = "20:27:39",
+            ["Altitude"] = 84.14,
+            ["AltitudeString"] = "84 degrees",
+            ["Azimuth"] = 165.2,
+            ["AzimuthString"] = "165 degrees",
+            ["TimeToMeridianFlip"] = 1.25,
+            ["TimeToMeridianFlipString"] = "01:15:00",
+            ["HoursToMeridianString"] = "01:15:00",
+            ["RightAscension"] = 20.045,
+            ["Declination"] = 42.25,
+            ["DeviceId"] = "ASCOM.private.serial",
+        };
+
+        var redacted = Mount();
+        DirectPrivacyProjection.RedactMount(redacted, DirectAccessOptions.Default);
+        AssertEqual(0d, redacted["SiteLatitude"]);
+        AssertEqual(0d, redacted["SiteLongitude"]);
+        AssertEqual(0, redacted["SiteElevation"]);
+        AssertEqual(0d, redacted["SiderealTime"]);
+        AssertEqual(string.Empty, redacted["SiderealTimeString"]);
+        AssertEqual(0d, redacted["Altitude"]);
+        AssertEqual(string.Empty, redacted["AltitudeString"]);
+        AssertEqual(0d, redacted["Azimuth"]);
+        AssertEqual(string.Empty, redacted["AzimuthString"]);
+        AssertEqual(0d, redacted["TimeToMeridianFlip"]);
+        AssertEqual(string.Empty, redacted["TimeToMeridianFlipString"]);
+        AssertEqual(string.Empty, redacted["HoursToMeridianString"]);
+        AssertEqual(string.Empty, redacted["DeviceId"]);
+        AssertEqual(true, redacted["LocationRedacted"]);
+        AssertEqual(20.045, redacted["RightAscension"]);
+        AssertEqual(42.25, redacted["Declination"]);
+
+        var shared = Mount();
+        DirectPrivacyProjection.RedactMount(
+            shared,
+            DirectAccessOptions.Default with { ShareObservatoryLocation = true });
+        AssertEqual(38.661, shared["SiteLatitude"]);
+        AssertEqual(-121.166, shared["SiteLongitude"]);
+        AssertEqual(100, shared["SiteElevation"]);
+        AssertEqual(84.14, shared["Altitude"]);
+        AssertEqual(20.46, shared["SiderealTime"]);
+        AssertEqual(string.Empty, shared["DeviceId"]);
+        AssertEqual(false, shared["LocationRedacted"]);
+    }
+
+    private static void NestedSensitiveDataIsRedacted()
+    {
+        Dictionary<string, object?> NestedSnapshot() => new()
+        {
+            ["Name"] = "Target",
+            ["FilePath"] = "C:\\Users\\astronomer\\secret.fits",
+            ["Script"] = "private-command --secret",
+            ["DeviceId"] = "private-device",
+            ["Coordinates"] = new Dictionary<string, object?>
+            {
+                ["RA"] = 12.5,
+                ["Dec"] = 42.25,
+                ["Altitude"] = 84d,
+                ["Azimuth"] = 165d,
+            },
+            ["Items"] = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["SiteLongitude"] = -121d,
+                    ["DriverInfo"] = "private driver path",
+                    ["TimeToFlip"] = 1.25,
+                    ["ExposureTime"] = 300d,
+                },
+            },
+        };
+
+        var redacted = NestedSnapshot();
+        DirectPrivacyProjection.Redact(redacted, DirectAccessOptions.Default);
+        AssertFalse(redacted.ContainsKey("FilePath"));
+        AssertFalse(redacted.ContainsKey("Script"));
+        AssertFalse(redacted.ContainsKey("DeviceId"));
+        var coordinates = (Dictionary<string, object?>)redacted["Coordinates"]!;
+        AssertEqual(12.5, coordinates["RA"]);
+        AssertEqual(42.25, coordinates["Dec"]);
+        AssertFalse(coordinates.ContainsKey("Altitude"));
+        AssertFalse(coordinates.ContainsKey("Azimuth"));
+        var nested = ((Dictionary<string, object?>[])redacted["Items"]!)[0];
+        AssertFalse(nested.ContainsKey("SiteLongitude"));
+        AssertFalse(nested.ContainsKey("DriverInfo"));
+        AssertFalse(nested.ContainsKey("TimeToFlip"));
+        AssertEqual(300d, nested["ExposureTime"]);
+
+        var shared = NestedSnapshot();
+        DirectPrivacyProjection.Redact(
+            shared,
+            DirectAccessOptions.Default with { ShareObservatoryLocation = true });
+        AssertFalse(shared.ContainsKey("FilePath"));
+        AssertFalse(shared.ContainsKey("Script"));
+        AssertFalse(shared.ContainsKey("DeviceId"));
+        var sharedCoordinates = (Dictionary<string, object?>)shared["Coordinates"]!;
+        AssertEqual(84d, sharedCoordinates["Altitude"]);
+        AssertEqual(165d, sharedCoordinates["Azimuth"]);
+
+        using var autofocus = JsonDocument.Parse(
+            """{"Response":{"DeviceId":"private","FilePath":"C:\\\\Users\\\\private","Mount":{"SiteLatitude":38.6,"RA":12.5},"MeasurePoints":[{"Position":4000,"DriverInfo":"private"}]}}""");
+        var safeAutofocus = DirectPrivacyProjection.Redact(
+            autofocus.RootElement,
+            DirectAccessOptions.Default);
+        var response = safeAutofocus.GetProperty("Response");
+        AssertFalse(response.TryGetProperty("DeviceId", out _));
+        AssertFalse(response.TryGetProperty("FilePath", out _));
+        AssertFalse(response.GetProperty("Mount").TryGetProperty("SiteLatitude", out _));
+        AssertEqual(12.5, response.GetProperty("Mount").GetProperty("RA").GetDouble());
+        AssertFalse(response.GetProperty("MeasurePoints")[0].TryGetProperty("DriverInfo", out _));
+    }
+
+    private static void EquipmentSnapshotsUseSafeProjections()
+    {
+        var focuser = new DirectFocuserInfo(
+            Connected: true,
+            Position: 3325,
+            StepSize: 1,
+            Temperature: 14.7,
+            IsMoving: false,
+            IsSettling: false,
+            TempComp: false,
+            TempCompAvailable: true);
+        using var focusJson = JsonDocument.Parse(
+            JsonSerializer.Serialize(focuser, DirectProtocol.JsonOptions));
+        AssertEqual(3325, focusJson.RootElement.GetProperty("Position").GetInt32());
+        AssertEqual(14.7, focusJson.RootElement.GetProperty("Temperature").GetDouble());
+        AssertFalse(focusJson.RootElement.TryGetProperty("DeviceId", out _));
+        AssertFalse(focusJson.RootElement.TryGetProperty("DriverInfo", out _));
+
+        var rotator = new DirectRotatorInfo(
+            Connected: true,
+            CanReverse: false,
+            Reverse: false,
+            Position: 104.04,
+            MechanicalPosition: 12,
+            StepSize: 0.5,
+            IsMoving: false,
+            Synced: true);
+        using var rotateJson = JsonDocument.Parse(
+            JsonSerializer.Serialize(rotator, DirectProtocol.JsonOptions));
+        AssertEqual(104.04, rotateJson.RootElement.GetProperty("Position").GetDouble());
+        AssertTrue(rotateJson.RootElement.GetProperty("Synced").GetBoolean());
+        AssertFalse(rotateJson.RootElement.TryGetProperty("DeviceId", out _));
+    }
+
+    private static async Task CachedEventHistoryHonorsLiveLocationConsent()
+    {
+        var access = new DirectAccessPolicy(DirectAccessOptions.Default with
+        {
+            ShareObservatoryLocation = true,
+        });
+        using var provider = CreateSecurityTestProvider(access);
+        var observer = new Dictionary<string, object?>
+        {
+            ["SiteLatitude"] = 38.6,
+            ["DeviceId"] = "private-mount-id",
+            ["FilePath"] = "C:\\Users\\astronomer\\private.sequence",
+            ["ExposureTime"] = 300d,
+        };
+        var coordinates = new Dictionary<string, object?>
+        {
+            ["RA"] = 12.5,
+            ["Dec"] = 42.25,
+            ["Altitude"] = 84d,
+            ["Azimuth"] = 165d,
+            ["Observers"] = new object[] { observer },
+        };
+        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
+            "AddEventCore",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Event history recorder was not found.");
+        addEvent.Invoke(
+            provider,
+            new object[]
+            {
+                DateTimeOffset.UtcNow,
+                "TS-TARGETSTART",
+                true,
+                new (string Name, object? Value)[]
+                {
+                    ("TargetName", "M31"),
+                    ("Coordinates", coordinates),
+                    ("DeviceId", "top-level-private-id"),
+                },
+            });
+
+        var initiallyShared = (await SnapshotEvents(provider)).Single();
+        var sharedCoordinates = initiallyShared.GetProperty("Coordinates");
+        AssertEqual(84d, sharedCoordinates.GetProperty("Altitude").GetDouble());
+        AssertEqual(165d, sharedCoordinates.GetProperty("Azimuth").GetDouble());
+        AssertEqual(38.6, sharedCoordinates
+            .GetProperty("Observers")[0]
+            .GetProperty("SiteLatitude")
+            .GetDouble());
+        AssertFalse(initiallyShared.TryGetProperty("DeviceId", out _));
+        AssertFalse(sharedCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("DeviceId", out _));
+        AssertFalse(sharedCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("FilePath", out _));
+
+        access.Update(access.Current with { ShareObservatoryLocation = false });
+        var withheld = (await SnapshotEvents(provider)).Single();
+        var withheldCoordinates = withheld.GetProperty("Coordinates");
+        AssertEqual(12.5, withheldCoordinates.GetProperty("RA").GetDouble());
+        AssertFalse(withheldCoordinates.TryGetProperty("Altitude", out _));
+        AssertFalse(withheldCoordinates.TryGetProperty("Azimuth", out _));
+        AssertFalse(withheldCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("SiteLatitude", out _));
+
+        // The bounded history and its caller-owned nested objects remain
+        // intact, so a later explicit opt-in can share position again.
+        AssertEqual(84d, coordinates["Altitude"]);
+        AssertEqual(38.6, observer["SiteLatitude"]);
+        AssertEqual("private-mount-id", observer["DeviceId"]);
+        access.Update(access.Current with { ShareObservatoryLocation = true });
+        var sharedAgain = (await SnapshotEvents(provider)).Single()
+            .GetProperty("Coordinates");
+        AssertEqual(84d, sharedAgain.GetProperty("Altitude").GetDouble());
+        AssertEqual(38.6, sharedAgain
+            .GetProperty("Observers")[0]
+            .GetProperty("SiteLatitude")
+            .GetDouble());
+        AssertFalse(sharedAgain.GetProperty("Observers")[0]
+            .TryGetProperty("DeviceId", out _));
+    }
+
+    private static async Task CachedLogHistoryHonorsLiveLevelConsent()
+    {
+        var initial = DirectEventDeliveryOptions.Default with
+        {
+            NinaLogErrors = true,
+            NinaLogWarnings = true,
+        };
+        var delivery = new DirectEventDeliveryPolicy(initial);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var recordLog = typeof(NinaDirectDataProvider).GetMethod(
+            "RecordLog",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Log history recorder was not found.");
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow,
+                "WARNING",
+                "Telescope",
+                "Move",
+                12,
+                "Original private warning"),
+        });
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow.AddSeconds(1),
+                "ERROR",
+                "Camera",
+                "Cool",
+                34,
+                "Original private error"),
+        });
+        AssertEqual(2, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(initial with { NinaLogWarnings = false });
+        var errorsOnly = await SnapshotEvents(provider);
+        AssertEqual(1, errorsOnly.Length);
+        AssertEqual("ERROR", errorsOnly[0].GetProperty("Level").GetString());
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow.AddSeconds(2),
+                "WARNING",
+                "Telescope",
+                "Move",
+                99,
+                "Warning captured without consent"),
+        });
+
+        delivery.Update(DirectEventDeliveryOptions.Default);
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(initial with { NinaLogErrors = false });
+        var warningsRestored = await SnapshotEvents(provider);
+        AssertEqual(1, warningsRestored.Length);
+        AssertEqual("WARNING", warningsRestored[0].GetProperty("Level").GetString());
+        AssertEqual(
+            "Original private warning",
+            warningsRestored[0].GetProperty("Message").GetString());
+
+        delivery.Update(initial);
+        AssertEqual(2, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task EveryEventFamilyRequiresCaptureAndTransmissionConsent()
+    {
+        var cases = new (
+            string Category,
+            string[] Events,
+            Func<DirectEventDeliveryOptions, DirectEventDeliveryOptions> Disable)[]
+        {
+            ("images", new[] { "IMAGE-SAVE", "API-CAPTURE-FINISHED" },
+                options => options with { Images = false }),
+            ("autofocus", new[] { "AUTOFOCUS-FINISHED", "ERROR-AF", "FOCUSER-USER-FOCUSED" },
+                options => options with { Autofocus = false }),
+            ("guiding", new[] { "GUIDER-START", "GUIDER-DITHER" },
+                options => options with { Guiding = false }),
+            ("mount", new[] { "MOUNT-PARKED", "MOUNT-CENTER", "ERROR-PLATESOLVE" },
+                options => options with { Mount = false }),
+            ("sequence", new[] { "SEQUENCE-STARTING", "SEQUENCE-FINISHED" },
+                options => options with { Sequence = false }),
+            ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
+                options => options with { TargetScheduler = false }),
+            ("filter, focuser, and rotator", new[]
+                { "FILTERWHEEL-CHANGED", "FOCUSER-MOVED", "ROTATOR-MOVED" },
+                options => options with { FilterFocuserRotator = false }),
+            ("connections", new[]
+                { "MOUNT-CONNECTED", "GUIDER-DISCONNECTED", "CAMERA-DOWNLOAD-TIMEOUT" },
+                options => options with { EquipmentConnections = false }),
+            ("other", new[] { "UNKNOWN-NINA-EVENT", "CHATSTRONOMY-COMMAND-FAILED" },
+                options => options with { OtherEvents = false }),
+            ("popup notifications", new[] { "NINA-NOTIFICATION" },
+                options => options with { NinaNotifications = false }),
+        };
+
+        foreach (var (category, eventNames, disable) in cases)
+        {
+            var initial = DirectEventDeliveryOptions.Default;
+            var delivery = new DirectEventDeliveryPolicy(initial);
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+
+            foreach (var eventName in eventNames)
+            {
+                RecordInternalEvent(provider, eventName, $"{category}: consented");
+            }
+            var allowed = await SnapshotEvents(provider);
+            AssertEqual(eventNames.Length, allowed.Length);
+
+            delivery.Update(disable(initial));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+            foreach (var eventName in eventNames)
+            {
+                RecordInternalEvent(provider, eventName, $"{category}: captured while off");
+            }
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            delivery.Update(initial);
+            var restored = await SnapshotEvents(provider);
+            AssertEqual(eventNames.Length, restored.Length);
+            AssertTrue(restored.All(item =>
+                item.GetProperty("Marker").GetString() == $"{category}: consented"));
+        }
+    }
+
+    private static async Task ImageDataRequiresCaptureAndTransmissionConsent()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var approvedImage = AddInternalImage(provider, chatEnabled: true, value: 11);
+        var history = await SnapshotImageHistory(provider);
+        AssertEqual(1, history.Length);
+        AssertEqual(11, history[0].GetProperty("Gain").GetInt32());
+        var originalThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+            CancellationToken.None))!);
+        AssertEqual(approvedImage.ThumbnailData![0], originalThumbnail.Data[0]);
+
+        delivery.Update(delivery.Current with { Images = false });
+        AssertEqual(0, (await SnapshotImageHistory(provider)).Length);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+                CancellationToken.None));
+        AddInternalImage(provider, chatEnabled: false, value: 22);
+
+        delivery.Update(delivery.Current with { Images = true });
+        var laterApprovedImage = AddInternalImage(provider, chatEnabled: true, value: 33);
+        var restored = await SnapshotImageHistory(provider);
+        AssertEqual(2, restored.Length);
+        AssertEqual(11, restored[0].GetProperty("Gain").GetInt32());
+        AssertEqual(33, restored[1].GetProperty("Gain").GetInt32());
+        var restoredThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 0),
+            CancellationToken.None))!);
+        AssertEqual(approvedImage.ThumbnailData![0], restoredThumbnail.Data[0]);
+        var laterApprovedThumbnail = AssertType<DirectThumbnail>((await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 1),
+            CancellationToken.None))!);
+        AssertEqual(laterApprovedImage.ThumbnailData![0], laterApprovedThumbnail.Data[0]);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.Thumbnail, Index: 2),
+                CancellationToken.None));
+    }
+
+    private static void RecordInternalEvent(
+        NinaDirectDataProvider provider,
+        string eventName,
+        string marker)
+    {
+        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
+            "AddEvent",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("N.I.N.A. event recorder was not found.");
+        addEvent.Invoke(provider, new object[]
+        {
+            eventName,
+            new (string Name, object? Value)[] { ("Marker", marker) },
+        });
+    }
+
+    private static DirectSavedImage AddInternalImage(
+        NinaDirectDataProvider provider,
+        bool chatEnabled,
+        int value)
+    {
+        var history = typeof(NinaDirectDataProvider).GetField(
+            "images",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            as BoundedHistory<DirectSavedImage>
+            ?? throw new InvalidOperationException("Native image history was not found.");
+        var image = new DirectSavedImage(new DirectImageMetadata(
+            ExposureTime: 120,
+            ImageType: "LIGHT",
+            Filter: "Luminance",
+            RmsText: "0.7",
+            Temperature: -10,
+            CameraName: "Test camera",
+            Gain: value,
+            Offset: 50,
+            Date: DateTime.UtcNow,
+            TelescopeName: "Test telescope",
+            FocalLength: 500,
+            StDev: 1,
+            Mean: 2,
+            Median: 3,
+            Stars: 20,
+            HFR: 1.5,
+            IsBayered: false,
+            ChatEnabled: chatEnabled))
+        {
+            ThumbnailData = new byte[] { (byte)value, 0xff },
+        };
+        history.Add(image);
+        return image;
+    }
+
+    private static async Task<JsonElement[]> SnapshotImageHistory(NinaDirectDataProvider provider)
+    {
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.ImageHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        return response.RootElement.GetProperty("Response")
+            .EnumerateArray()
+            .Select(item => item.Clone())
+            .ToArray();
+    }
+
+    private static async Task<JsonElement[]> SnapshotEvents(NinaDirectDataProvider provider)
+    {
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        return response.RootElement.GetProperty("Response")
+            .EnumerateArray()
+            .Select(item => item.Clone())
+            .ToArray();
+    }
+
+    private static void AsyncCommandsUseAcceptedEnvelopes()
+    {
+        var accepted = DirectApiEnvelope<string>.Accepted("Sequence start requested");
+        using var result = JsonDocument.Parse(DirectProtocol.SerializeSuccess(
+            Guid.NewGuid(),
+            accepted));
+        var envelope = result.RootElement
+            .GetProperty("payload")
+            .GetProperty("payload");
+        AssertTrue(envelope.GetProperty("Success").GetBoolean());
+        AssertEqual(202, envelope.GetProperty("StatusCode").GetInt32());
+        AssertEqual(
+            "Sequence start requested",
+            envelope.GetProperty("Response").GetString());
+        AssertEqual(200, DirectApiEnvelope<string>.Ok("Already parked").StatusCode);
+    }
+
+    private static async Task CommandFailuresAreVisibleAndRedacted()
+    {
+        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = true };
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            delivery);
+        var addFailure = typeof(NinaDirectDataProvider).GetMethod(
+            "AddCommandFailure",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Command failure projector was not found.");
+        addFailure.Invoke(
+            provider,
+            new object[] { "Start sequence", "Cannot read C:\\Users\\astronomer\\secret.sequence" });
+
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        var failure = response.RootElement.GetProperty("Response")[0];
+        AssertEqual("CHATSTRONOMY-COMMAND-FAILED", failure.GetProperty("Event").GetString());
+        AssertTrue(failure.GetProperty("ChatEnabled").GetBoolean());
+        AssertEqual("Start sequence", failure.GetProperty("Command").GetString());
+        var error = failure.GetProperty("Error").GetString()!;
+        AssertTrue(error.Contains("[local path redacted]", StringComparison.Ordinal));
+        AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
+
+        var unixError = NinaDirectDataProvider.RedactCommandError(
+            "Cannot read /home/astronomer/secret.sequence");
+        AssertFalse(unixError.Contains("astronomer", StringComparison.Ordinal));
+    }
+
+    private static async Task CommandCancellationsAreVisible()
+    {
+        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = true };
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            delivery);
+        var observeCommand = typeof(NinaDirectDataProvider).GetMethod(
+            "ObserveCommand",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Command observer was not found.");
+        var completion = new TaskCompletionSource<object?>();
+        observeCommand.Invoke(provider, new object[] { completion.Task, "Cool camera" });
+        completion.SetCanceled();
+
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        var failure = response.RootElement.GetProperty("Response")[0];
+        AssertEqual("CHATSTRONOMY-COMMAND-FAILED", failure.GetProperty("Event").GetString());
+        AssertTrue(failure.GetProperty("ChatEnabled").GetBoolean());
+        AssertEqual("Cool camera", failure.GetProperty("Command").GetString());
+        AssertEqual(
+            "Command canceled before completion",
+            failure.GetProperty("Error").GetString());
+    }
+
+    private static async Task CommandFailuresHonorOtherEventConsent()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { OtherEvents = false });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var addFailure = typeof(NinaDirectDataProvider).GetMethod(
+            "AddCommandFailure",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Command failure projector was not found.");
+
+        addFailure.Invoke(provider, new object[] { "Cool camera", "Private observatory failure" });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(delivery.Current with { OtherEvents = true });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+        addFailure.Invoke(provider, new object[] { "Warm camera", "Explicitly shared failure" });
+        var allowed = await SnapshotEvents(provider);
+        AssertEqual(1, allowed.Length);
+        AssertEqual("Warm camera", allowed[0].GetProperty("Command").GetString());
+
+        delivery.Update(delivery.Current with { OtherEvents = false });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static NinaDirectDataProvider CreateSecurityTestProvider(
+        DirectAccessPolicy access,
+        DirectEventDeliveryOptions? delivery = null,
+        DirectEventDeliveryPolicy? deliveryPolicy = null,
+        ITelescopeMediator? telescope = null) => new(
+            profileService: null!,
+            telescope: telescope!,
+            camera: null!,
+            filterWheel: null!,
+            guider: null!,
+            rotator: null!,
+            focuser: null!,
+            sequence: null!,
+            imageSave: null!,
+            applicationStatus: null!,
+            autoFocusFactory: null!,
+            imageHistory: null!,
+            windowFactory: null!,
+            messageBroker: null!,
+            eventDelivery: deliveryPolicy ?? new DirectEventDeliveryPolicy(
+                delivery ?? DirectEventDeliveryOptions.Default),
+            accessPolicy: access);
 
     private static void DirectCommandsUseSemanticWireNames()
     {
@@ -731,8 +2186,10 @@ internal static class Program
         AssertEqual(true, Convert.ToBoolean(output["Success"]));
         AssertEqual(91.5, Convert.ToDouble(output["PositionAngle"]));
         AssertEqual(60.0, Convert.ToDouble(output["SeparationArcseconds"]));
-        AssertTrue(!string.IsNullOrWhiteSpace(output["ThumbnailBase64"] as string));
-        AssertEqual("image/jpeg", output["ThumbnailMediaType"] as string);
+        AssertFalse(output.ContainsKey("ThumbnailBase64"));
+        AssertFalse(output.ContainsKey("ThumbnailMediaType"));
+        var wire = JsonSerializer.Serialize(centerDetails, DirectProtocol.JsonOptions);
+        AssertFalse(wire.Contains("Thumbnail", StringComparison.Ordinal));
     }
 
     private static void DirectGuiderPayloadMatchesRustChart()
@@ -1234,6 +2691,67 @@ internal static class Program
         }
     }
 
+    private static async Task HostedSessionsCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = new FakeDirectDataProvider(access);
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        var firstRead = QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+            AgentHelloJson(hello),
+            acknowledgeHeartbeats: true,
+            additionalInbound: new[] { firstRead }));
+        var client = new ChatstronomyHubClient(
+            provider,
+            sockets,
+            timings: FastHubTimings(),
+            jitterSource: () => 0.5);
+        await client.StartAsync(HostedConfiguration(hello), hello, CancellationToken.None);
+        await WaitUntilAsync(
+            () => client.IsConnected && provider.QueryCount == 1,
+            TimeSpan.FromSeconds(2));
+        var previousSession = provider.ProfileSessionToken;
+        var socket = sockets.Sockets.Single();
+
+        // Changing one command checkbox must not disconnect monitoring.
+        provider.RevokeRemoteControl();
+        AssertFalse(previousSession.IsCancellationRequested);
+        AssertEqual(0, socket.AbortCount);
+        AssertTrue(client.IsConnected);
+
+        var elapsed = Stopwatch.StartNew();
+        ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, permittedInBothProfiles);
+        elapsed.Stop();
+        AssertTrue(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        AssertTrue(previousSession.IsCancellationRequested);
+        AssertFalse(provider.ProfileSessionToken.IsCancellationRequested);
+        AssertTrue(socket.AbortCount >= 1);
+        AssertTrue(provider.Capabilities.Commands);
+
+        // Both reads and identically allowed commands are rejected because
+        // their old authenticated socket has already been synchronously shut.
+        AssertFalse(socket.TryEnqueue(QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds())));
+        AssertFalse(socket.TryEnqueue(CommandQueryJson(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds(),
+            "unpark_mount")));
+        AssertEqual(1, provider.QueryCount);
+        await WaitUntilAsync(() => !client.IsConnected, TimeSpan.FromSeconds(1));
+        await Task.Delay(100);
+        AssertEqual(1, sockets.CreateCount);
+        await client.StopAsync(CancellationToken.None);
+    }
+
     private static async Task HostedBlockedQueryDoesNotBlockHeartbeats()
     {
         var hello = HostedHello();
@@ -1366,7 +2884,7 @@ internal static class Program
         4242,
         Guid.Parse("460a8c62-28ce-4781-92e5-ab2440982175"),
         "North Rig",
-        "0.1.0.20",
+        typeof(ChatstronomyPlugin).Assembly.GetName().Version?.ToString() ?? "unknown",
         "3.2.0.9001",
         new DirectCapabilities(true, true, true, true, true, true, true, true));
 
@@ -1410,6 +2928,13 @@ internal static class Program
                 payload = new { id, expires_at = expiresAt, kind },
             },
             DirectProtocol.JsonOptions);
+
+    private static string ThumbnailQueryJson(Guid id, uint index) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "query",
+            payload = new { id, kind = "thumbnail", index },
+        });
 
     private static string CommandQueryJson(Guid id, long expiresAt, string commandKind) =>
         JsonSerializer.Serialize(new
@@ -1855,6 +3380,39 @@ internal static class Program
             $"Expected {typeof(TException).Name} to be thrown.");
     }
 
+    private class GuardedTelescopeProxy : DispatchProxy
+    {
+        private int actuationCount;
+
+        internal Action? BeforeGetInfo { get; set; }
+
+        internal int ActuationCount => Volatile.Read(ref actuationCount);
+
+        protected override object? Invoke(MethodInfo? method, object?[]? arguments)
+        {
+            if (method is null)
+            {
+                throw new InvalidOperationException("A telescope method was not supplied.");
+            }
+            if (method.Name == "GetInfo")
+            {
+                BeforeGetInfo?.Invoke();
+                var info = Activator.CreateInstance(method.ReturnType)
+                    ?? throw new InvalidOperationException("Mount information could not be created.");
+                method.ReturnType.GetProperty("Connected")?.SetValue(info, true);
+                method.ReturnType.GetProperty("AtPark")?.SetValue(info, true);
+                return info;
+            }
+            if (method.Name == "UnparkTelescope")
+            {
+                Interlocked.Increment(ref actuationCount);
+                return Task.CompletedTask;
+            }
+
+            throw new NotSupportedException($"Unexpected telescope operation '{method.Name}'.");
+        }
+    }
+
     private sealed class ControlledHubSocketFactory(
         Func<int, ControlledHubSocket> createSocket) : IHubSocketFactory
     {
@@ -1911,6 +3469,8 @@ internal static class Program
         internal int HeartbeatCount => Volatile.Read(ref heartbeatCount);
 
         internal int AbortCount => Volatile.Read(ref abortCount);
+
+        internal bool TryEnqueue(string message) => inbound.Writer.TryWrite(message);
 
         public void Abort()
         {
@@ -2058,6 +3618,7 @@ internal static class Program
             TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<object?> release = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenSource profileSession = new();
         private int queryCount;
 
         public DirectCapabilities Capabilities { get; } = new(
@@ -2069,6 +3630,9 @@ internal static class Program
             AutofocusDetails: true,
             GuiderGraph: true,
             Commands: true);
+
+        public CancellationToken ProfileSessionToken =>
+            Volatile.Read(ref profileSession).Token;
 
         internal Task Started => started.Task;
 
@@ -2093,6 +3657,19 @@ internal static class Program
         {
         }
 
+        public void RevokeRemoteControl()
+        {
+        }
+
+        public void RevokeProfileAccess()
+        {
+            var previous = Interlocked.Exchange(
+                ref profileSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+            RevokeRemoteControl();
+        }
+
         public async Task<object?> ExecuteAsync(
             DirectQuery query,
             CancellationToken cancellationToken)
@@ -2109,10 +3686,22 @@ internal static class Program
 
     private sealed class FakeDirectDataProvider : INinaDirectDataProvider
     {
+        private readonly DirectAccessPolicy? accessPolicy;
+        private readonly Exception? executeFailure;
+        private CancellationTokenSource profileSession = new();
         private int queryCount;
+        private int revocationCount;
         private readonly ConcurrentBag<DirectQueryKind> queriedKinds = new();
 
-        public DirectCapabilities Capabilities { get; } = new(
+        internal FakeDirectDataProvider(
+            DirectAccessPolicy? accessPolicy = null,
+            Exception? executeFailure = null)
+        {
+            this.accessPolicy = accessPolicy;
+            this.executeFailure = executeFailure;
+        }
+
+        public DirectCapabilities Capabilities => new(
             EventHistory: true,
             ImageHistory: true,
             Thumbnails: true,
@@ -2120,9 +3709,13 @@ internal static class Program
             EquipmentSnapshots: true,
             AutofocusDetails: true,
             GuiderGraph: true,
-            Commands: true);
+            Commands: accessPolicy?.Current.CommandsEnabled ?? true);
+
+        public CancellationToken ProfileSessionToken =>
+            Volatile.Read(ref profileSession).Token;
 
         public int QueryCount => Volatile.Read(ref queryCount);
+        public int RevocationCount => Volatile.Read(ref revocationCount);
         public IReadOnlyCollection<DirectQueryKind> QueriedKinds => queriedKinds;
 
         public void Start()
@@ -2141,6 +3734,20 @@ internal static class Program
         {
         }
 
+        public void RevokeRemoteControl()
+        {
+            Interlocked.Increment(ref revocationCount);
+        }
+
+        public void RevokeProfileAccess()
+        {
+            var previous = Interlocked.Exchange(
+                ref profileSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+            RevokeRemoteControl();
+        }
+
         public Task<object?> ExecuteAsync(
             DirectQuery query,
             CancellationToken cancellationToken)
@@ -2148,6 +3755,11 @@ internal static class Program
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref queryCount);
             queriedKinds.Add(query.Kind);
+            if (executeFailure is not null)
+            {
+                throw executeFailure;
+            }
+
             object response = query.Kind switch
             {
                 DirectQueryKind.EventHistory =>

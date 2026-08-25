@@ -1,8 +1,4 @@
 using System.Reflection;
-using System.IO;
-using System.Runtime.CompilerServices;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using NINA.Sequencer;
 using NINA.Sequencer.Conditions;
 using NINA.Sequencer.Container;
@@ -21,11 +17,6 @@ namespace Chatstronomy.NINA.Direct;
 /// </summary>
 internal static class NinaDirectSequenceSnapshot
 {
-    private static readonly ConditionalWeakTable<BitmapSource, EncodedThumbnail>
-        EncodedThumbnails = new();
-
-    private sealed record EncodedThumbnail(byte[] Data);
-
     private static readonly IReadOnlyDictionary<string, string> DetailNames =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -47,8 +38,6 @@ internal static class NinaDirectSequenceSnapshot
             ["PositionAngle"] = "Rotation",
             ["Value"] = "Value",
             ["Text"] = "Text",
-            ["Script"] = "Script",
-            ["FilePath"] = "FilePath",
             ["Time"] = "Delay",
             ["Iterations"] = "Iterations",
             ["CompletedIterations"] = "CompletedIterations",
@@ -56,7 +45,8 @@ internal static class NinaDirectSequenceSnapshot
 
     internal static IReadOnlyList<Dictionary<string, object?>> Build(
         ISequenceMediator sequence,
-        DirectEventDeliveryOptions? delivery = null)
+        DirectEventDeliveryOptions? delivery = null,
+        DirectAccessOptions? access = null)
     {
         if (!sequence.Initialized)
         {
@@ -75,6 +65,11 @@ internal static class NinaDirectSequenceSnapshot
         };
         var options = delivery ?? DirectEventDeliveryOptions.Default;
         result.AddRange(root.GetItemsSnapshot().Select(item => BuildItem(item, options)));
+        var privacy = access ?? DirectAccessOptions.Default;
+        foreach (var entity in result)
+        {
+            DirectPrivacyProjection.Redact(entity, privacy);
+        }
         return result;
     }
 
@@ -172,7 +167,15 @@ internal static class NinaDirectSequenceSnapshot
             trigger.GetType().Name == "DitherAfterExposures"
                 ? "TargetExposures"
                 : "DeltaExposures");
-        AddIfPresent(trigger, result, "Coordinates", "Coordinates");
+        var triggerCoordinates = OptionalProperty(trigger, "Coordinates");
+        if (triggerCoordinates is not null)
+        {
+            var projected = CompactCoordinates(triggerCoordinates);
+            if (projected.Count != 0)
+            {
+                result["Coordinates"] = projected;
+            }
+        }
         AddIfPresent(trigger, result, "LastDistanceArcMinutes", "Drift");
         AddIfPresent(trigger, result, "DistanceArcMinutes", "TargetDrift");
         return result;
@@ -242,7 +245,12 @@ internal static class NinaDirectSequenceSnapshot
         var coordinates = OptionalProperty(item, "Coordinates");
         if (coordinates is not null)
         {
-            result["Coordinates"] = OptionalProperty(coordinates, "Coordinates") ?? coordinates;
+            var projected = CompactCoordinates(
+                OptionalProperty(coordinates, "Coordinates") ?? coordinates);
+            if (projected.Count != 0)
+            {
+                result["Coordinates"] = projected;
+            }
         }
 
         var filter = OptionalProperty(item, "Filter");
@@ -303,45 +311,53 @@ internal static class NinaDirectSequenceSnapshot
     {
         var status = OptionalProperty(item, "PlateSolveStatusVM");
         var solve = OptionalProperty(status, "PlateSolveResult");
-        var thumbnail = OptionalProperty(status, "Thumbnail") as BitmapSource;
-        if (solve is null && thumbnail is null)
+        if (solve is null)
         {
             return;
         }
 
         var output = new Dictionary<string, object?>();
-        if (solve is not null)
+        AddIfPresent(solve, output, "SolveTime", "SolveTime");
+        AddIfPresent(solve, output, "Success", "Success");
+        AddFiniteIfPresent(solve, output, "PositionAngle", "PositionAngle");
+        AddFiniteIfPresent(solve, output, "Pixscale", "PixelScale");
+        AddFiniteIfPresent(solve, output, "Radius", "RadiusDegrees");
+        AddIfPresent(solve, output, "Flipped", "Flipped");
+
+        var coordinates = OptionalProperty(solve, "Coordinates");
+        if (coordinates is not null)
         {
-            AddIfPresent(solve, output, "SolveTime", "SolveTime");
-            AddIfPresent(solve, output, "Success", "Success");
-            AddFiniteIfPresent(solve, output, "PositionAngle", "PositionAngle");
-            AddFiniteIfPresent(solve, output, "Pixscale", "PixelScale");
-            AddFiniteIfPresent(solve, output, "Radius", "RadiusDegrees");
-            AddIfPresent(solve, output, "Flipped", "Flipped");
-
-            var coordinates = OptionalProperty(solve, "Coordinates");
-            if (coordinates is not null)
-            {
-                output["Coordinates"] = CompactCoordinates(coordinates);
-            }
-
-            var separation = OptionalProperty(solve, "Separation");
-            var distance = OptionalProperty(separation, "Distance");
-            AddFiniteIfPresent(distance, output, "ArcSeconds", "SeparationArcseconds");
-            AddIfPresent(solve, output, "RaErrorString", "RaError");
-            AddIfPresent(solve, output, "DecErrorString", "DecError");
-            AddFiniteIfPresent(solve, output, "RaPixError", "RaPixelError");
-            AddFiniteIfPresent(solve, output, "DecPixError", "DecPixelError");
+            output["Coordinates"] = CompactCoordinates(coordinates);
         }
 
-        var encoded = EncodeThumbnail(thumbnail);
-        if (encoded is not null)
-        {
-            output["ThumbnailBase64"] = Convert.ToBase64String(encoded);
-            output["ThumbnailMediaType"] = "image/jpeg";
-        }
+        var separation = OptionalProperty(solve, "Separation");
+        var distance = OptionalProperty(separation, "Distance");
+        AddFiniteIfPresent(distance, output, "ArcSeconds", "SeparationArcseconds");
+        AddIfPresent(solve, output, "RaErrorString", "RaError");
+        AddIfPresent(solve, output, "DecErrorString", "DecError");
+        AddFiniteIfPresent(solve, output, "RaPixError", "RaPixelError");
+        AddFiniteIfPresent(solve, output, "DecPixError", "DecPixelError");
 
+        // N.I.N.A. keeps plate-solve thumbnails on sequence instructions long
+        // after capture. Their origin carries no image-consent provenance, so
+        // embedding one in a routinely polled state snapshot could disclose
+        // an image created while sharing was disabled. Consented image bytes
+        // are available only through the guarded image-history/thumbnail API.
         result["PlateSolveOutput"] = output;
+    }
+
+    internal static Dictionary<string, object?>? ProjectCoordinates(
+        object? coordinates,
+        DirectAccessOptions access)
+    {
+        if (coordinates is null)
+        {
+            return null;
+        }
+
+        var projected = CompactCoordinates(coordinates);
+        DirectPrivacyProjection.Redact(projected, access);
+        return projected.Count == 0 ? null : projected;
     }
 
     private static Dictionary<string, object?> CompactCoordinates(object coordinates)
@@ -353,50 +369,9 @@ internal static class NinaDirectSequenceSnapshot
         AddFiniteIfPresent(coordinates, result, "Dec", "Dec");
         AddIfPresent(coordinates, result, "DecString", "DecString");
         AddIfPresent(coordinates, result, "Epoch", "Epoch");
+        AddFiniteIfPresent(coordinates, result, "Altitude", "Altitude");
+        AddFiniteIfPresent(coordinates, result, "Azimuth", "Azimuth");
         return result;
-    }
-
-    private static byte[]? EncodeThumbnail(BitmapSource? source)
-    {
-        if (source is null)
-        {
-            return null;
-        }
-        if (EncodedThumbnails.TryGetValue(source, out var cached))
-        {
-            return cached.Data;
-        }
-
-        try
-        {
-            var scale = source.PixelWidth > 256 ? 256d / source.PixelWidth : 1d;
-            BitmapSource thumbnail = source;
-            if (scale < 1)
-            {
-                thumbnail = new TransformedBitmap(source, new ScaleTransform(scale, scale));
-            }
-
-            var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
-            encoder.Frames.Add(BitmapFrame.Create(thumbnail));
-            using var stream = new MemoryStream();
-            encoder.Save(stream);
-            var encoded = stream.ToArray();
-            try
-            {
-                EncodedThumbnails.Add(source, new EncodedThumbnail(encoded));
-            }
-            catch (ArgumentException)
-            {
-                // Another query cached this same WPF image concurrently.
-            }
-            return encoded;
-        }
-        catch
-        {
-            // Solve metadata remains useful if a third-party image source
-            // cannot be encoded by WPF.
-            return null;
-        }
     }
 
     private static void AddAggregateExposureDetails(

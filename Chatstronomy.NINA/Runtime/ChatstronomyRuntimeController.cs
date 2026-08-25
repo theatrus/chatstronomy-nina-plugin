@@ -75,9 +75,16 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
         LocalRuntimeIdentity identity,
         CancellationToken cancellationToken)
     {
-        await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // The bootstrap identity and data pipe must share the profile that
+        // requested them, including starts queued behind an older lifecycle.
+        var profileSessionToken = directDataProvider.ProfileSessionToken;
+        using var starting = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            profileSessionToken);
+        await lifecycleGate.WaitAsync(starting.Token).ConfigureAwait(false);
         try
         {
+            starting.Token.ThrowIfCancellationRequested();
             if (IsRunning)
             {
                 return;
@@ -93,7 +100,8 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
 
             NinaDirectPipeServer? pendingDirectPipe = new NinaDirectPipeServer(
                 directDataProvider,
-                NinaDirectPipeServer.CreatePipeName());
+                NinaDirectPipeServer.CreatePipeName(),
+                profileSessionToken);
             pendingDirectPipe.Start();
 
             var payload = PluginRuntimeBootstrap.Serialize(
@@ -139,7 +147,7 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                         "Windows did not start the Chatstronomy runtime process.");
 
                 using var startupTimeout = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
+                    starting.Token);
                 startupTimeout.CancelAfter(StartupTimeout);
                 var startupToken = startupTimeout.Token;
                 var connectionTask = pipe.WaitForConnectionAsync(startupToken);
@@ -172,6 +180,7 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                     .ConfigureAwait(false);
                 var response = await reader.ReadLineAsync(startupToken).ConfigureAwait(false);
                 ValidateReadyResponse(response);
+                startupToken.ThrowIfCancellationRequested();
 
                 lock (stateGate)
                 {
@@ -188,12 +197,7 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                 pendingDirectPipe = null;
                 RaiseStateChanged();
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                throw new TimeoutException(
-                    $"Chatstronomy did not accept its local configuration within {StartupTimeout.TotalSeconds:0} seconds.");
-            }
-            catch
+            catch (Exception exception)
             {
                 if (process is { HasExited: false })
                 {
@@ -203,6 +207,14 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                 process?.Dispose();
                 pipe.Dispose();
                 pendingDirectPipe?.Dispose();
+                if (exception is OperationCanceledException
+                    && !cancellationToken.IsCancellationRequested
+                    && !profileSessionToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        $"Chatstronomy did not accept its local configuration within {StartupTimeout.TotalSeconds:0} seconds.",
+                        exception);
+                }
                 throw;
             }
         }

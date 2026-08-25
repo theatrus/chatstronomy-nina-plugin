@@ -204,6 +204,121 @@ internal sealed class ChatstronomySettings
         set => options.SetValueString(nameof(LocalRuntimePath), value?.Trim() ?? string.Empty);
     }
 
+    public bool AllowRemoteControl
+    {
+        get => options.GetValueBoolean(nameof(AllowRemoteControl), false);
+        set => options.SetValueBoolean(nameof(AllowRemoteControl), value);
+    }
+
+    public bool ShareObservatoryLocation
+    {
+        get => options.GetValueBoolean(nameof(ShareObservatoryLocation), false);
+        set => options.SetValueBoolean(nameof(ShareObservatoryLocation), value);
+    }
+
+    public bool AllowUnparkMount
+    {
+        get => options.GetValueBoolean(nameof(AllowUnparkMount), false);
+        set => options.SetValueBoolean(nameof(AllowUnparkMount), value);
+    }
+
+    public bool AllowHomeMount
+    {
+        get => options.GetValueBoolean(nameof(AllowHomeMount), false);
+        set => options.SetValueBoolean(nameof(AllowHomeMount), value);
+    }
+
+    public bool AllowChangeFilter
+    {
+        get => options.GetValueBoolean(nameof(AllowChangeFilter), false);
+        set => options.SetValueBoolean(nameof(AllowChangeFilter), value);
+    }
+
+    public bool AllowStartGuiding
+    {
+        get => options.GetValueBoolean(nameof(AllowStartGuiding), false);
+        set => options.SetValueBoolean(nameof(AllowStartGuiding), value);
+    }
+
+    public bool AllowStopGuiding
+    {
+        get => options.GetValueBoolean(nameof(AllowStopGuiding), false);
+        set => options.SetValueBoolean(nameof(AllowStopGuiding), value);
+    }
+
+    public bool AllowCoolCamera
+    {
+        get => options.GetValueBoolean(nameof(AllowCoolCamera), false);
+        set => options.SetValueBoolean(nameof(AllowCoolCamera), value);
+    }
+
+    public bool AllowWarmCamera
+    {
+        get => options.GetValueBoolean(nameof(AllowWarmCamera), false);
+        set => options.SetValueBoolean(nameof(AllowWarmCamera), value);
+    }
+
+    public bool AllowStartAutofocus
+    {
+        get => options.GetValueBoolean(nameof(AllowStartAutofocus), false);
+        set => options.SetValueBoolean(nameof(AllowStartAutofocus), value);
+    }
+
+    public bool AllowCancelAutofocus
+    {
+        get => options.GetValueBoolean(nameof(AllowCancelAutofocus), false);
+        set => options.SetValueBoolean(nameof(AllowCancelAutofocus), value);
+    }
+
+    public bool AllowParkMount
+    {
+        get => options.GetValueBoolean(nameof(AllowParkMount), false);
+        set => options.SetValueBoolean(nameof(AllowParkMount), value);
+    }
+
+    public bool AllowAbortExposure
+    {
+        get => options.GetValueBoolean(nameof(AllowAbortExposure), false);
+        set => options.SetValueBoolean(nameof(AllowAbortExposure), value);
+    }
+
+    public bool AllowStopSequence
+    {
+        get => options.GetValueBoolean(nameof(AllowStopSequence), false);
+        set => options.SetValueBoolean(nameof(AllowStopSequence), value);
+    }
+
+    public bool AllowStartSequence
+    {
+        get => options.GetValueBoolean(nameof(AllowStartSequence), false);
+        set => options.SetValueBoolean(nameof(AllowStartSequence), value);
+    }
+
+    public bool AllowSkipSequenceValidation
+    {
+        get => options.GetValueBoolean(nameof(AllowSkipSequenceValidation), false);
+        set => options.SetValueBoolean(nameof(AllowSkipSequenceValidation), value);
+    }
+
+    internal DirectAccessOptions AccessOptions => new(
+        AllowRemoteControl: AllowRemoteControl,
+        ShareObservatoryLocation: ShareObservatoryLocation,
+        AllowedCommands:
+            (AllowUnparkMount ? DirectCommandPermissions.UnparkMount : DirectCommandPermissions.None)
+            | (AllowHomeMount ? DirectCommandPermissions.HomeMount : DirectCommandPermissions.None)
+            | (AllowChangeFilter ? DirectCommandPermissions.ChangeFilter : DirectCommandPermissions.None)
+            | (AllowStartGuiding ? DirectCommandPermissions.StartGuiding : DirectCommandPermissions.None)
+            | (AllowStopGuiding ? DirectCommandPermissions.StopGuiding : DirectCommandPermissions.None)
+            | (AllowCoolCamera ? DirectCommandPermissions.CoolCamera : DirectCommandPermissions.None)
+            | (AllowWarmCamera ? DirectCommandPermissions.WarmCamera : DirectCommandPermissions.None)
+            | (AllowStartAutofocus ? DirectCommandPermissions.StartAutofocus : DirectCommandPermissions.None)
+            | (AllowCancelAutofocus ? DirectCommandPermissions.CancelAutofocus : DirectCommandPermissions.None)
+            | (AllowParkMount ? DirectCommandPermissions.ParkMount : DirectCommandPermissions.None)
+            | (AllowAbortExposure ? DirectCommandPermissions.AbortExposure : DirectCommandPermissions.None)
+            | (AllowStopSequence ? DirectCommandPermissions.StopSequence : DirectCommandPermissions.None)
+            | (AllowStartSequence ? DirectCommandPermissions.StartSequence : DirectCommandPermissions.None),
+        AllowSkipSequenceValidation: AllowSkipSequenceValidation);
+
     public bool SendImageEvents
     {
         get => options.GetValueBoolean(nameof(SendImageEvents), true);

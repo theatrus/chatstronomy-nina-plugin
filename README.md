@@ -40,6 +40,35 @@ arguments or generated configuration files. Hosted mode uses an outbound TLS
 WebSocket and a profile/node-bound credential stored in Windows Credential
 Manager.
 
+## Local control consent and hosted privacy
+
+Remote telescope and camera control is **disabled by default in each N.I.N.A.
+profile**. The plugin's **Security and privacy** settings provide an overall
+control switch and an individual permission for every supported hardware
+command; both the overall switch and every command permission start off. Turning
+on the overall switch alone does not authorize any action: explicitly select
+only the commands an authorized Discord server or locally managed bot should be
+allowed to run. Skipping sequence validation requires its own additional local
+permission. These N.I.N.A.-side controls are the hardware trust boundary: Hub
+roles, channel permissions, and server policies cannot override them.
+
+Observatory position sharing is also disabled by default. With sharing disabled,
+the plugin redacts site coordinates, elevation, and location-derived mount
+values before sending telemetry. Hardware device identifiers and structured
+local filesystem or script paths are always redacted, even when position
+sharing is enabled. Images, selected log lines, notifications, user-entered
+target names, and ordinary network connection information can still contain
+identifying information; review them before enabling forwarding.
+
+Hosted connections transmit only event categories explicitly enabled in the
+active N.I.N.A. profile. Turning a category off prevents its underlying events
+from reaching the Hub or local bot, including events already buffered before
+the setting changed. Turning off images also blocks image history and
+thumbnails. Equipment/status queries remain available; raw N.I.N.A. logs remain
+opt-in. Before pairing, review the hosted
+[privacy policy](https://chatstronomy.com/hub-privacy.html) and
+[terms of service](https://chatstronomy.com/hub-terms.html).
+
 ## Native data and event controls
 
 The plugin provides bounded native histories and typed command handling for:
@@ -49,16 +78,17 @@ The plugin provides bounded native histories and typed command handling for:
 - autofocus results and charts;
 - guider state, dithers, history, and graphs;
 - sequence lifecycle, waits, camera cooling, slew, center, and plate-solve
-  output/images;
+  results;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
 
-Event families can be enabled per N.I.N.A. profile. Disabled events are still
-consumed for state reconstruction, so suppressing a chat message does not break
-target, sequence, wait, cooling, or equipment status. Popup notifications are
-enabled by default. Raw log levels are opt-in because logs can be frequent and
-may include device or filesystem details.
+Event families can be enabled per N.I.N.A. profile. Disabled categories never
+leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
+turning a category off immediately removes its buffered events from subsequent
+queries. Images and thumbnails are also withheld when their category is off.
+Popup notifications are enabled by default. Raw log levels are opt-in because
+logs can be frequent and may include device or filesystem details.
 
 ## Development
 
@@ -73,7 +103,9 @@ dotnet run --project Chatstronomy.NINA.Tests\Chatstronomy.NINA.Tests.csproj -c R
 mismatches, and leaves the signed runtime in `runtime-cache/`.
 `build-package.ps1` then copies it into the N.I.N.A. plugin archive — it does
 not download anything itself and fails if the runtime is missing. Rust is never
-compiled in this repository.
+compiled in this repository. Every archive includes the Apache-2.0 license and
+third-party notices; archives containing the runtime also include the complete
+Liberation Sans SIL Open Font License next to `chatstronomy.exe`.
 
 Two optional environment variables widen the test suite; without them the
 process-level runtime, hub, and cross-repo contract checks report `SKIP`
