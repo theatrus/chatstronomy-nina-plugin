@@ -15,4 +15,4 @@ using System.Runtime.Versioning;
 [assembly: AssemblyMetadata("Tags", "discord,matrix,monitoring,remote")]
 [assembly: AssemblyMetadata("FeaturedImageURL", "https://raw.githubusercontent.com/theatrus/chatstronomy-nina-plugin/main/assets/branding/chatstronomy-featured.png")]
 [assembly: AssemblyMetadata("ShortDescription", "Bridge NINA with Discord and Matrix, supporting bot slash commands for control")]
-[assembly: AssemblyMetadata("LongDescription", "Chatstronomy routes native N.I.N.A. status, events, images, and approved commands through Discord and Matrix chat in local or hosted Hub mode.")]
+[assembly: AssemblyMetadata("LongDescription", "Chatstronomy routes approved N.I.N.A. status, events, images, and commands to the hosted Discord Hub or a local Discord/Matrix runtime.")]

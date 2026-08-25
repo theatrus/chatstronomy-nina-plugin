@@ -426,7 +426,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="Choose which N.I.N.A. events may leave this computer. Disabled event categories are never sent to the Hub or local bot; disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
+                            Text="Events, images, and popup notifications start enabled. Disable unwanted categories before connecting. Disabled event categories are never sent to the Hub or local bot; disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
                             <Grid Margin="0,3,18,3">
@@ -514,7 +514,7 @@
                         <TextBlock Margin="0,14,0,3" FontWeight="SemiBold" Text="N.I.N.A. log lines" />
                         <TextBlock
                             Margin="0,0,0,7"
-                            Text="Log forwarding is opt-in because logs can be frequent and may contain equipment paths or other private details. Chatstronomy captures every level N.I.N.A. writes; select the levels to send."
+                            Text="Log forwarding is opt-in because logs can be frequent and may contain equipment paths or other private details. No N.I.N.A. logs are read or sent until you enable a log level; only selected levels are forwarded."
                             TextWrapping="Wrap" />
                         <WrapPanel>
                             <StackPanel Margin="0,3,18,3" Orientation="Horizontal">

@@ -27,18 +27,20 @@ Open **Options → Plugins → Chatstronomy** after restart.
 
 - **Hosted Hub** — the recommended centralized path. Pair each N.I.N.A. profile
   with [hub.chatstronomy.com](https://hub.chatstronomy.com). Multiple N.I.N.A.
-  systems can share one managed Discord application.
+  systems can share one managed Discord application. Hosted delivery currently
+  supports Discord; Matrix is available in local mode.
 - **Local Discord webhook** — simple notifications using your webhook.
 - **Local Discord app / bot** — runs the full bot with your token, channel, and
   slash commands.
 - **Local Matrix** — logs in to an HTTPS Matrix homeserver and posts to your
   selected room. Matrix can also accompany either local Discord option.
 
-Local mode starts and stops its signed bundled runtime with N.I.N.A. Credentials
-cross only a current-user named pipe and are never placed in command-line
-arguments or generated configuration files. Hosted mode uses an outbound TLS
-WebSocket and a profile/node-bound credential stored in Windows Credential
-Manager.
+Local mode starts and stops its signed bundled runtime with N.I.N.A. Local
+delivery secrets and hosted connection credentials are stored in Windows
+Credential Manager, not in the N.I.N.A. profile. Local credentials cross only a
+current-user named pipe and are never placed in command-line arguments or
+generated configuration files. Hosted mode uses an outbound TLS WebSocket and a
+credential bound to the profile and node.
 
 ## Local control consent and hosted privacy
 
@@ -60,12 +62,16 @@ sharing is enabled. Images, selected log lines, notifications, user-entered
 target names, and ordinary network connection information can still contain
 identifying information; review them before enabling forwarding.
 
-Hosted connections transmit only event categories explicitly enabled in the
-active N.I.N.A. profile. Turning a category off prevents its underlying events
-from reaching the Hub or local bot, including events already buffered before
-the setting changed. Turning off images also blocks image history and
-thumbnails. Equipment/status queries remain available; raw N.I.N.A. logs remain
-opt-in. Before pairing, review the hosted
+Ordinary event categories, image sharing, and popup notifications start
+**enabled by default**. Review those settings before pairing with the Hub or
+starting a local runtime, and turn off anything you do not want to leave
+N.I.N.A. Turning a category off prevents its underlying events from reaching
+the Hub or local bot, including events already buffered before the setting
+changed. Turning off images also blocks image history and thumbnails.
+Equipment/status queries remain available, although disabling event categories
+can reduce the detail available for target, sequence, and equipment tracking.
+Raw N.I.N.A. logs are neither read nor sent until you enable at least one log
+level. Before pairing, review the hosted
 [privacy policy](https://chatstronomy.com/hub-privacy.html) and
 [terms of service](https://chatstronomy.com/hub-terms.html).
 
@@ -83,12 +89,15 @@ The plugin provides bounded native histories and typed command handling for:
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
 
-Event families can be enabled per N.I.N.A. profile. Disabled categories never
+Event families, images, and popup notifications are enabled by default and can
+be disabled independently for each N.I.N.A. profile. Disabled categories never
 leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
 turning a category off immediately removes its buffered events from subsequent
 queries. Images and thumbnails are also withheld when their category is off.
-Popup notifications are enabled by default. Raw log levels are opt-in because
-logs can be frequent and may include device or filesystem details.
+Hardware-command failure notifications follow the same event-category controls.
+Every raw log level starts off because logs can be frequent and may include
+device or filesystem details; logs are not read or sent until a level is
+enabled.
 
 ## Development
 
@@ -107,12 +116,13 @@ compiled in this repository. Every archive includes the Apache-2.0 license and
 third-party notices; archives containing the runtime also include the complete
 Liberation Sans SIL Open Font License next to `chatstronomy.exe`.
 
-Two optional environment variables widen the test suite; without them the
+Three optional environment variables widen the test suite; without them the
 process-level runtime, hub, and cross-repo contract checks report `SKIP`
 rather than failing, so it is easy to believe you ran more than you did:
 
 ```powershell
 $env:CHATSTRONOMY_RUNTIME_EXE = "$PWD/runtime-cache/chatstronomy.exe"
+$env:CHATSTRONOMY_HUB_EXE = "<path to full chatstronomy backend executable>"
 $env:CHATSTRONOMY_CONTRACTS_DIR = "<path to chatstronomy>/contracts"
 ```
 

@@ -32,6 +32,7 @@ internal static class Program
         Run("Discord application ID is optional", DiscordApplicationIdIsOptional);
         Run("Hosted mode defaults to the Chatstronomy hub", HostedModeDefaultsToHub);
         Run("Hosted Hub is the first chat delivery option", HostedHubIsFirstDeliveryOption);
+        Run("Plugin metadata distinguishes hosted Discord from local Matrix", HostedAndLocalDeliveryAreClearlyDescribed);
         Run("Hosted setup links to the Hub pairing flow", HostedSetupLinksToHubPairingFlow);
         Run("Local security and privacy controls are visible", LocalSecurityOptionsAreVisible);
         Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
@@ -545,6 +546,18 @@ internal static class Program
             (string?)deliveryOptions[0].Attribute("Content"));
     }
 
+    private static void HostedAndLocalDeliveryAreClearlyDescribed()
+    {
+        var description = typeof(ChatstronomyPlugin).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .Single(attribute => attribute.Key == "LongDescription")
+            .Value;
+
+        AssertTrue(description is not null);
+        AssertTrue(description.Contains("hosted Discord Hub", StringComparison.Ordinal));
+        AssertTrue(description.Contains("local Discord/Matrix runtime", StringComparison.Ordinal));
+    }
+
     private static void HostedSetupLinksToHubPairingFlow()
     {
         var optionsPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Options.xaml");
@@ -646,6 +659,12 @@ internal static class Program
         AssertTrue(descriptions.Any(value =>
             value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)
             && value.Contains("blocks image history and thumbnails", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("Events, images, and popup notifications start enabled", StringComparison.Ordinal)
+            && value.Contains("Disable unwanted categories before connecting", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("No N.I.N.A. logs are read or sent until you enable a log level", StringComparison.Ordinal)
+            && value.Contains("only selected levels are forwarded", StringComparison.Ordinal)));
     }
 
     private static void EventDeliverySwitchesHaveVisibleLabels()

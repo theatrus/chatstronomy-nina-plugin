@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.22',
+    [string] $Version = '0.1.0.23',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',
@@ -186,7 +186,7 @@ $manifest = [ordered]@{
     }
     Descriptions = [ordered]@{
         ShortDescription = 'Bridge NINA with Discord and Matrix, supporting bot slash commands for control'
-        LongDescription = 'Routes native N.I.N.A. status, events, images, popup notifications, selected logs, and approved commands through Discord and Matrix. Supports a supervised local runtime or multi-system Chatstronomy Hub.'
+        LongDescription = 'Routes selected N.I.N.A. status, events, images, popup notifications, logs, and approved commands to the hosted Discord Hub or a supervised local Discord/Matrix runtime.'
         FeaturedImageURL = $FeaturedImageUrl
         ScreenshotURL = ''
         AltScreenshotURL = ''
