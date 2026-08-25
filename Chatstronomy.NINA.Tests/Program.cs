@@ -5,6 +5,7 @@ using Chatstronomy.NINA.Remote;
 using Chatstronomy.NINA.Runtime;
 using Chatstronomy.NINA.Settings;
 using Newtonsoft.Json.Linq;
+using NINA.Equipment.Interfaces.Mediator;
 using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
 using System.Collections.Concurrent;
@@ -69,6 +70,9 @@ internal static class Program
             "Hosted stop aborts cancellation-resistant sockets",
             HostedStopAbortsCancellationResistantSocket);
         await RunAsync(
+            "Profile changes immediately invalidate authenticated hosted sessions",
+            HostedSessionsCannotCrossProfiles);
+        await RunAsync(
             "Hosted concurrent starts leave one owned connection",
             HostedConcurrentStartsLeaveOneConnection);
         await RunAsync(
@@ -83,6 +87,9 @@ internal static class Program
         Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
         Run("Queued hardware commands cannot cross equally authorized N.I.N.A. profiles", QueuedHardwareActionsCannotCrossProfiles);
         await RunAsync(
+            "Hardware commands recheck consent and expiry after blocking device reads",
+            HardwareCommandsRecheckConsentAfterDeviceReads);
+        await RunAsync(
             "Direct commands require explicit local N.I.N.A. consent",
             DirectCommandsRequireLocalConsent);
         await RunAsync(
@@ -91,6 +98,9 @@ internal static class Program
         await RunAsync(
             "Expired local Direct commands never reach authorized hardware providers",
             LocalDirectPipesRejectExpiredCommands);
+        await RunAsync(
+            "Profile changes immediately invalidate authenticated local Direct pipes",
+            LocalDirectPipesCannotCrossProfiles);
         await RunAsync(
             "Synchronous local Direct failures never expose observatory filesystem paths",
             LocalDirectPipesRedactSynchronousFailures);
@@ -102,6 +112,12 @@ internal static class Program
             HostedDirectConnectionsRedactSynchronousFailures);
         Run("Observatory location is safely redacted without breaking legacy runtimes", ObservatoryLocationIsRedacted);
         Run("Nested device identifiers and sequence paths never leave N.I.N.A.", NestedSensitiveDataIsRedacted);
+        await RunAsync(
+            "Cached Target Scheduler events immediately honor live location consent",
+            CachedEventHistoryHonorsLiveLocationConsent);
+        await RunAsync(
+            "Cached N.I.N.A. logs immediately honor live per-level consent",
+            CachedLogHistoryHonorsLiveLevelConsent);
         Run("Equipment snapshots contain only approved operational fields", EquipmentSnapshotsUseSafeProjections);
         Run("Asynchronous commands are acknowledged without claiming completion", AsyncCommandsUseAcceptedEnvelopes);
         await RunAsync(
@@ -864,6 +880,60 @@ internal static class Program
         AssertTrue(touchedCurrentProfileHardware);
     }
 
+    private static async Task HardwareCommandsRecheckConsentAfterDeviceReads()
+    {
+        var allowed = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(allowed);
+        var mediator = DispatchProxy.Create<ITelescopeMediator, GuardedTelescopeProxy>();
+        var telescope = (GuardedTelescopeProxy)(object)mediator;
+        using var provider = CreateSecurityTestProvider(access, telescope: mediator);
+        var command = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.Command,
+            Command: new DirectRigCommand(DirectRigCommandKind.UnparkMount),
+            ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+
+        // GetInfo can block while the owner switches to another profile with
+        // exactly the same permissions. A final generation check must still
+        // prevent the old request from actuating its replacement's mount.
+        telescope.BeforeGetInfo = () =>
+            ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, allowed);
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+
+        telescope.BeforeGetInfo = () =>
+            access.Update(allowed with { AllowedCommands = DirectCommandPermissions.None });
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(command, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+
+        access.Update(allowed);
+        using var canceled = new CancellationTokenSource();
+        telescope.BeforeGetInfo = canceled.Cancel;
+        await AssertThrowsAsync<OperationCanceledException>(() =>
+            provider.ExecuteAsync(command, canceled.Token));
+        AssertEqual(0, telescope.ActuationCount);
+
+        var expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            - DirectProtocol.CommandExpiryClockSkewGraceSeconds;
+        var expiringCommand = command with { Id = Guid.NewGuid(), ExpiresAt = expiresAt };
+        telescope.BeforeGetInfo = () =>
+        {
+            while (DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                <= expiresAt + DirectProtocol.CommandExpiryClockSkewGraceSeconds)
+            {
+                Thread.Sleep(10);
+            }
+        };
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(expiringCommand, CancellationToken.None));
+        AssertEqual(0, telescope.ActuationCount);
+    }
+
     private static async Task DirectCommandsRequireLocalConsent()
     {
         var access = new DirectAccessPolicy(DirectAccessOptions.Default);
@@ -1022,6 +1092,74 @@ internal static class Program
         AssertTrue(payload.GetProperty("error").GetString()!
             .Contains("expired", StringComparison.Ordinal));
         AssertEqual(0, provider.QueryCount);
+    }
+
+    private static async Task LocalDirectPipesCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = new FakeDirectDataProvider(access);
+        var previousSession = provider.ProfileSessionToken;
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName, previousSession);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        await writer.WriteLineAsync(QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds()));
+        var initial = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("The original Direct session did not respond.");
+        using var response = JsonDocument.Parse(initial);
+        AssertTrue(response.RootElement.GetProperty("payload").GetProperty("ok").GetBoolean());
+        AssertEqual(1, provider.QueryCount);
+        // StreamWriter.Dispose flushes even when its buffer is empty; close it
+        // while the session is healthy so the later intentional pipe abort
+        // cannot turn test cleanup into an unrelated broken-pipe failure.
+        writer.Dispose();
+
+        var elapsed = Stopwatch.StartNew();
+        ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, permittedInBothProfiles);
+        elapsed.Stop();
+        AssertTrue(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        AssertTrue(previousSession.IsCancellationRequested);
+        AssertFalse(provider.ProfileSessionToken.IsCancellationRequested);
+        AssertTrue(provider.Capabilities.Commands);
+
+        // EOF proves both fresh reads and an identically permitted hardware
+        // command can no longer be sent through the previous profile's pipe.
+        try
+        {
+            var disconnected = await reader.ReadLineAsync(timeout.Token);
+            AssertTrue(disconnected is null);
+        }
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+        {
+        }
+        AssertEqual(1, provider.QueryCount);
+
+        // The runtime's eventual lifecycle cleanup also disposes the server.
+        server.Dispose();
+        server.Dispose();
+
+        // A start queued before profile invalidation cannot resurrect its pipe.
+        using var alreadyExpired = new NinaDirectPipeServer(
+            provider,
+            NinaDirectPipeServer.CreatePipeName(),
+            previousSession);
+        alreadyExpired.Start();
+        alreadyExpired.Dispose();
     }
 
     private static async Task LocalDirectPipesRedactSynchronousFailures()
@@ -1210,6 +1348,160 @@ internal static class Program
         AssertFalse(rotateJson.RootElement.TryGetProperty("DeviceId", out _));
     }
 
+    private static async Task CachedEventHistoryHonorsLiveLocationConsent()
+    {
+        var access = new DirectAccessPolicy(DirectAccessOptions.Default with
+        {
+            ShareObservatoryLocation = true,
+        });
+        using var provider = CreateSecurityTestProvider(access);
+        var observer = new Dictionary<string, object?>
+        {
+            ["SiteLatitude"] = 38.6,
+            ["DeviceId"] = "private-mount-id",
+            ["FilePath"] = "C:\\Users\\astronomer\\private.sequence",
+            ["ExposureTime"] = 300d,
+        };
+        var coordinates = new Dictionary<string, object?>
+        {
+            ["RA"] = 12.5,
+            ["Dec"] = 42.25,
+            ["Altitude"] = 84d,
+            ["Azimuth"] = 165d,
+            ["Observers"] = new object[] { observer },
+        };
+        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
+            "AddEventCore",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Event history recorder was not found.");
+        addEvent.Invoke(
+            provider,
+            new object[]
+            {
+                DateTimeOffset.UtcNow,
+                "TS-TARGETSTART",
+                true,
+                new (string Name, object? Value)[]
+                {
+                    ("TargetName", "M31"),
+                    ("Coordinates", coordinates),
+                    ("DeviceId", "top-level-private-id"),
+                },
+            });
+
+        var initiallyShared = (await SnapshotEvents(provider)).Single();
+        var sharedCoordinates = initiallyShared.GetProperty("Coordinates");
+        AssertEqual(84d, sharedCoordinates.GetProperty("Altitude").GetDouble());
+        AssertEqual(165d, sharedCoordinates.GetProperty("Azimuth").GetDouble());
+        AssertEqual(38.6, sharedCoordinates
+            .GetProperty("Observers")[0]
+            .GetProperty("SiteLatitude")
+            .GetDouble());
+        AssertFalse(initiallyShared.TryGetProperty("DeviceId", out _));
+        AssertFalse(sharedCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("DeviceId", out _));
+        AssertFalse(sharedCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("FilePath", out _));
+
+        access.Update(access.Current with { ShareObservatoryLocation = false });
+        var withheld = (await SnapshotEvents(provider)).Single();
+        var withheldCoordinates = withheld.GetProperty("Coordinates");
+        AssertEqual(12.5, withheldCoordinates.GetProperty("RA").GetDouble());
+        AssertFalse(withheldCoordinates.TryGetProperty("Altitude", out _));
+        AssertFalse(withheldCoordinates.TryGetProperty("Azimuth", out _));
+        AssertFalse(withheldCoordinates
+            .GetProperty("Observers")[0]
+            .TryGetProperty("SiteLatitude", out _));
+
+        // The bounded history and its caller-owned nested objects remain
+        // intact, so a later explicit opt-in can share position again.
+        AssertEqual(84d, coordinates["Altitude"]);
+        AssertEqual(38.6, observer["SiteLatitude"]);
+        AssertEqual("private-mount-id", observer["DeviceId"]);
+        access.Update(access.Current with { ShareObservatoryLocation = true });
+        var sharedAgain = (await SnapshotEvents(provider)).Single()
+            .GetProperty("Coordinates");
+        AssertEqual(84d, sharedAgain.GetProperty("Altitude").GetDouble());
+        AssertEqual(38.6, sharedAgain
+            .GetProperty("Observers")[0]
+            .GetProperty("SiteLatitude")
+            .GetDouble());
+        AssertFalse(sharedAgain.GetProperty("Observers")[0]
+            .TryGetProperty("DeviceId", out _));
+    }
+
+    private static async Task CachedLogHistoryHonorsLiveLevelConsent()
+    {
+        var initial = DirectEventDeliveryOptions.Default with
+        {
+            NinaLogErrors = true,
+            NinaLogWarnings = true,
+        };
+        var delivery = new DirectEventDeliveryPolicy(initial);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var recordLog = typeof(NinaDirectDataProvider).GetMethod(
+            "RecordLog",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Log history recorder was not found.");
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow,
+                "WARNING",
+                "Telescope",
+                "Move",
+                12,
+                "Original private warning"),
+        });
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow.AddSeconds(1),
+                "ERROR",
+                "Camera",
+                "Cool",
+                34,
+                "Original private error"),
+        });
+        AssertEqual(2, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(initial with { NinaLogWarnings = false });
+        var errorsOnly = await SnapshotEvents(provider);
+        AssertEqual(1, errorsOnly.Length);
+        AssertEqual("ERROR", errorsOnly[0].GetProperty("Level").GetString());
+
+        delivery.Update(DirectEventDeliveryOptions.Default);
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(initial with { NinaLogErrors = false });
+        var warningsRestored = await SnapshotEvents(provider);
+        AssertEqual(1, warningsRestored.Length);
+        AssertEqual("WARNING", warningsRestored[0].GetProperty("Level").GetString());
+        AssertEqual(
+            "Original private warning",
+            warningsRestored[0].GetProperty("Message").GetString());
+
+        delivery.Update(initial);
+        AssertEqual(2, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task<JsonElement[]> SnapshotEvents(NinaDirectDataProvider provider)
+    {
+        var history = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory),
+            CancellationToken.None);
+        using var response = JsonDocument.Parse(
+            JsonSerializer.Serialize(history, DirectProtocol.JsonOptions));
+        return response.RootElement.GetProperty("Response")
+            .EnumerateArray()
+            .Select(item => item.Clone())
+            .ToArray();
+    }
+
     private static void AsyncCommandsUseAcceptedEnvelopes()
     {
         var accepted = DirectApiEnvelope<string>.Accepted("Sequence start requested");
@@ -1289,9 +1581,11 @@ internal static class Program
 
     private static NinaDirectDataProvider CreateSecurityTestProvider(
         DirectAccessPolicy access,
-        DirectEventDeliveryOptions? delivery = null) => new(
+        DirectEventDeliveryOptions? delivery = null,
+        DirectEventDeliveryPolicy? deliveryPolicy = null,
+        ITelescopeMediator? telescope = null) => new(
             profileService: null!,
-            telescope: null!,
+            telescope: telescope!,
             camera: null!,
             filterWheel: null!,
             guider: null!,
@@ -1304,7 +1598,7 @@ internal static class Program
             imageHistory: null!,
             windowFactory: null!,
             messageBroker: null!,
-            eventDelivery: new DirectEventDeliveryPolicy(
+            eventDelivery: deliveryPolicy ?? new DirectEventDeliveryPolicy(
                 delivery ?? DirectEventDeliveryOptions.Default),
             accessPolicy: access);
 
@@ -2041,6 +2335,67 @@ internal static class Program
         }
     }
 
+    private static async Task HostedSessionsCannotCrossProfiles()
+    {
+        var permittedInBothProfiles = new DirectAccessOptions(
+            AllowRemoteControl: true,
+            ShareObservatoryLocation: false,
+            AllowedCommands: DirectCommandPermissions.UnparkMount);
+        var access = new DirectAccessPolicy(permittedInBothProfiles);
+        using var provider = new FakeDirectDataProvider(access);
+        var hello = HostedHello() with { Capabilities = provider.Capabilities };
+        var firstRead = QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds());
+        var sockets = new ControlledHubSocketFactory(_ => new ControlledHubSocket(
+            AgentHelloJson(hello),
+            acknowledgeHeartbeats: true,
+            additionalInbound: new[] { firstRead }));
+        var client = new ChatstronomyHubClient(
+            provider,
+            sockets,
+            timings: FastHubTimings(),
+            jitterSource: () => 0.5);
+        await client.StartAsync(HostedConfiguration(hello), hello, CancellationToken.None);
+        await WaitUntilAsync(
+            () => client.IsConnected && provider.QueryCount == 1,
+            TimeSpan.FromSeconds(2));
+        var previousSession = provider.ProfileSessionToken;
+        var socket = sockets.Sockets.Single();
+
+        // Changing one command checkbox must not disconnect monitoring.
+        provider.RevokeRemoteControl();
+        AssertFalse(previousSession.IsCancellationRequested);
+        AssertEqual(0, socket.AbortCount);
+        AssertTrue(client.IsConnected);
+
+        var elapsed = Stopwatch.StartNew();
+        ChatstronomyPlugin.ApplyProfileAccessChange(access, provider, permittedInBothProfiles);
+        elapsed.Stop();
+        AssertTrue(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        AssertTrue(previousSession.IsCancellationRequested);
+        AssertFalse(provider.ProfileSessionToken.IsCancellationRequested);
+        AssertTrue(socket.AbortCount >= 1);
+        AssertTrue(provider.Capabilities.Commands);
+
+        // Both reads and identically allowed commands are rejected because
+        // their old authenticated socket has already been synchronously shut.
+        AssertFalse(socket.TryEnqueue(QueryJson(
+            Guid.NewGuid(),
+            "camera_info",
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds())));
+        AssertFalse(socket.TryEnqueue(CommandQueryJson(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds(),
+            "unpark_mount")));
+        AssertEqual(1, provider.QueryCount);
+        await WaitUntilAsync(() => !client.IsConnected, TimeSpan.FromSeconds(1));
+        await Task.Delay(100);
+        AssertEqual(1, sockets.CreateCount);
+        await client.StopAsync(CancellationToken.None);
+    }
+
     private static async Task HostedBlockedQueryDoesNotBlockHeartbeats()
     {
         var hello = HostedHello();
@@ -2662,6 +3017,39 @@ internal static class Program
             $"Expected {typeof(TException).Name} to be thrown.");
     }
 
+    private class GuardedTelescopeProxy : DispatchProxy
+    {
+        private int actuationCount;
+
+        internal Action? BeforeGetInfo { get; set; }
+
+        internal int ActuationCount => Volatile.Read(ref actuationCount);
+
+        protected override object? Invoke(MethodInfo? method, object?[]? arguments)
+        {
+            if (method is null)
+            {
+                throw new InvalidOperationException("A telescope method was not supplied.");
+            }
+            if (method.Name == "GetInfo")
+            {
+                BeforeGetInfo?.Invoke();
+                var info = Activator.CreateInstance(method.ReturnType)
+                    ?? throw new InvalidOperationException("Mount information could not be created.");
+                method.ReturnType.GetProperty("Connected")?.SetValue(info, true);
+                method.ReturnType.GetProperty("AtPark")?.SetValue(info, true);
+                return info;
+            }
+            if (method.Name == "UnparkTelescope")
+            {
+                Interlocked.Increment(ref actuationCount);
+                return Task.CompletedTask;
+            }
+
+            throw new NotSupportedException($"Unexpected telescope operation '{method.Name}'.");
+        }
+    }
+
     private sealed class ControlledHubSocketFactory(
         Func<int, ControlledHubSocket> createSocket) : IHubSocketFactory
     {
@@ -2718,6 +3106,8 @@ internal static class Program
         internal int HeartbeatCount => Volatile.Read(ref heartbeatCount);
 
         internal int AbortCount => Volatile.Read(ref abortCount);
+
+        internal bool TryEnqueue(string message) => inbound.Writer.TryWrite(message);
 
         public void Abort()
         {
@@ -2865,6 +3255,7 @@ internal static class Program
             TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<object?> release = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenSource profileSession = new();
         private int queryCount;
 
         public DirectCapabilities Capabilities { get; } = new(
@@ -2876,6 +3267,9 @@ internal static class Program
             AutofocusDetails: true,
             GuiderGraph: true,
             Commands: true);
+
+        public CancellationToken ProfileSessionToken =>
+            Volatile.Read(ref profileSession).Token;
 
         internal Task Started => started.Task;
 
@@ -2904,6 +3298,15 @@ internal static class Program
         {
         }
 
+        public void RevokeProfileAccess()
+        {
+            var previous = Interlocked.Exchange(
+                ref profileSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+            RevokeRemoteControl();
+        }
+
         public async Task<object?> ExecuteAsync(
             DirectQuery query,
             CancellationToken cancellationToken)
@@ -2922,6 +3325,7 @@ internal static class Program
     {
         private readonly DirectAccessPolicy? accessPolicy;
         private readonly Exception? executeFailure;
+        private CancellationTokenSource profileSession = new();
         private int queryCount;
         private int revocationCount;
         private readonly ConcurrentBag<DirectQueryKind> queriedKinds = new();
@@ -2943,6 +3347,9 @@ internal static class Program
             AutofocusDetails: true,
             GuiderGraph: true,
             Commands: accessPolicy?.Current.CommandsEnabled ?? true);
+
+        public CancellationToken ProfileSessionToken =>
+            Volatile.Read(ref profileSession).Token;
 
         public int QueryCount => Volatile.Read(ref queryCount);
         public int RevocationCount => Volatile.Read(ref revocationCount);
@@ -2967,6 +3374,15 @@ internal static class Program
         public void RevokeRemoteControl()
         {
             Interlocked.Increment(ref revocationCount);
+        }
+
+        public void RevokeProfileAccess()
+        {
+            var previous = Interlocked.Exchange(
+                ref profileSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+            RevokeRemoteControl();
         }
 
         public Task<object?> ExecuteAsync(

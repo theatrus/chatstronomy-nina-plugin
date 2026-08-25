@@ -216,6 +216,51 @@ internal static class DirectPrivacyProjection
         }
     }
 
+    /// Clone before projection: bounded event history must retain its original
+    /// coordinates if the user later explicitly re-enables location sharing.
+    internal static Dictionary<string, object?> RedactedCopy(
+        IReadOnlyDictionary<string, object?> snapshot,
+        DirectAccessOptions access)
+    {
+        var copy = snapshot.ToDictionary(
+            field => field.Key,
+            field => CloneValue(field.Value, access),
+            StringComparer.Ordinal);
+        Redact(copy, access);
+        return copy;
+    }
+
+    private static object? CloneValue(object? value, DirectAccessOptions access)
+    {
+        if (value is IReadOnlyDictionary<string, object?> readOnly)
+        {
+            return RedactedCopy(readOnly, access);
+        }
+        if (value is IDictionary<string, object?> dictionary)
+        {
+            return RedactedCopy(
+                dictionary.ToDictionary(field => field.Key, field => field.Value),
+                access);
+        }
+        if (value is JsonElement json)
+        {
+            return Redact(json, access);
+        }
+        if (value is JsonNode node)
+        {
+            var copy = node.DeepClone();
+            RedactJson(copy, access);
+            return copy;
+        }
+        if (value is not string && value is IEnumerable children)
+        {
+            return children.Cast<object?>()
+                .Select(child => CloneValue(child, access))
+                .ToArray();
+        }
+        return value;
+    }
+
     internal static JsonElement Redact(JsonElement snapshot, DirectAccessOptions access)
     {
         var node = JsonNode.Parse(snapshot.GetRawText());

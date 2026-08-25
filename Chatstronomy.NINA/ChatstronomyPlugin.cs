@@ -792,8 +792,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         INinaDirectDataProvider provider,
         DirectAccessOptions currentAccess)
     {
+        // The old authenticated connection must be unusable before its new
+        // profile's state or equally permissive command policy is published.
+        provider.RevokeProfileAccess();
         policy.Update(currentAccess);
-        provider.RevokeRemoteControl();
     }
 
     private async Task StartConfiguredModeAsync(CancellationToken cancellationToken)

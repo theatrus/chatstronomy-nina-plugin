@@ -83,6 +83,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private CancellationTokenSource? guideCommandStop;
     private CancellationTokenSource? cameraCommandStop;
     private CancellationTokenSource? autofocusCommandStop;
+    private CancellationTokenSource profileSession = new();
     private AutoFocusReport? lastAutofocusReport;
     private long guideStepId;
     private long commandGeneration;
@@ -135,6 +136,9 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         AutofocusDetails: true,
         GuiderGraph: true,
         Commands: accessPolicy.Current.CommandsEnabled);
+
+    public CancellationToken ProfileSessionToken =>
+        Volatile.Read(ref profileSession).Token;
 
     public void Start()
     {
@@ -223,6 +227,20 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         // the generation first still invalidates every callback captured by
         // that predecessor, including callbacks not yet given a device token.
         Interlocked.Increment(ref commandGeneration);
+        CancelOutstandingCommands();
+    }
+
+    public void RevokeProfileAccess()
+    {
+        // Publish the replacement before invalidating the old token: a new
+        // profile can start connecting while the old socket is being aborted.
+        // Cancellation callbacks only abort a socket or close a named pipe;
+        // none waits on a plugin lifecycle lock or blocks the N.I.N.A. UI.
+        var previous = Interlocked.Exchange(
+            ref profileSession,
+            new CancellationTokenSource());
+        Interlocked.Increment(ref commandGeneration);
+        previous.Cancel();
         CancelOutstandingCommands();
     }
 
@@ -432,20 +450,25 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         // an old connection or compromised peer can still send a command.
         // Fail before inspecting any mediator or touching observatory gear.
         RequireCurrentCommandConsent(query, cancellationToken, generation);
+        Action authorize = () => RequireCurrentCommandConsent(
+            query,
+            cancellationToken,
+            generation);
         var response = command.Kind switch
         {
-            DirectRigCommandKind.UnparkMount => UnparkMount(),
-            DirectRigCommandKind.HomeMount => HomeMount(),
-            DirectRigCommandKind.ChangeFilter => ChangeFilter(command.FilterId),
-            DirectRigCommandKind.StartGuiding => StartGuiding(command.Calibrate),
-            DirectRigCommandKind.StopGuiding => StopGuiding(),
-            DirectRigCommandKind.CoolCamera => CoolCamera(command.Temperature, command.Minutes),
-            DirectRigCommandKind.WarmCamera => WarmCamera(command.Minutes),
+            DirectRigCommandKind.UnparkMount => UnparkMount(authorize),
+            DirectRigCommandKind.HomeMount => HomeMount(authorize),
+            DirectRigCommandKind.ChangeFilter => ChangeFilter(command.FilterId, authorize),
+            DirectRigCommandKind.StartGuiding => StartGuiding(command.Calibrate, authorize),
+            DirectRigCommandKind.StopGuiding => StopGuiding(authorize),
+            DirectRigCommandKind.CoolCamera =>
+                CoolCamera(command.Temperature, command.Minutes, authorize),
+            DirectRigCommandKind.WarmCamera => WarmCamera(command.Minutes, authorize),
             DirectRigCommandKind.StartAutofocus =>
-                StartAutofocus(query, cancellationToken, generation),
-            DirectRigCommandKind.CancelAutofocus => CancelAutofocus(),
-            DirectRigCommandKind.ParkMount => ParkMount(),
-            DirectRigCommandKind.AbortExposure => AbortExposure(),
+                StartAutofocus(query, cancellationToken, generation, authorize),
+            DirectRigCommandKind.CancelAutofocus => CancelAutofocus(authorize),
+            DirectRigCommandKind.ParkMount => ParkMount(authorize),
+            DirectRigCommandKind.AbortExposure => AbortExposure(authorize),
             DirectRigCommandKind.StopSequence =>
                 StopSequence(query, cancellationToken, generation),
             DirectRigCommandKind.StartSequence =>
@@ -508,7 +531,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             generation,
             action));
 
-    private DirectApiEnvelope<string> UnparkMount()
+    private DirectApiEnvelope<string> UnparkMount(Action authorize)
     {
         var info = telescope.GetInfo();
         if (!info.Connected)
@@ -519,13 +542,14 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             return DirectApiEnvelope<string>.Ok("Mount is not parked");
         }
+        authorize();
         ObserveCommand(
             telescope.UnparkTelescope(CreateProgress(), CancellationToken.None),
             "Unpark mount");
         return DirectApiEnvelope<string>.Accepted("Mount unparking requested");
     }
 
-    private DirectApiEnvelope<string> HomeMount()
+    private DirectApiEnvelope<string> HomeMount(Action authorize)
     {
         var info = telescope.GetInfo();
         if (!info.Connected)
@@ -546,15 +570,17 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         }
         if (info.Slewing)
         {
+            authorize();
             telescope.StopSlew();
         }
+        authorize();
         ObserveCommand(
             telescope.FindHome(CreateProgress(), CancellationToken.None),
             "Home mount");
         return DirectApiEnvelope<string>.Accepted("Mount homing requested");
     }
 
-    private DirectApiEnvelope<string> ParkMount()
+    private DirectApiEnvelope<string> ParkMount(Action authorize)
     {
         var info = telescope.GetInfo();
         if (!info.Connected)
@@ -571,15 +597,17 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         }
         if (info.Slewing)
         {
+            authorize();
             telescope.StopSlew();
         }
+        authorize();
         ObserveCommand(
             telescope.ParkTelescope(CreateProgress(), CancellationToken.None),
             "Park mount");
         return DirectApiEnvelope<string>.Accepted("Mount parking requested");
     }
 
-    private DirectApiEnvelope<string> ChangeFilter(int? filterId)
+    private DirectApiEnvelope<string> ChangeFilter(int? filterId, Action authorize)
     {
         if (!filterWheel.GetInfo().Connected)
         {
@@ -601,37 +629,45 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             throw new InvalidOperationException($"Filter ID {filterId.Value} does not exist.");
         }
 
+        authorize();
         ObserveCommand(
             filterWheel.ChangeFilter(selected, CancellationToken.None, CreateProgress()),
             $"Change filter to {selected.Name}");
         return DirectApiEnvelope<string>.Accepted($"Filter change to {selected.Name} requested");
     }
 
-    private DirectApiEnvelope<string> StartGuiding(bool? calibrate)
+    private DirectApiEnvelope<string> StartGuiding(bool? calibrate, Action authorize)
     {
         if (!guider.GetInfo().Connected)
         {
             throw new InvalidOperationException("Guider is not connected.");
         }
+        authorize();
         var stop = ReplaceCommandToken(ref guideCommandStop);
+        authorize();
         ObserveCommand(
             guider.StartGuiding(calibrate ?? false, CreateProgress(), stop.Token),
             "Start guiding");
         return DirectApiEnvelope<string>.Accepted("Guiding start requested");
     }
 
-    private DirectApiEnvelope<string> StopGuiding()
+    private DirectApiEnvelope<string> StopGuiding(Action authorize)
     {
         if (!guider.GetInfo().Connected)
         {
             throw new InvalidOperationException("Guider is not connected.");
         }
+        authorize();
         CancelCommand(ref guideCommandStop);
+        authorize();
         ObserveCommand(guider.StopGuiding(CancellationToken.None), "Stop guiding");
         return DirectApiEnvelope<string>.Accepted("Guiding stop requested");
     }
 
-    private DirectApiEnvelope<string> CoolCamera(double? temperature, double? minutes)
+    private DirectApiEnvelope<string> CoolCamera(
+        double? temperature,
+        double? minutes,
+        Action authorize)
     {
         if (!camera.GetInfo().Connected)
         {
@@ -646,7 +682,9 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             minutes,
             profileService.ActiveProfile.CameraSettings.CoolingDuration,
             "Cooling duration");
+        authorize();
         var stop = ReplaceCommandToken(ref cameraCommandStop);
+        authorize();
         ObserveCommand(
             camera.CoolCamera(target, duration, CreateProgress(), stop.Token),
             "Cool camera");
@@ -654,7 +692,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             $"Camera cooling to {target:0.##} C over {duration.TotalMinutes:0.##} minutes requested");
     }
 
-    private DirectApiEnvelope<string> WarmCamera(double? minutes)
+    private DirectApiEnvelope<string> WarmCamera(double? minutes, Action authorize)
     {
         if (!camera.GetInfo().Connected)
         {
@@ -668,7 +706,9 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
             minutes,
             profileService.ActiveProfile.CameraSettings.WarmingDuration,
             "Warming duration");
+        authorize();
         var stop = ReplaceCommandToken(ref cameraCommandStop);
+        authorize();
         ObserveCommand(
             camera.WarmCamera(duration, CreateProgress(), stop.Token),
             "Warm camera");
@@ -679,13 +719,15 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     private DirectApiEnvelope<string> StartAutofocus(
         DirectQuery query,
         CancellationToken cancellationToken,
-        long generation)
+        long generation,
+        Action authorize)
     {
         if (!focuser.GetInfo().Connected)
         {
             throw new InvalidOperationException("Focuser is not connected.");
         }
 
+        authorize();
         var stop = ReplaceCommandToken(ref autofocusCommandStop);
         IWindowService? window = null;
         Task<AutoFocusReport>? autofocus = null;
@@ -698,8 +740,10 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
                 "Autofocus",
                 ResizeMode.CanResize,
                 WindowStyle.ToolWindow);
+            var selectedFilter = filterWheel.GetInfo().SelectedFilter;
+            authorize();
             autofocus = viewModel.StartAutoFocus(
-                filterWheel.GetInfo().SelectedFilter,
+                selectedFilter,
                 stop.Token,
                 CreateProgress());
             return true;
@@ -711,13 +755,14 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         return DirectApiEnvelope<string>.Accepted("Autofocus requested");
     }
 
-    private DirectApiEnvelope<string> CancelAutofocus()
+    private DirectApiEnvelope<string> CancelAutofocus(Action authorize)
     {
+        authorize();
         CancelCommand(ref autofocusCommandStop);
         return DirectApiEnvelope<string>.Accepted("Autofocus cancellation requested");
     }
 
-    private DirectApiEnvelope<string> AbortExposure()
+    private DirectApiEnvelope<string> AbortExposure(Action authorize)
     {
         if (!camera.GetInfo().Connected)
         {
@@ -727,6 +772,7 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
         {
             return DirectApiEnvelope<string>.Ok("Camera is not exposing");
         }
+        authorize();
         camera.AbortExposure();
         return DirectApiEnvelope<string>.Accepted("Exposure abort requested");
     }
@@ -1286,9 +1332,22 @@ internal sealed class NinaDirectDataProvider : INinaDirectDataProvider, IFocuser
     /// history, but the consumer still expects one chronological list.
     private IReadOnlyList<Dictionary<string, object?>> SnapshotEventHistory()
     {
-        var logs = logEvents.Snapshot();
-        var equipment = events.Snapshot();
-        if (logs.Count == 0)
+        var access = accessPolicy.Current;
+        var delivery = eventDelivery.Current;
+        // Apply privacy choices on every poll, not just when an event first
+        // entered its ring. Clone recursively so turning location or a log
+        // level off takes effect immediately without destroying history the
+        // user may explicitly choose to share again later.
+        var equipment = events.Snapshot()
+            .Select(item => DirectPrivacyProjection.RedactedCopy(item, access))
+            .ToArray();
+        var logs = logEvents.Snapshot()
+            .Where(item => item.TryGetValue("Level", out var level)
+                && level is string name
+                && delivery.ShouldSendLogLevel(name))
+            .Select(item => DirectPrivacyProjection.RedactedCopy(item, access))
+            .ToArray();
+        if (logs.Length == 0)
         {
             return equipment;
         }

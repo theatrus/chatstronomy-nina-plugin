@@ -84,17 +84,25 @@ internal sealed class ChatstronomyHubClient
         ClientHello hello,
         CancellationToken cancellationToken)
     {
+        // Bind the identity to its originating profile before awaiting the
+        // lifecycle gate; a profile switch may happen while it is queued.
+        var profileSessionToken = provider.ProfileSessionToken;
         configuration.Validate();
         ValidateHello(configuration, hello);
-        await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var starting = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            profileSessionToken);
+        await lifecycleGate.WaitAsync(starting.Token).ConfigureAwait(false);
         try
         {
             await StopCoreAsync().ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            profileSessionToken.ThrowIfCancellationRequested();
             lock (stateGate)
             {
                 var generation = ++lifecycleGeneration;
-                var cancellation = new CancellationTokenSource();
+                var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    profileSessionToken);
                 stopping = cancellation;
                 runTask = Task.Run(
                     () => RunAsync(configuration, hello, generation, cancellation.Token),
@@ -164,8 +172,13 @@ internal sealed class ChatstronomyHubClient
         ClientHello hello,
         CancellationToken cancellationToken)
     {
+        var profileSessionToken = provider.ProfileSessionToken;
         configuration.Validate();
         ValidateHello(configuration, hello);
+        using var session = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            profileSessionToken);
+        session.Token.ThrowIfCancellationRequested();
         long generation;
         lock (stateGate)
         {
@@ -181,7 +194,7 @@ internal sealed class ChatstronomyHubClient
             authentication,
             attempt,
             generation,
-            cancellationToken).ConfigureAwait(false);
+            session.Token).ConfigureAwait(false);
     }
 
     private async Task RunAsync(

@@ -14,14 +14,25 @@ internal sealed class NinaDirectPipeServer : IDisposable
 {
     private const int MaxFrameCharacters = 1024 * 1024;
     private readonly INinaDirectDataProvider provider;
-    private readonly CancellationTokenSource stopping = new();
+    private readonly CancellationTokenSource stopping;
+    private readonly CancellationTokenRegistration invalidateOnProfileChange;
     private NamedPipeServerStream? pipe;
     private Task? runTask;
+    private int invalidated;
+    private int disposed;
 
-    internal NinaDirectPipeServer(INinaDirectDataProvider provider, string pipeName)
+    internal NinaDirectPipeServer(
+        INinaDirectDataProvider provider,
+        string pipeName,
+        CancellationToken? profileSessionToken = null)
     {
         this.provider = provider;
         PipeName = pipeName;
+        var session = profileSessionToken ?? provider.ProfileSessionToken;
+        stopping = CancellationTokenSource.CreateLinkedTokenSource(session);
+        invalidateOnProfileChange = session.Register(
+            static state => ((NinaDirectPipeServer)state!).Invalidate(),
+            this);
     }
 
     internal string PipeName { get; }
@@ -40,15 +51,31 @@ internal sealed class NinaDirectPipeServer : IDisposable
 
     public void Dispose()
     {
-        stopping.Cancel();
-        pipe?.Dispose();
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
+        Invalidate();
+        invalidateOnProfileChange.Dispose();
         stopping.Dispose();
+    }
+
+    internal void Invalidate()
+    {
+        if (Interlocked.Exchange(ref invalidated, 1) != 0)
+        {
+            return;
+        }
+        stopping.Cancel();
+        Volatile.Read(ref pipe)?.Dispose();
     }
 
     private async Task RunAsync(CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             pipe = new NamedPipeServerStream(
                 PipeName,
                 PipeDirection.InOut,
@@ -118,6 +145,9 @@ internal sealed class NinaDirectPipeServer : IDisposable
         {
         }
         catch (IOException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
         {
         }
     }
