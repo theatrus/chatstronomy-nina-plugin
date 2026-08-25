@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0.22',
+    [string] $Version = '0.1.0.23',
 
     [ValidateNotNullOrEmpty()]
     [string] $InstallerUrl = '',

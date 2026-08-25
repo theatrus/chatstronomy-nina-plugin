@@ -646,6 +646,12 @@ internal static class Program
         AssertTrue(descriptions.Any(value =>
             value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)
             && value.Contains("blocks image history and thumbnails", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("Events, images, and popup notifications start enabled", StringComparison.Ordinal)
+            && value.Contains("Disable unwanted categories before connecting", StringComparison.Ordinal)));
+        AssertTrue(descriptions.Any(value =>
+            value.Contains("No N.I.N.A. logs are read or sent until you enable a log level", StringComparison.Ordinal)
+            && value.Contains("only selected levels are forwarded", StringComparison.Ordinal)));
     }
 
     private static void EventDeliverySwitchesHaveVisibleLabels()
