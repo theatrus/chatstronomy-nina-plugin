@@ -466,8 +466,16 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Sequence, waits, and cooling" />
+                                <TextBlock VerticalAlignment="Center" Text="Sequence, timed waits, and cooling" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSequenceEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Safety monitor and safety waits" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSafetyEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>

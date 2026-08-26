@@ -81,10 +81,12 @@ The plugin provides bounded native histories and typed command handling for:
 
 - equipment connection and state changes;
 - images and larger chat thumbnails;
-- autofocus results and charts;
+- autofocus results and charts from the report matching the completed run;
 - guider state, dithers, history, and graphs;
-- sequence lifecycle, waits, camera cooling, slew, center, and plate-solve
-  results;
+- native safety-monitor connection and safe/unsafe transitions;
+- sequence lifecycle, timed waits, and supported long-running Sequencer+ waits,
+  including **Wait Until Safe**;
+- camera cooling, slew, center, and plate-solve results;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
@@ -95,6 +97,13 @@ leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
 turning a category off immediately removes its buffered events from subsequent
 queries. Images and thumbnails are also withheld when their category is off.
 Hardware-command failure notifications follow the same event-category controls.
+Safety-monitor transitions have their own event switch; a safety wait is sent
+only when both sequence and safety delivery are enabled. Sequencer+ condition
+expressions and free-form pause reasons remain inside N.I.N.A.
+Changing mount, sequence, or safety delivery first closes the current Direct
+session, then applies the new selection and reconnects. This prevents an older
+Hub or local runtime from turning cached operation state into a final message
+after sharing is disabled.
 Every raw log level starts off because logs can be frequent and may include
 device or filesystem details; logs are not read or sent until a level is
 enabled.

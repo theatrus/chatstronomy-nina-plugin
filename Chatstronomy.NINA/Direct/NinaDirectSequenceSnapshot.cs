@@ -46,7 +46,8 @@ internal static class NinaDirectSequenceSnapshot
     internal static IReadOnlyList<Dictionary<string, object?>> Build(
         ISequenceMediator sequence,
         DirectEventDeliveryOptions? delivery = null,
-        DirectAccessOptions? access = null)
+        DirectAccessOptions? access = null,
+        bool? safetyMonitorIsSafe = null)
     {
         if (!sequence.Initialized)
         {
@@ -54,17 +55,20 @@ internal static class NinaDirectSequenceSnapshot
         }
 
         var root = GetSequenceRoot(sequence);
+        var options = delivery ?? DirectEventDeliveryOptions.Default;
         var result = new List<Dictionary<string, object?>>
         {
             new()
             {
                 ["GlobalTriggers"] = root is ITriggerable triggerable
-                    ? triggerable.GetTriggersSnapshot().Select(BuildTrigger).ToArray()
+                    ? triggerable.GetTriggersSnapshot()
+                        .Select(trigger => BuildTrigger(trigger, options))
+                        .ToArray()
                     : Array.Empty<Dictionary<string, object?>>(),
             },
         };
-        var options = delivery ?? DirectEventDeliveryOptions.Default;
-        result.AddRange(root.GetItemsSnapshot().Select(item => BuildItem(item, options)));
+        result.AddRange(root.GetItemsSnapshot()
+            .Select(item => BuildItem(item, options, safetyMonitorIsSafe)));
         var privacy = access ?? DirectAccessOptions.Default;
         foreach (var entity in result)
         {
@@ -89,9 +93,44 @@ internal static class NinaDirectSequenceSnapshot
 
     private static Dictionary<string, object?> BuildItem(
         ISequenceItem item,
-        DirectEventDeliveryOptions delivery)
+        DirectEventDeliveryOptions delivery,
+        bool? safetyMonitorIsSafe)
     {
         var itemType = item.GetType().Name;
+        if (item is IDeepSkyObjectContainer
+            && item is ISequenceContainer privateTarget
+            && !delivery.TargetScheduler)
+        {
+            // Target containers often carry a user label in Name and the
+            // actual object name in Target. Keep neither when target sharing
+            // is disabled. Their nested instructions remain independently
+            // projectable so, for example, a consented cooling or wait state
+            // does not disappear with its private parent.
+            return new Dictionary<string, object?>
+            {
+                ["Name"] = "_Container",
+                ["Status"] = "SUPPRESSED",
+                ["IsTargetContainer"] = true,
+                ["ChatEnabled"] = false,
+                ["Items"] = privateTarget.GetItemsSnapshot()
+                    .Select(child => BuildItem(child, delivery, safetyMonitorIsSafe))
+                    .ToArray(),
+            };
+        }
+        if (!ShouldProjectOperationDetails(itemType, delivery))
+        {
+            // Preserve only the item's structural slot so a peer can silently
+            // forget state it observed before consent was revoked. Do not
+            // disclose the instruction type, user label, status, or details.
+            return new Dictionary<string, object?>
+            {
+                ["Name"] = "Suppressed_SequenceItem",
+                ["Status"] = "SUPPRESSED",
+                ["ChatEnabled"] = false,
+                ["Suppressed"] = true,
+            };
+        }
+
         var expandContainer = item is ISequenceContainer
             && itemType is not "SmartExposure" and not "TakeManyExposures";
         var result = BaseEntity(item, expandContainer ? "_Container" : string.Empty);
@@ -111,17 +150,19 @@ internal static class NinaDirectSequenceSnapshot
         if (expandContainer && item is ISequenceContainer container)
         {
             result["Items"] = container.GetItemsSnapshot()
-                .Select(child => BuildItem(child, delivery))
+                .Select(child => BuildItem(child, delivery, safetyMonitorIsSafe))
                 .ToArray();
             result["Conditions"] = container is IConditionable conditionable
                 ? conditionable.GetConditionsSnapshot().Select(BuildCondition).ToArray()
                 : Array.Empty<Dictionary<string, object?>>();
             result["Triggers"] = container is ITriggerable triggerable
-                ? triggerable.GetTriggersSnapshot().Select(BuildTrigger).ToArray()
+                ? triggerable.GetTriggersSnapshot()
+                    .Select(trigger => BuildTrigger(trigger, delivery))
+                    .ToArray()
                 : Array.Empty<Dictionary<string, object?>>();
         }
 
-        AddItemDetails(item, result);
+        AddItemDetails(item, result, safetyMonitorIsSafe, delivery);
         AddDeliveryDetails(item, result, delivery);
         return result;
     }
@@ -132,19 +173,48 @@ internal static class NinaDirectSequenceSnapshot
         DirectEventDeliveryOptions delivery)
     {
         var typeName = item.GetType().Name;
-        if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz" or "Center" or "CenterAndRotate")
+        if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz"
+            or "SlewToRADec" or "SlewToAltAz"
+            or "Center" or "CenterAndRotate")
         {
             result["ChatEnabled"] = delivery.Mount;
         }
-        else if (typeName is "CoolCamera" or "WarmCamera" or "WaitForTime" or "WaitForTimeSpan")
+        else if (typeName is "CoolCamera" or "WarmCamera"
+            or "WaitForTime" or "WaitForTimeSpan"
+            or "WaitUntil" or "WaitIndefinitely" or "Break")
         {
             result["ChatEnabled"] = delivery.Sequence;
         }
+        else if (typeName == "WaitUntilSafe")
+        {
+            result["ChatEnabled"] = delivery.Sequence && delivery.Safety;
+        }
     }
 
-    private static Dictionary<string, object?> BuildTrigger(ISequenceTrigger trigger)
+    private static Dictionary<string, object?> BuildTrigger(
+        ISequenceTrigger trigger,
+        DirectEventDeliveryOptions delivery)
     {
+        if (trigger.GetType().Name.Contains("MeridianFlip", StringComparison.OrdinalIgnoreCase)
+            && !delivery.Mount)
+        {
+            // Meridian-flip timing is derived from mount position. Preserve a
+            // structural tombstone so an older Hub forgets a previously shared
+            // ETA, without sending the trigger label, status, or timing.
+            return new Dictionary<string, object?>
+            {
+                ["Name"] = "Suppressed_Trigger",
+                ["Status"] = "SUPPRESSED",
+                ["ChatEnabled"] = false,
+                ["Suppressed"] = true,
+            };
+        }
+
         var result = BaseEntity(trigger, "_Trigger");
+        if (trigger.GetType().Name.Contains("MeridianFlip", StringComparison.OrdinalIgnoreCase))
+        {
+            result["ChatEnabled"] = true;
+        }
         AddIfPresent(trigger, result, "TimeToMeridianFlip", "TimeToFlip");
         AddIfPresent(trigger, result, "HFRTrendPercentage", "HFRTrendPercentage");
         AddIfPresent(trigger, result, "OriginalHFR", "OriginalHFR");
@@ -211,20 +281,34 @@ internal static class NinaDirectSequenceSnapshot
 
     private static void AddItemDetails(
         ISequenceItem item,
-        IDictionary<string, object?> result)
+        IDictionary<string, object?> result,
+        bool? safetyMonitorIsSafe,
+        DirectEventDeliveryOptions delivery)
     {
-        foreach (var (propertyName, wireName) in DetailNames)
+        var typeName = item.GetType().Name;
+        if (!ShouldProjectOperationDetails(typeName, delivery))
         {
-            AddIfPresent(item, result, propertyName, wireName);
+            // Keep only the generic sequence item name/status. Operational
+            // state, coordinates, and outputs for a disabled category must not
+            // cross the Direct boundary merely to reconstruct chat state.
+            return;
+        }
+        var hasRestrictedWaitDetails = typeName is "WaitUntil" or "WaitIndefinitely" or "Break";
+        if (!hasRestrictedWaitDetails)
+        {
+            foreach (var (propertyName, wireName) in DetailNames)
+            {
+                AddIfPresent(item, result, propertyName, wireName);
+            }
         }
 
-        var typeName = item.GetType().Name;
         if (typeName == "CoolCamera")
         {
             result["OperationKind"] = "camera_cooling";
             AddIfPresent(item, result, "Duration", "MinCoolingTime");
         }
-        else if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz")
+        else if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz"
+            or "SlewToRADec" or "SlewToAltAz")
         {
             result["OperationKind"] = "mount_slew";
         }
@@ -303,7 +387,46 @@ internal static class NinaDirectSequenceSnapshot
                 result["CalculatedWaitDuration"] = wait;
             }
         }
+        else if (typeName == "WaitUntilSafe")
+        {
+            // Both N.I.N.A.'s built-in instruction and Sequencer+ use this
+            // simple type name. The instruction's own IsSafe property can be
+            // stale while it is waiting, so project the mediator state that
+            // was captured by the caller instead.
+            result["OperationKind"] = "safety_wait";
+            result["IsSafe"] = safetyMonitorIsSafe;
+            AddIfPresent(item, result, "WaitInterval", "WaitInterval");
+        }
+        else if (typeName == "WaitUntil")
+        {
+            // The expression can contain private observatory or equipment
+            // values. Only advertise that an expression wait is active and
+            // how often it is evaluated.
+            result["OperationKind"] = "condition_wait";
+            AddIfPresent(item, result, "WaitInterval", "WaitInterval");
+        }
+        else if (typeName is "WaitIndefinitely" or "Break")
+        {
+            // Sequencer+ implements these with placeholder Time values that
+            // do not represent the actual wait. Break.Reason may also carry
+            // arbitrary user text, so neither is part of the wire contract.
+            result["OperationKind"] = "manual_wait";
+        }
     }
+
+    private static bool ShouldProjectOperationDetails(
+        string typeName,
+        DirectEventDeliveryOptions delivery) => typeName switch
+    {
+        "SlewScopeToRaDec" or "SlewScopeToAltAz"
+            or "SlewToRADec" or "SlewToAltAz"
+            or "Center" or "CenterAndRotate" => delivery.Mount,
+        "CoolCamera" or "WarmCamera"
+            or "WaitForTime" or "WaitForTimeSpan"
+            or "WaitUntil" or "WaitIndefinitely" or "Break" => delivery.Sequence,
+        "WaitUntilSafe" => delivery.Sequence && delivery.Safety,
+        _ => true,
+    };
 
     private static void AddPlateSolveOutput(
         object item,

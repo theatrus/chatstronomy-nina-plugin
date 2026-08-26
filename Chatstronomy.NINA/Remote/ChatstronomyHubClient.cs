@@ -84,28 +84,34 @@ internal sealed class ChatstronomyHubClient
         ClientHello hello,
         CancellationToken cancellationToken)
     {
-        // Bind the identity to its originating profile before awaiting the
-        // lifecycle gate; a profile switch may happen while it is queued.
-        var profileSessionToken = provider.ProfileSessionToken;
+        // Bind the identity to its originating Direct session before awaiting
+        // the lifecycle gate; a privacy or profile transition may happen
+        // while it is queued.
+        var directSessionToken = provider.DirectSessionToken;
         configuration.Validate();
         ValidateHello(configuration, hello);
         using var starting = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
-            profileSessionToken);
+            directSessionToken);
         await lifecycleGate.WaitAsync(starting.Token).ConfigureAwait(false);
         try
         {
             await StopCoreAsync().ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            profileSessionToken.ThrowIfCancellationRequested();
+            directSessionToken.ThrowIfCancellationRequested();
             lock (stateGate)
             {
                 var generation = ++lifecycleGeneration;
                 var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                    profileSessionToken);
+                    directSessionToken);
                 stopping = cancellation;
                 runTask = Task.Run(
-                    () => RunAsync(configuration, hello, generation, cancellation.Token),
+                    () => RunAsync(
+                        configuration,
+                        hello,
+                        generation,
+                        directSessionToken,
+                        cancellation.Token),
                     CancellationToken.None);
             }
         }
@@ -172,12 +178,12 @@ internal sealed class ChatstronomyHubClient
         ClientHello hello,
         CancellationToken cancellationToken)
     {
-        var profileSessionToken = provider.ProfileSessionToken;
+        var directSessionToken = provider.DirectSessionToken;
         configuration.Validate();
         ValidateHello(configuration, hello);
         using var session = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
-            profileSessionToken);
+            directSessionToken);
         session.Token.ThrowIfCancellationRequested();
         long generation;
         lock (stateGate)
@@ -194,6 +200,7 @@ internal sealed class ChatstronomyHubClient
             authentication,
             attempt,
             generation,
+            directSessionToken,
             session.Token).ConfigureAwait(false);
     }
 
@@ -201,6 +208,7 @@ internal sealed class ChatstronomyHubClient
         HubConnectionConfiguration configuration,
         ClientHello hello,
         long generation,
+        CancellationToken directSessionToken,
         CancellationToken cancellationToken)
     {
         var authentication = new HubAuthenticationState(
@@ -218,6 +226,7 @@ internal sealed class ChatstronomyHubClient
                     authentication,
                     attempt,
                     generation,
+                    directSessionToken,
                     cancellationToken).ConfigureAwait(false);
                 throw new HubDisconnectedException("The hub closed the connection.");
             }
@@ -281,6 +290,7 @@ internal sealed class ChatstronomyHubClient
         HubAuthenticationState authentication,
         HubConnectionAttempt attempt,
         long generation,
+        CancellationToken directSessionToken,
         CancellationToken cancellationToken)
     {
         SetStateForGeneration(
@@ -346,6 +356,7 @@ internal sealed class ChatstronomyHubClient
 
             cancellationToken.ThrowIfCancellationRequested();
             attempt.MarkAuthenticated();
+            provider.BeginDirectTransport(directSessionToken);
             var payloadStatus = serverHello.PayloadVersion < DirectProtocol.CurrentPayloadVersion
                 ? $", legacy payload v{serverHello.PayloadVersion}"
                 : $", payload v{serverHello.PayloadVersion}";
@@ -381,6 +392,7 @@ internal sealed class ChatstronomyHubClient
                 socket,
                 sendGate,
                 queries.Reader,
+                directSessionToken,
                 connected.Token);
             var connectionTasks = new[] { receiveTask, heartbeatTask, queryTask };
             try
@@ -459,11 +471,17 @@ internal sealed class ChatstronomyHubClient
         IHubSocket socket,
         SemaphoreSlim sendGate,
         ChannelReader<DirectQuery> queries,
+        CancellationToken directSessionToken,
         CancellationToken cancellationToken)
     {
         await foreach (var query in queries.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
-            await AnswerQueryAsync(socket, sendGate, query, cancellationToken)
+            await AnswerQueryAsync(
+                socket,
+                sendGate,
+                query,
+                directSessionToken,
+                cancellationToken)
                 .ConfigureAwait(false);
         }
     }
@@ -472,9 +490,11 @@ internal sealed class ChatstronomyHubClient
         IHubSocket socket,
         SemaphoreSlim sendGate,
         DirectQuery query,
+        CancellationToken directSessionToken,
         CancellationToken cancellationToken)
     {
         string response;
+        var queryCompleted = false;
         if (query.IsExpiredAt(DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
         {
             response = DirectProtocol.SerializeFailure(query.Id, "query expired before execution");
@@ -494,9 +514,13 @@ internal sealed class ChatstronomyHubClient
                 {
                     try
                     {
-                        var payload = await provider.ExecuteAsync(query, cancellationToken)
+                        var payload = await provider.ExecuteAsync(
+                            query,
+                            cancellationToken,
+                            directSessionToken)
                             .ConfigureAwait(false);
                         response = DirectProtocol.SerializeSuccess(query.Id, payload);
+                        queryCompleted = true;
                     }
                     catch (Exception exception) when (
                         exception is not OperationCanceledException
@@ -513,6 +537,10 @@ internal sealed class ChatstronomyHubClient
         }
 
         await SendAsync(socket, sendGate, response, cancellationToken).ConfigureAwait(false);
+        if (queryCompleted)
+        {
+            provider.ConfirmDirectQueryResponse(query, directSessionToken);
+        }
     }
 
     private async Task HeartbeatLoopAsync(

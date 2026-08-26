@@ -8,7 +8,8 @@ namespace Chatstronomy.NINA.Direct;
 internal sealed class BoundedHistory<T>
 {
     private readonly object gate = new();
-    private readonly Queue<T> items;
+    private readonly Queue<BoundedHistoryEntry<T>> items;
+    private long sequence;
 
     internal BoundedHistory(int capacity)
     {
@@ -18,7 +19,7 @@ internal sealed class BoundedHistory<T>
         }
 
         Capacity = capacity;
-        items = new Queue<T>(capacity);
+        items = new Queue<BoundedHistoryEntry<T>>(capacity);
     }
 
     internal int Capacity { get; }
@@ -34,7 +35,7 @@ internal sealed class BoundedHistory<T>
         }
     }
 
-    internal void Add(T item)
+    internal long Add(T item)
     {
         lock (gate)
         {
@@ -42,11 +43,26 @@ internal sealed class BoundedHistory<T>
             {
                 items.Dequeue();
             }
-            items.Enqueue(item);
+            var next = ++sequence;
+            items.Enqueue(new BoundedHistoryEntry<T>(next, item));
+            return next;
         }
     }
 
     internal IReadOnlyList<T> Snapshot()
+    {
+        lock (gate)
+        {
+            return items.Select(entry => entry.Item).ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Returns the same bounded snapshot with an internal monotonic sequence.
+    /// The sequence is never serialized; it exists only so a replacement
+    /// Direct session can replay items that arrived during reconnection.
+    /// </summary>
+    internal IReadOnlyList<BoundedHistoryEntry<T>> SnapshotEntries()
     {
         lock (gate)
         {
@@ -72,8 +88,10 @@ internal sealed class BoundedHistory<T>
                 return false;
             }
 
-            item = items.ElementAt(index);
+            item = items.ElementAt(index).Item;
             return true;
         }
     }
 }
+
+internal sealed record BoundedHistoryEntry<T>(long Sequence, T Item);

@@ -349,6 +349,12 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendSequenceEvents), value);
     }
 
+    public bool SendSafetyEvents
+    {
+        get => options.GetValueBoolean(nameof(SendSafetyEvents), true);
+        set => options.SetValueBoolean(nameof(SendSafetyEvents), value);
+    }
+
     public bool SendTargetSchedulerEvents
     {
         get => options.GetValueBoolean(nameof(SendTargetSchedulerEvents), true);
@@ -415,6 +421,7 @@ internal sealed class ChatstronomySettings
         Guiding: SendGuidingEvents,
         Mount: SendMountEvents,
         Sequence: SendSequenceEvents,
+        Safety: SendSafetyEvents,
         TargetScheduler: SendTargetSchedulerEvents,
         FilterFocuserRotator: SendFilterFocuserRotatorEvents,
         EquipmentConnections: SendEquipmentConnectionEvents,

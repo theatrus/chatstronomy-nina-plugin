@@ -144,14 +144,86 @@ internal static class Program
             "Asynchronous command cancellations produce a visible terminal notification",
             CommandCancellationsAreVisible);
         await RunAsync(
+            "Stale asynchronous command completions cannot cross profile sessions",
+            StaleCommandCompletionsDoNotCrossProfiles);
+        await RunAsync(
+            "Profile history generations reject stale callback writes without erasing successors",
+            ProfileHistoryGenerationRejectsStaleWrites);
+        await RunAsync(
+            "Late log and popup callbacks cannot cross N.I.N.A. profiles",
+            LateBackgroundRecordsCannotCrossProfiles);
+        await RunAsync(
             "Disabled command-failure notifications never leave N.I.N.A.",
             CommandFailuresHonorOtherEventConsent);
         Run("Direct commands use semantic wire names", DirectCommandsUseSemanticWireNames);
         Run("Direct camera queries use the shared equipment contract", DirectCameraQueryUsesSharedContract);
         Run("Direct event delivery categories are independently configurable", DirectEventDeliveryIsConfigurable);
+        Run(
+            "Sequence privacy changes invalidate old Direct peers before consent changes",
+            SequencePrivacyChangesRotateOnlyDirectSession);
+        await RunAsync(
+            "Unrelated delivery changes preserve in-flight safety and autofocus events",
+            UnrelatedDeliveryChangesPreserveInflightEvents);
+        Run(
+            "Location privacy changes invalidate old Direct peers before consent changes",
+            LocationPrivacyChangesRotateBeforePublication);
+        await RunAsync(
+            "Queued automatic starts cannot cross Direct session rotations",
+            QueuedConfiguredStartsCannotCrossDirectSessions);
+        await RunAsync(
+            "Profile-change restarts cannot outlive plugin teardown",
+            ProfileChangeRestartsCannotOutliveTeardown);
+        Run(
+            "Plugin initialization resynchronizes the active profile before transport startup",
+            InitializationResynchronizesActiveProfile);
+        await RunAsync(
+            "Direct session rotation preserves profile-bound autofocus state",
+            DirectSessionRotationPreservesProfileWork);
+        await RunAsync(
+            "Direct session rotations replay events and images captured during reconnect",
+            DirectSessionRotationsReplayUnseenHistory);
+        await RunAsync(
+            "Direct session rotations replay the last written event and image delta",
+            DirectSessionRotationsReplayLastWrittenDelta);
+        await RunAsync(
+            "Direct session rotations retain autofocus delivery through report fetch",
+            DirectSessionRotationsRetainPendingAutofocusDelivery);
+        await RunAsync(
+            "Physical Direct reconnects replay the last delta without changing logical identity",
+            PhysicalDirectReconnectsReplayLastDelta);
         Run("N.I.N.A. log lines preserve structured source and message data", NinaLogLinesAreStructured);
         Run("N.I.N.A. popup colors map to chat severity", NinaPopupColorsMapToSeverity);
+        Run(
+            "N.I.N.A. popup watcher supports 3.2 and 3.3 without ToastNotifications",
+            NinaPopupWatcherSupportsBothNotificationImplementations);
         Run("Direct sequence marks chat-visible operations", DirectSequenceMarksChatVisibleOperations);
+        Run(
+            "Known Sequencer+ operations use safe projections and delivery controls",
+            DirectSequenceProjectsKnownSequencerPlusOperations);
+        Run(
+            "Wait-until-safe projection uses live safety state and both delivery controls",
+            DirectSequenceProjectsWaitUntilSafe);
+        Run(
+            "Disabled Target Scheduler sharing keeps children but hides target identity",
+            DirectSequenceHidesDisabledTargetContainers);
+        await RunAsync(
+            "Safety monitor transitions are normalized, deduplicated, and consent gated",
+            SafetyMonitorTransitionsAreNormalized);
+        await RunAsync(
+            "Autofocus completion waits for the matching N.I.N.A. report",
+            AutofocusCompletionWaitsForMatchingReport);
+        await RunAsync(
+            "Autofocus reports require in-session provenance and live consent",
+            AutofocusReportsRequireProvenanceAndLiveConsent);
+        await RunAsync(
+            "Autofocus report capture honors completion consent and profile generations",
+            AutofocusCaptureHonorsConsentAndGenerations);
+        await RunAsync(
+            "Profile changes cancel pending autofocus report reads",
+            ProfileChangesCancelPendingAutofocusReads);
+        await RunAsync(
+            "Disabled guiding samples are never retained for later sharing",
+            DisabledGuidingSamplesAreNotRetained);
         Run("Direct guider payload matches the Rust chart contract", DirectGuiderPayloadMatchesRustChart);
         Run("Direct query results match Rust envelope", DirectQueryResultsMatchRustEnvelope);
         Run("Direct histories stay insertion ordered and bounded", DirectHistoriesAreBounded);
@@ -676,7 +748,8 @@ internal static class Program
             ["{Binding SendAutofocusEvents}"] = "Autofocus results",
             ["{Binding SendGuidingEvents}"] = "Guiding and dithering",
             ["{Binding SendMountEvents}"] = "Mount, slew, and center",
-            ["{Binding SendSequenceEvents}"] = "Sequence, waits, and cooling",
+            ["{Binding SendSequenceEvents}"] = "Sequence, timed waits, and cooling",
+            ["{Binding SendSafetyEvents}"] = "Safety monitor and safety waits",
             ["{Binding SendTargetSchedulerEvents}"] = "Targets and Target Scheduler",
             ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator",
             ["{Binding SendEquipmentConnectionEvents}"] = "Equipment connections",
@@ -1428,6 +1501,15 @@ internal static class Program
         AssertFalse(thumbnailResult.GetProperty("ok").GetBoolean());
         AssertTrue(thumbnailResult.GetProperty("error").GetString()!
             .Contains("Image sharing is disabled", StringComparison.Ordinal));
+
+        await writer.WriteLineAsync(QueryJson(Guid.NewGuid(), "guider_graph"));
+        var guiderJson = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Local guider graph denial was not returned.");
+        using var guiderGraph = JsonDocument.Parse(guiderJson);
+        var guiderResult = guiderGraph.RootElement.GetProperty("payload");
+        AssertFalse(guiderResult.GetProperty("ok").GetBoolean());
+        AssertTrue(guiderResult.GetProperty("error").GetString()!
+            .Contains("Guiding graph sharing is disabled", StringComparison.Ordinal));
     }
 
     private static async Task HostedConnectionsDoNotTransmitDisabledEvents()
@@ -1676,9 +1758,10 @@ internal static class Program
             ["Azimuth"] = 165d,
             ["Observers"] = new object[] { observer },
         };
-        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
-            "AddEventCore",
-            BindingFlags.Instance | BindingFlags.NonPublic)
+        var addEvent = typeof(NinaDirectDataProvider)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "AddEventCore"
+                && method.GetParameters().Length == 4)
             ?? throw new InvalidOperationException("Event history recorder was not found.");
         addEvent.Invoke(
             provider,
@@ -1762,6 +1845,7 @@ internal static class Program
                 "Move",
                 12,
                 "Original private warning"),
+            GetHistoryGeneration(provider),
         });
         recordLog.Invoke(provider, new object[]
         {
@@ -1772,6 +1856,7 @@ internal static class Program
                 "Cool",
                 34,
                 "Original private error"),
+            GetHistoryGeneration(provider),
         });
         AssertEqual(2, (await SnapshotEvents(provider)).Length);
 
@@ -1788,6 +1873,7 @@ internal static class Program
                 "Move",
                 99,
                 "Warning captured without consent"),
+            GetHistoryGeneration(provider),
         });
 
         delivery.Update(DirectEventDeliveryOptions.Default);
@@ -1822,6 +1908,8 @@ internal static class Program
                 options => options with { Mount = false }),
             ("sequence", new[] { "SEQUENCE-STARTING", "SEQUENCE-FINISHED" },
                 options => options with { Sequence = false }),
+            ("safety", new[] { "SAFETY-CONNECTED", "SAFETY-CHANGED", "SAFETY-DISCONNECTED" },
+                options => options with { Safety = false }),
             ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
                 options => options with { TargetScheduler = false }),
             ("filter, focuser, and rotator", new[]
@@ -1915,14 +2003,37 @@ internal static class Program
         string eventName,
         string marker)
     {
-        var addEvent = typeof(NinaDirectDataProvider).GetMethod(
-            "AddEvent",
-            BindingFlags.Instance | BindingFlags.NonPublic)
+        var addEvent = typeof(NinaDirectDataProvider)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "AddEvent"
+                && method.GetParameters().Length == 2
+                && method.GetParameters()[0].ParameterType == typeof(string))
             ?? throw new InvalidOperationException("N.I.N.A. event recorder was not found.");
         addEvent.Invoke(provider, new object[]
         {
             eventName,
             new (string Name, object? Value)[] { ("Marker", marker) },
+        });
+    }
+
+    private static void RecordInternalLog(
+        NinaDirectDataProvider provider,
+        string message)
+    {
+        var recordLog = typeof(NinaDirectDataProvider).GetMethod(
+            "RecordLog",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("N.I.N.A. log recorder was not found.");
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.UtcNow,
+                "INFO",
+                "ReplayTest",
+                "Record",
+                1,
+                message),
+            GetHistoryGeneration(provider),
         });
     }
 
@@ -2048,8 +2159,11 @@ internal static class Program
             BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("Command observer was not found.");
         var completion = new TaskCompletionSource<object?>();
-        observeCommand.Invoke(provider, new object[] { completion.Task, "Cool camera" });
+        var observation = (Task)observeCommand.Invoke(
+            provider,
+            new object[] { completion.Task, "Cool camera", GetCommandGeneration(provider) })!;
         completion.SetCanceled();
+        await observation;
 
         var history = await provider.ExecuteAsync(
             new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory),
@@ -2091,11 +2205,59 @@ internal static class Program
         AssertEqual(0, (await SnapshotEvents(provider)).Length);
     }
 
+    private static async Task StaleCommandCompletionsDoNotCrossProfiles()
+    {
+        var delivery = DirectEventDeliveryOptions.Default with { OtherEvents = true };
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            delivery);
+        var observeCommand = typeof(NinaDirectDataProvider).GetMethod(
+            "ObserveCommand",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Command observer was not found.");
+        var staleFault = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var staleCancel = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var staleGeneration = GetCommandGeneration(provider);
+        var staleFaultObservation = (Task)observeCommand.Invoke(
+            provider,
+            new object[] { staleFault.Task, "Park mount", staleGeneration })!;
+        var staleCancelObservation = (Task)observeCommand.Invoke(
+            provider,
+            new object[] { staleCancel.Task, "Cool camera", staleGeneration })!;
+
+        provider.RevokeProfileAccess();
+        provider.Reset();
+        staleFault.SetException(new InvalidOperationException("private predecessor failure"));
+        staleCancel.SetCanceled();
+        await Task.WhenAll(staleFaultObservation, staleCancelObservation);
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        var currentFailure = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var currentObservation = (Task)observeCommand.Invoke(
+            provider,
+            new object[]
+            {
+                currentFailure.Task,
+                "Home mount",
+                GetCommandGeneration(provider),
+            })!;
+        currentFailure.SetException(new InvalidOperationException("current failure"));
+        await currentObservation;
+        var currentEvents = await SnapshotEvents(provider);
+        AssertEqual(1, currentEvents.Length);
+        AssertEqual("Home mount", currentEvents[0].GetProperty("Command").GetString());
+    }
+
     private static NinaDirectDataProvider CreateSecurityTestProvider(
         DirectAccessPolicy access,
         DirectEventDeliveryOptions? delivery = null,
         DirectEventDeliveryPolicy? deliveryPolicy = null,
-        ITelescopeMediator? telescope = null) => new(
+        ITelescopeMediator? telescope = null,
+        ISafetyMonitorMediator? safetyMonitor = null,
+        string? autofocusReportDirectory = null) => new(
             profileService: null!,
             telescope: telescope!,
             camera: null!,
@@ -2104,6 +2266,7 @@ internal static class Program
             rotator: null!,
             focuser: null!,
             sequence: null!,
+            safetyMonitor: safetyMonitor!,
             imageSave: null!,
             applicationStatus: null!,
             autoFocusFactory: null!,
@@ -2112,7 +2275,8 @@ internal static class Program
             messageBroker: null!,
             eventDelivery: deliveryPolicy ?? new DirectEventDeliveryPolicy(
                 delivery ?? DirectEventDeliveryOptions.Default),
-            accessPolicy: access);
+            accessPolicy: access,
+            autofocusReportDirectory: autofocusReportDirectory);
 
     private static void DirectCommandsUseSemanticWireNames()
     {
@@ -2202,6 +2366,7 @@ internal static class Program
         var options = DirectEventDeliveryOptions.Default with
         {
             Guiding = false,
+            Safety = false,
             EquipmentConnections = false,
             TargetScheduler = false,
             NinaLogWarnings = true,
@@ -2209,6 +2374,8 @@ internal static class Program
 
         AssertFalse(options.ShouldSendEvent("GUIDER-DITHER"));
         AssertFalse(options.ShouldSendEvent("GUIDER-CONNECTED"));
+        AssertFalse(options.ShouldSendEvent("SAFETY-CONNECTED"));
+        AssertFalse(options.ShouldSendEvent("SAFETY-CHANGED"));
         AssertFalse(options.ShouldSendEvent("TS-TARGETSTART"));
         AssertTrue(options.ShouldSendEvent("MOUNT-CENTER"));
         AssertTrue(options.ShouldSendLogLevel("WARNING"));
@@ -2279,6 +2446,114 @@ internal static class Program
             new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Blue)));
     }
 
+    private static void NinaPopupWatcherSupportsBothNotificationImplementations()
+    {
+        AssertFalse(typeof(NinaNotificationWatcher).Assembly
+            .GetReferencedAssemblies()
+            .Any(assembly => string.Equals(
+                assembly.Name,
+                "ToastNotifications",
+                StringComparison.OrdinalIgnoreCase)));
+
+        var nativeRecords = new List<(NinaNotificationRecord Record, long Generation)>();
+        using (var watcher = new NinaNotificationWatcher(
+            (record, generation) => nativeRecords.Add((record, generation))))
+        {
+            var manager = new NativeNotificationManagerStub();
+            AssertTrue(watcher.TryObserveNativeManager(manager, captureGeneration: 101));
+            manager.Notifications.Add(new NotificationStub(
+                new DateTime(2026, 8, 25, 20, 1, 2),
+                " Warning ",
+                " Native popup ",
+                new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Gold)));
+            AssertEqual(1, nativeRecords.Count);
+            AssertEqual(101L, nativeRecords[0].Generation);
+            AssertEqual("WARNING", nativeRecords[0].Record.Level);
+            AssertEqual("Warning", nativeRecords[0].Record.Header);
+            AssertEqual("Native popup", nativeRecords[0].Record.Message);
+
+            watcher.Stop();
+            manager.Notifications.Add(new NotificationStub(
+                DateTime.Now,
+                "Ignored",
+                "Unsubscribed",
+                null));
+            AssertEqual(1, nativeRecords.Count);
+        }
+
+        var legacyRecords = new List<(NinaNotificationRecord Record, long Generation)>();
+        using (var watcher = new NinaNotificationWatcher(
+            (record, generation) => legacyRecords.Add((record, generation))))
+        {
+            var notifier = new LegacyNotifierStub();
+            AssertTrue(watcher.TryObserveLegacyNotifier(notifier, captureGeneration: 202));
+            AssertTrue(notifier.ConfigureCalled);
+            notifier.Show(new NotificationStub(
+                new DateTime(2026, 8, 25, 20, 3, 4),
+                "Error",
+                "Legacy popup",
+                new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Red)));
+            AssertEqual(1, legacyRecords.Count);
+            AssertEqual(202L, legacyRecords[0].Generation);
+            AssertEqual("ERROR", legacyRecords[0].Record.Level);
+            AssertEqual("Legacy popup", legacyRecords[0].Record.Message);
+
+            watcher.Stop();
+            notifier.Show(new NotificationStub(
+                DateTime.Now,
+                "Ignored",
+                "Unsubscribed",
+                null));
+            AssertEqual(1, legacyRecords.Count);
+        }
+    }
+
+    private sealed class NativeNotificationManagerStub
+    {
+        public System.Collections.ObjectModel.ObservableCollection<object> Notifications { get; } = new();
+    }
+
+    private sealed record NotificationStub(
+        DateTime DateTime,
+        string Header,
+        string Message,
+        System.Windows.Media.Brush? Color);
+
+    private sealed class LegacyNotifierStub
+    {
+        private LegacyLifetimeSupervisorStub? _lifetimeSupervisor;
+
+        internal bool ConfigureCalled { get; private set; }
+
+        internal void Show(object notification) => _lifetimeSupervisor!.Show(notification);
+
+        private void Configure()
+        {
+            ConfigureCalled = true;
+            _lifetimeSupervisor = new LegacyLifetimeSupervisorStub();
+        }
+    }
+
+    private sealed class LegacyLifetimeSupervisorStub
+    {
+        public event EventHandler<LegacyShowNotificationEventArgsStub>? ShowNotificationRequested;
+
+        internal void Show(object notification) =>
+            ShowNotificationRequested?.Invoke(
+                this,
+                new LegacyShowNotificationEventArgsStub(notification));
+    }
+
+    private sealed class LegacyShowNotificationEventArgsStub : EventArgs
+    {
+        internal LegacyShowNotificationEventArgsStub(object notification)
+        {
+            Notification = notification;
+        }
+
+        public object Notification { get; }
+    }
+
     private static void DirectSequenceMarksChatVisibleOperations()
     {
         var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
@@ -2288,7 +2563,8 @@ internal static class Program
 
         var wait = new global::NINA.Sequencer.SequenceItem.Utility.WaitForTimeSpan { Time = 90 };
         var waitDetails = new Dictionary<string, object?>();
-        method.Invoke(null, new object[] { wait, waitDetails });
+        method.Invoke(null, new object?[]
+            { wait, waitDetails, null, DirectEventDeliveryOptions.Default });
         AssertEqual("time_wait", waitDetails["OperationKind"] as string);
         AssertEqual(90.0, Convert.ToDouble(waitDetails["Delay"]));
         AssertEqual(TimeSpan.FromSeconds(90), (TimeSpan)waitDetails["CalculatedWaitDuration"]!);
@@ -2299,14 +2575,16 @@ internal static class Program
             Duration = 15,
         };
         var coolingDetails = new Dictionary<string, object?>();
-        method.Invoke(null, new object[] { cooling, coolingDetails });
+        method.Invoke(null, new object?[]
+            { cooling, coolingDetails, null, DirectEventDeliveryOptions.Default });
         AssertEqual("camera_cooling", coolingDetails["OperationKind"] as string);
         AssertEqual(-10.0, Convert.ToDouble(coolingDetails["Temperature"]));
         AssertEqual(15.0, Convert.ToDouble(coolingDetails["MinCoolingTime"]));
 
         var slew = new global::NINA.Sequencer.SequenceItem.Telescope.SlewScopeToRaDec(null!, null!);
         var slewDetails = new Dictionary<string, object?>();
-        method.Invoke(null, new object[] { slew, slewDetails });
+        method.Invoke(null, new object?[]
+            { slew, slewDetails, null, DirectEventDeliveryOptions.Default });
         AssertEqual("mount_slew", slewDetails["OperationKind"] as string);
 
         var center = new global::NINA.Sequencer.SequenceItem.Platesolving.Center(
@@ -2338,7 +2616,8 @@ internal static class Program
             new byte[] { 0, 0, 0, 255 },
             4);
         var centerDetails = new Dictionary<string, object?>();
-        method.Invoke(null, new object[] { center, centerDetails });
+        method.Invoke(null, new object?[]
+            { center, centerDetails, null, DirectEventDeliveryOptions.Default });
         AssertEqual("mount_center", centerDetails["OperationKind"] as string);
         var output = (Dictionary<string, object?>)centerDetails["PlateSolveOutput"]!;
         AssertEqual(true, Convert.ToBoolean(output["Success"]));
@@ -2348,6 +2627,1218 @@ internal static class Program
         AssertFalse(output.ContainsKey("ThumbnailMediaType"));
         var wire = JsonSerializer.Serialize(centerDetails, DirectProtocol.JsonOptions);
         AssertFalse(wire.Contains("Thumbnail", StringComparison.Ordinal));
+    }
+
+    private static void DirectSequenceProjectsWaitUntilSafe()
+    {
+        var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
+            "BuildItem",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Sequence item projector was not found.");
+
+        var builtIn = new global::NINA.Sequencer.SequenceItem.SafetyMonitor.WaitUntilSafe(null!)
+        {
+            WaitInterval = TimeSpan.FromSeconds(3),
+        };
+        var builtInProjection = (Dictionary<string, object?>)method.Invoke(
+            null,
+            new object?[] { builtIn, DirectEventDeliveryOptions.Default, true })!;
+        AssertEqual("safety_wait", builtInProjection["OperationKind"] as string);
+        AssertEqual(true, Convert.ToBoolean(builtInProjection["IsSafe"]));
+        AssertEqual(TimeSpan.FromSeconds(3), (TimeSpan)builtInProjection["WaitInterval"]!);
+        AssertEqual(true, Convert.ToBoolean(builtInProjection["ChatEnabled"]));
+
+        var sequencerPlus = new global::SequencerPlus.Instructions.WaitUntilSafe
+        {
+            WaitInterval = TimeSpan.FromSeconds(7),
+        };
+        var sequencerPlusProjection = (Dictionary<string, object?>)method.Invoke(
+            null,
+            new object?[] { sequencerPlus, DirectEventDeliveryOptions.Default, false })!;
+        AssertEqual("safety_wait", sequencerPlusProjection["OperationKind"] as string);
+        AssertEqual(false, Convert.ToBoolean(sequencerPlusProjection["IsSafe"]));
+        AssertEqual(TimeSpan.FromSeconds(7), (TimeSpan)sequencerPlusProjection["WaitInterval"]!);
+        AssertEqual(true, Convert.ToBoolean(sequencerPlusProjection["ChatEnabled"]));
+
+        foreach (var delivery in new[]
+        {
+            DirectEventDeliveryOptions.Default with { Sequence = false },
+            DirectEventDeliveryOptions.Default with { Safety = false },
+            DirectEventDeliveryOptions.Default with { Sequence = false, Safety = false },
+        })
+        {
+            var gatedProjection = (Dictionary<string, object?>)method.Invoke(
+                null,
+                new object?[] { sequencerPlus, delivery, false })!;
+            AssertEqual(false, Convert.ToBoolean(gatedProjection["ChatEnabled"]));
+            AssertEqual(true, Convert.ToBoolean(gatedProjection["Suppressed"]));
+            AssertEqual("Suppressed_SequenceItem", gatedProjection["Name"] as string);
+            AssertEqual("SUPPRESSED", gatedProjection["Status"] as string);
+            AssertFalse(gatedProjection.ContainsKey("OperationKind"));
+            AssertFalse(gatedProjection.ContainsKey("IsSafe"));
+            AssertFalse(gatedProjection.ContainsKey("WaitInterval"));
+        }
+    }
+
+    private static void SequencePrivacyChangesRotateOnlyDirectSession()
+    {
+        var provider = new FakeDirectDataProvider();
+        var policy = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        var oldDirectSession = provider.DirectSessionToken;
+        var profileSession = provider.ProfileSessionToken;
+        var updateObservedCancelledSession = false;
+        var updateObservedSuspendedCapture = true;
+        var selected = policy.Current with { Safety = false };
+
+        ChatstronomyPlugin.ApplyEventDeliveryChange(
+            provider,
+            policy,
+            rollDirectSession: true,
+            update: () =>
+            {
+                updateObservedCancelledSession = oldDirectSession.IsCancellationRequested;
+                updateObservedSuspendedCapture = provider.EventCaptureSuspended;
+            },
+            readOptions: () => selected);
+
+        AssertTrue(updateObservedCancelledSession);
+        AssertFalse(updateObservedSuspendedCapture);
+        AssertFalse(provider.EventCaptureSuspended);
+        AssertTrue(oldDirectSession.IsCancellationRequested);
+        AssertFalse(profileSession.IsCancellationRequested);
+        AssertEqual(1, provider.DirectSessionRotationCount);
+        AssertEqual(0, provider.RevocationCount);
+        AssertFalse(policy.Current.Safety);
+
+        ChatstronomyPlugin.ApplyEventDeliveryChange(
+            provider,
+            policy,
+            rollDirectSession: false,
+            update: () => selected = selected with { Autofocus = false },
+            readOptions: () => selected);
+        AssertEqual(1, provider.DirectSessionRotationCount);
+        AssertEqual(0, provider.RevocationCount);
+        AssertFalse(policy.Current.Autofocus);
+        AssertEqual(0, provider.EventCaptureSuspendCount);
+        AssertEqual(0, provider.EventCaptureResumeCount);
+    }
+
+    private static async Task UnrelatedDeliveryChangesPreserveInflightEvents()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var type = typeof(NinaDirectDataProvider);
+        var captureHistory = type.GetMethod(
+            "CaptureHistoryGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("History generation reader was not found.");
+        var historyGeneration = (long)captureHistory.Invoke(provider, null)!;
+        var completion = new DirectAutofocusCompletion(
+            "Ha",
+            Position: 4_200,
+            Temperature: -5,
+            Timestamp: new DateTime(2026, 8, 26, 4, 0, 0, DateTimeKind.Utc),
+            ProfileId: null,
+            ChatEnabled: true);
+        SetPendingAutofocusCompletion(provider, completion);
+        (type.GetField(
+            "pendingAutofocusHistoryGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Pending autofocus history generation was not found."))
+            .SetValue(provider, historyGeneration);
+
+        var selected = delivery.Current with { Images = false };
+        ChatstronomyPlugin.ApplyEventDeliveryChange(
+            provider,
+            delivery,
+            rollDirectSession: true,
+            update: () => { },
+            readOptions: () => selected);
+
+        var recordSafety = type.GetMethod(
+            "RecordSafetyState",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Safety state recorder was not found.");
+        recordSafety.Invoke(provider, new object[] { historyGeneration, true, false });
+
+        var addAutofocus = type.GetMethod(
+            "AddAutofocusFinishedEvent",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Autofocus event writer was not found.");
+        var started = type.GetField("started", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Provider started flag was not found.");
+        started.SetValue(provider, true);
+        try
+        {
+            addAutofocus.Invoke(provider, new object[]
+            {
+                completion,
+                GetAutofocusCaptureGeneration(provider),
+            });
+        }
+        finally
+        {
+            started.SetValue(provider, false);
+        }
+
+        var events = await SnapshotEvents(provider);
+        AssertTrue(events.Any(item =>
+            item.GetProperty("Event").GetString() == "SAFETY-CHANGED"));
+        AssertTrue(events.Any(item =>
+            item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED"));
+    }
+
+    private static void LocationPrivacyChangesRotateBeforePublication()
+    {
+        using var provider = new FakeDirectDataProvider();
+        var policy = new DirectAccessPolicy(
+            DirectAccessOptions.Default with { ShareObservatoryLocation = true });
+        var oldSession = provider.DirectSessionToken;
+        var updateObservedCancellation = false;
+
+        ChatstronomyPlugin.ApplyLocationPrivacyChange(
+            provider,
+            policy,
+            update: () => updateObservedCancellation = oldSession.IsCancellationRequested,
+            readOptions: () => policy.Current with { ShareObservatoryLocation = false });
+
+        AssertTrue(updateObservedCancellation);
+        AssertTrue(oldSession.IsCancellationRequested);
+        AssertFalse(policy.Current.ShareObservatoryLocation);
+    }
+
+    private static async Task QueuedConfiguredStartsCannotCrossDirectSessions()
+    {
+        using var provider = new FakeDirectDataProvider();
+        using var gate = new SemaphoreSlim(0, 1);
+        var startCount = 0;
+        var queued = ChatstronomyPlugin.RunForCurrentDirectSessionAsync(
+            provider,
+            gate,
+            _ =>
+            {
+                Interlocked.Increment(ref startCount);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        provider.RotateDirectSession();
+        gate.Release();
+        await AssertThrowsAsync<OperationCanceledException>(() => queued);
+        AssertEqual(0, startCount);
+
+        await ChatstronomyPlugin.RunForCurrentDirectSessionAsync(
+            provider,
+            gate,
+            _ =>
+            {
+                Interlocked.Increment(ref startCount);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+        AssertEqual(1, startCount);
+    }
+
+    private static async Task ProfileChangeRestartsCannotOutliveTeardown()
+    {
+        using var provider = new FakeDirectDataProvider();
+
+        // A callback queued behind another lifecycle operation must become a
+        // no-op when teardown marks the plugin uninitialized and rotates the
+        // session before releasing the gate.
+        using (var gate = new SemaphoreSlim(0, 1))
+        {
+            var initialized = true;
+            var stopCount = 0;
+            var startCount = 0;
+            var profileSession = provider.DirectSessionToken;
+            var restart = ChatstronomyPlugin.RunProfileChangeRestartAsync(
+                provider,
+                gate,
+                () => initialized,
+                () =>
+                {
+                    Interlocked.Increment(ref stopCount);
+                    return Task.CompletedTask;
+                },
+                _ =>
+                {
+                    Interlocked.Increment(ref startCount);
+                    return Task.CompletedTask;
+                });
+
+            initialized = false;
+            provider.RotateDirectSession();
+            gate.Release();
+            await restart;
+
+            AssertTrue(profileSession.IsCancellationRequested);
+            AssertEqual(0, stopCount);
+            AssertEqual(0, startCount);
+        }
+
+        // Teardown can also begin while a profile callback is already
+        // stopping the predecessor transport. The second stale guard must
+        // prevent the callback from starting its replacement.
+        using (var gate = new SemaphoreSlim(1, 1))
+        {
+            var initialized = true;
+            var stopEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseStop = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var startCount = 0;
+            var restart = ChatstronomyPlugin.RunProfileChangeRestartAsync(
+                provider,
+                gate,
+                () => initialized,
+                async () =>
+                {
+                    stopEntered.SetResult();
+                    await releaseStop.Task;
+                },
+                _ =>
+                {
+                    Interlocked.Increment(ref startCount);
+                    return Task.CompletedTask;
+                });
+
+            await stopEntered.Task;
+            initialized = false;
+            provider.RotateDirectSession();
+            releaseStop.SetResult();
+            await restart;
+
+            AssertEqual(0, startCount);
+            AssertEqual(1, gate.CurrentCount);
+        }
+    }
+
+    private static void InitializationResynchronizesActiveProfile()
+    {
+        var gate = new object();
+        var activeProfile = "old-profile";
+        string? synchronizedProfile = null;
+        var initialized = false;
+
+        // Model ProfileChanged firing while PluginBase.Initialize is awaited:
+        // the active profile has changed before the completion boundary runs.
+        activeProfile = "new-profile";
+        ChatstronomyPlugin.CompleteInitializationProfileBoundary(
+            gate,
+            synchronizeActiveProfile: () => synchronizedProfile = activeProfile,
+            markInitialized: () => initialized = true);
+
+        AssertTrue(initialized);
+        AssertEqual("new-profile", synchronizedProfile);
+    }
+
+    private static async Task DirectSessionRotationPreservesProfileWork()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-transport-rotation-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                autofocusReportDirectory: reportDirectory);
+            var profileSession = provider.ProfileSessionToken;
+            var directSession = provider.DirectSessionToken;
+            var directSessionId = provider.DirectSessionId;
+            var autofocusGeneration = GetAutofocusCaptureGeneration(provider);
+            var commandGeneration = GetCommandGeneration(provider);
+            var timestamp = new DateTime(2026, 8, 26, 4, 0, 0, DateTimeKind.Utc);
+            var profileId = Guid.NewGuid();
+            var completion = new DirectAutofocusCompletion(
+                "Ha",
+                Position: 4_200,
+                Temperature: -5,
+                timestamp,
+                profileId,
+                ChatEnabled: true);
+            SetPendingAutofocusCompletion(provider, completion);
+            var capture = typeof(NinaDirectDataProvider).GetMethod(
+                "CaptureCompletedAutofocusAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Autofocus capture task was not found.");
+            var pending = (Task)capture.Invoke(
+                provider,
+                new object[]
+                {
+                    completion,
+                    autofocusGeneration,
+                    CancellationToken.None,
+                    profileSession,
+                })!;
+
+            await Task.Delay(150);
+            provider.RotateDirectSession();
+            var reportPath = Path.Combine(
+                reportDirectory,
+                $"{timestamp:yyyy-MM-dd--HH-mm-ss}--{profileId:D}.json");
+            await File.WriteAllTextAsync(
+                reportPath,
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    Filter = "Ha",
+                    CalculatedFocusPoint = new { Position = 4_200 },
+                }));
+
+            var completed = await Task.WhenAny(pending, Task.Delay(1_500));
+            AssertTrue(ReferenceEquals(pending, completed));
+            await pending;
+
+            AssertTrue(directSession.IsCancellationRequested);
+            AssertFalse(provider.DirectSessionId == directSessionId);
+            AssertFalse(profileSession.IsCancellationRequested);
+            AssertEqual(autofocusGeneration, GetAutofocusCaptureGeneration(provider));
+            AssertEqual(commandGeneration, GetCommandGeneration(provider));
+            _ = await provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+                CancellationToken.None);
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task ProfileHistoryGenerationRejectsStaleWrites()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        var capture = typeof(NinaDirectDataProvider).GetMethod(
+            "CaptureHistoryGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("History generation reader was not found.");
+        var add = typeof(NinaDirectDataProvider)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "AddEvent"
+                && method.GetParameters().Length == 3
+                && method.GetParameters()[0].ParameterType == typeof(long));
+        long Generation() => (long)capture.Invoke(provider, null)!;
+        void Add(long generation, string marker) => add.Invoke(
+            provider,
+            new object[]
+            {
+                generation,
+                "SAFETY-CHANGED",
+                new (string Name, object? Value)[] { ("Marker", marker) },
+            });
+
+        var predecessor = Generation();
+        provider.RevokeProfileAccess();
+        Add(predecessor, "PRIVATE_PREDECESSOR_CALLBACK");
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        provider.Reset();
+        var successor = Generation();
+        Add(successor, "successor-callback");
+        var events = await SnapshotEvents(provider);
+        AssertEqual(1, events.Length);
+        AssertEqual("successor-callback", events[0].GetProperty("Marker").GetString());
+    }
+
+    private static async Task LateBackgroundRecordsCannotCrossProfiles()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { NinaLogInformation = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var type = typeof(NinaDirectDataProvider);
+        var capture = type.GetMethod(
+            "CaptureHistoryGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("History generation reader was not found.");
+        var recordLog = type.GetMethod(
+            "RecordLog",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Log recorder was not found.");
+        var recordNotification = type.GetMethod(
+            "RecordNotification",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Notification recorder was not found.");
+        var predecessorGeneration = (long)capture.Invoke(provider, null)!;
+
+        provider.RevokeProfileAccess();
+        provider.Reset();
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.Now,
+                "INFORMATION",
+                "OldProfile",
+                "Tail",
+                1,
+                "private predecessor line"),
+            predecessorGeneration,
+        });
+        recordNotification.Invoke(provider, new object[]
+        {
+            new NinaNotificationRecord(
+                DateTime.Now,
+                "WARNING",
+                "Old profile",
+                "private predecessor popup"),
+            predecessorGeneration,
+        });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        var successorGeneration = (long)capture.Invoke(provider, null)!;
+        recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(
+                DateTime.Now,
+                "INFORMATION",
+                "NewProfile",
+                "Tail",
+                2,
+                "successor line"),
+            successorGeneration,
+        });
+        recordNotification.Invoke(provider, new object[]
+        {
+            new NinaNotificationRecord(
+                DateTime.Now,
+                "WARNING",
+                "New profile",
+                "successor popup"),
+            successorGeneration,
+        });
+        AssertEqual(2, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task DirectSessionRotationsReplayUnseenHistory()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { NinaLogInformation = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "autofocus-before");
+        RecordInternalEvent(provider, "SAFETY-CHANGED", "safety-before");
+        RecordInternalLog(provider, "log-before");
+        AddInternalImage(provider, chatEnabled: true, value: 101);
+
+        var firstSession = provider.DirectSessionToken;
+        var originalEvents = await SnapshotTrackedEvents(provider, firstSession);
+        var originalImages = await SnapshotTrackedImages(provider, firstSession);
+        AssertEqual(3, originalEvents.Items.Length);
+        AssertEqual(1, originalImages.Items.Length);
+
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "autofocus-during");
+        RecordInternalEvent(provider, "SAFETY-CHANGED", "safety-during");
+        RecordInternalLog(provider, "log-during");
+        AddInternalImage(provider, chatEnabled: true, value: 202);
+
+        // The first replacement updater must receive only the predecessor's
+        // confirmed baseline. Rotate it again before its second poll to prove
+        // the inherited cursor remains per-session rather than being reset to
+        // the current history tail.
+        provider.RotateDirectSession();
+        var secondSession = provider.DirectSessionToken;
+        var secondBaselineEvents = await SnapshotTrackedEvents(provider, secondSession);
+        var secondBaselineImages = await SnapshotTrackedImages(provider, secondSession);
+        AssertHistoryContainsOnlyBeforeReconnect(secondBaselineEvents.Items);
+        AssertEqual(101, secondBaselineImages.Items.Single().GetProperty("Gain").GetInt32());
+
+        provider.RotateDirectSession();
+        var thirdSession = provider.DirectSessionToken;
+        var thirdBaselineEvents = await SnapshotTrackedEvents(provider, thirdSession);
+        var thirdBaselineImages = await SnapshotTrackedImages(provider, thirdSession);
+        AssertHistoryContainsOnlyBeforeReconnect(thirdBaselineEvents.Items);
+        AssertEqual(101, thirdBaselineImages.Items.Single().GetProperty("Gain").GetInt32());
+
+        var replayedEvents = await SnapshotTrackedEvents(provider, thirdSession);
+        var replayedImages = await SnapshotTrackedImages(provider, thirdSession);
+        AssertEqual(6, replayedEvents.Items.Length);
+        AssertTrue(replayedEvents.Items.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString() == "autofocus-during"));
+        AssertTrue(replayedEvents.Items.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString() == "safety-during"));
+        AssertTrue(replayedEvents.Items.Any(item =>
+            item.TryGetProperty("Message", out var message)
+            && message.GetString() == "log-during"));
+        AssertEqual(2, replayedImages.Items.Length);
+        AssertEqual(202, replayedImages.Items[1].GetProperty("Gain").GetInt32());
+
+        foreach (var wire in new[]
+        {
+            secondBaselineEvents.Wire,
+            secondBaselineImages.Wire,
+            replayedEvents.Wire,
+            replayedImages.Wire,
+        })
+        {
+            AssertFalse(wire.Contains("cursor", StringComparison.OrdinalIgnoreCase));
+            AssertFalse(wire.Contains("watermark", StringComparison.OrdinalIgnoreCase));
+            AssertFalse(wire.Contains("historysequence", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private static async Task DirectSessionRotationsRetainPendingAutofocusDelivery()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        var firstSession = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, firstSession)).Items.Length);
+
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "pending-report");
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, firstSession)).Items.Length);
+
+        // The history response has reached the old transport, but its updater
+        // has not yet obtained LastAutofocus. A replacement baseline must hide
+        // the event once and the next poll must expose it for a fresh retry.
+        provider.RotateDirectSession();
+        var secondSession = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, secondSession)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, secondSession)).Items.Length);
+
+        var failedReportQuery = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.LastAutofocus);
+        await AssertThrowsAsync<InvalidOperationException>(() => provider.ExecuteAsync(
+            failedReportQuery,
+            CancellationToken.None,
+            secondSession));
+
+        // A failed report fetch is not an acknowledgement. The pending event
+        // survives another complete Direct generation.
+        provider.RotateDirectSession();
+        var thirdSession = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, thirdSession)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, thirdSession)).Items.Length);
+
+        var timestamp = new DateTime(2026, 8, 26, 5, 0, 0, DateTimeKind.Utc);
+        var completion = new DirectAutofocusCompletion(
+            "L",
+            Position: 3_500,
+            Temperature: -4,
+            timestamp,
+            ProfileId: null,
+            ChatEnabled: true);
+        SetPendingAutofocusCompletion(provider, completion);
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            JsonSerializer.SerializeToElement(new
+            {
+                Timestamp = timestamp,
+                Filter = "L",
+                CalculatedFocusPoint = new { Position = 3_500 },
+            }),
+            GetAutofocusCaptureGeneration(provider),
+            chatEnabledAtCompletion: true));
+        var successfulReportQuery = new DirectQuery(
+            Guid.NewGuid(),
+            DirectQueryKind.LastAutofocus);
+        _ = await provider.ExecuteAsync(
+            successfulReportQuery,
+            CancellationToken.None,
+            thirdSession);
+        provider.ConfirmDirectQueryResponse(successfulReportQuery, thirdSession);
+
+        // A successful report read is still not proof that chart rendering or
+        // the chat upload completed. Keep the latest AF completion at-least-
+        // once across a later forced rotation too.
+        provider.RotateDirectSession();
+        var acknowledgedSession = provider.DirectSessionToken;
+        AssertEqual(
+            0,
+            (await SnapshotTrackedEvents(provider, acknowledgedSession)).Items.Length);
+        AssertEqual(
+            1,
+            (await SnapshotTrackedEvents(provider, acknowledgedSession)).Items.Length);
+    }
+
+    private static async Task DirectSessionRotationsReplayLastWrittenDelta()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { NinaLogInformation = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var firstSession = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, firstSession)).Items.Length);
+        AssertEqual(0, (await SnapshotTrackedImages(provider, firstSession)).Items.Length);
+
+        RecordInternalEvent(provider, "SAFETY-CHANGED", "last-written-safety");
+        RecordInternalLog(provider, "last-written-log");
+        AddInternalImage(provider, chatEnabled: true, value: 77);
+        AssertEqual(2, (await SnapshotTrackedEvents(provider, firstSession)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedImages(provider, firstSession)).Items.Length);
+
+        // The response write can win a race with transport cancellation while
+        // the peer is still parsing or uploading. Rewind one poll so the new
+        // updater gets an empty baseline and treats that last delta as new.
+        provider.RotateDirectSession();
+        var replacement = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, replacement)).Items.Length);
+        AssertEqual(0, (await SnapshotTrackedImages(provider, replacement)).Items.Length);
+        var events = await SnapshotTrackedEvents(provider, replacement);
+        var images = await SnapshotTrackedImages(provider, replacement);
+        AssertEqual(2, events.Items.Length);
+        AssertTrue(events.Items.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString() == "last-written-safety"));
+        AssertTrue(events.Items.Any(item =>
+            item.TryGetProperty("Message", out var message)
+            && message.GetString() == "last-written-log"));
+        AssertEqual(77, images.Items.Single().GetProperty("Gain").GetInt32());
+    }
+
+    private static async Task PhysicalDirectReconnectsReplayLastDelta()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        var sessionId = provider.DirectSessionId;
+        var session = provider.DirectSessionToken;
+        provider.BeginDirectTransport(session);
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "restart-pending-report");
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+
+        // Simulate a Hub process disappearing after it received EventHistory
+        // but before LastAutofocus/chart delivery, then authenticating again.
+        provider.BeginDirectTransport(session);
+        AssertEqual(sessionId, provider.DirectSessionId);
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        var replayed = await SnapshotTrackedEvents(provider, session);
+        AssertEqual(1, replayed.Items.Length);
+        AssertEqual(
+            "restart-pending-report",
+            replayed.Items[0].GetProperty("Marker").GetString());
+    }
+
+    private static void AssertHistoryContainsOnlyBeforeReconnect(JsonElement[] events)
+    {
+        AssertEqual(3, events.Length);
+        AssertTrue(events.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString() == "autofocus-before"));
+        AssertTrue(events.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString() == "safety-before"));
+        AssertTrue(events.Any(item =>
+            item.TryGetProperty("Message", out var message)
+            && message.GetString() == "log-before"));
+        AssertFalse(events.Any(item =>
+            item.TryGetProperty("Marker", out var marker)
+            && marker.GetString()?.EndsWith("-during", StringComparison.Ordinal) == true));
+    }
+
+    private static async Task<TrackedHistory> SnapshotTrackedEvents(
+        NinaDirectDataProvider provider,
+        CancellationToken directSessionToken)
+    {
+        var query = new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory);
+        var history = await provider.ExecuteAsync(
+            query,
+            CancellationToken.None,
+            directSessionToken);
+        var wire = JsonSerializer.Serialize(history, DirectProtocol.JsonOptions);
+        provider.ConfirmDirectQueryResponse(query, directSessionToken);
+        using var response = JsonDocument.Parse(wire);
+        return new TrackedHistory(
+            response.RootElement.GetProperty("Response")
+                .EnumerateArray()
+                .Select(item => item.Clone())
+                .ToArray(),
+            wire);
+    }
+
+    private static async Task<TrackedHistory> SnapshotTrackedImages(
+        NinaDirectDataProvider provider,
+        CancellationToken directSessionToken)
+    {
+        var query = new DirectQuery(Guid.NewGuid(), DirectQueryKind.ImageHistory);
+        var history = await provider.ExecuteAsync(
+            query,
+            CancellationToken.None,
+            directSessionToken);
+        var wire = JsonSerializer.Serialize(history, DirectProtocol.JsonOptions);
+        provider.ConfirmDirectQueryResponse(query, directSessionToken);
+        using var response = JsonDocument.Parse(wire);
+        return new TrackedHistory(
+            response.RootElement.GetProperty("Response")
+                .EnumerateArray()
+                .Select(item => item.Clone())
+                .ToArray(),
+            wire);
+    }
+
+    private sealed record TrackedHistory(JsonElement[] Items, string Wire);
+
+    private static void DirectSequenceHidesDisabledTargetContainers()
+    {
+        var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
+            "BuildItem",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Sequence item projector was not found.");
+        var target = new PrivateTargetContainer(
+            "PRIVATE_CUSTOM_CONTAINER_IDENTITY",
+            "PRIVATE_TARGET_NAME");
+        target.Add(new global::SequencerPlus.TestDoubles.WaitUntil
+        {
+            WaitInterval = TimeSpan.FromSeconds(13),
+        });
+
+        var shared = (Dictionary<string, object?>)method.Invoke(
+            null,
+            new object?[] { target, DirectEventDeliveryOptions.Default, null })!;
+        AssertEqual("PRIVATE_TARGET_NAME", shared["TargetName"] as string);
+        AssertTrue((shared["Name"] as string)!
+            .Contains("PRIVATE_CUSTOM_CONTAINER_IDENTITY", StringComparison.Ordinal));
+
+        var projected = (Dictionary<string, object?>)method.Invoke(
+            null,
+            new object?[]
+            {
+                target,
+                DirectEventDeliveryOptions.Default with { TargetScheduler = false },
+                null,
+            })!;
+        AssertEqual("_Container", projected["Name"] as string);
+        AssertEqual("SUPPRESSED", projected["Status"] as string);
+        AssertEqual(false, Convert.ToBoolean(projected["ChatEnabled"]));
+        AssertFalse(projected.ContainsKey("TargetName"));
+        AssertEqual(true, Convert.ToBoolean(projected["IsTargetContainer"]));
+        AssertFalse(projected.ContainsKey("Conditions"));
+        AssertFalse(projected.ContainsKey("Triggers"));
+
+        var children = AssertType<Dictionary<string, object?>[]>(projected["Items"]!);
+        AssertEqual(1, children.Length);
+        AssertEqual("condition_wait", children[0]["OperationKind"] as string);
+        AssertEqual(TimeSpan.FromSeconds(13), (TimeSpan)children[0]["WaitInterval"]!);
+        var wire = JsonSerializer.Serialize(projected, DirectProtocol.JsonOptions);
+        AssertFalse(wire.Contains("PRIVATE_CUSTOM_CONTAINER_IDENTITY", StringComparison.Ordinal));
+        AssertFalse(wire.Contains("PRIVATE_TARGET_NAME", StringComparison.Ordinal));
+    }
+
+    private static void DirectSequenceProjectsKnownSequencerPlusOperations()
+    {
+        var method = typeof(NinaDirectSequenceSnapshot).GetMethod(
+            "BuildItem",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Sequence item projector was not found.");
+
+        Dictionary<string, object?> Project(
+            global::NINA.Sequencer.SequenceItem.ISequenceItem item,
+            DirectEventDeliveryOptions? delivery = null) =>
+            (Dictionary<string, object?>)method.Invoke(
+                null,
+                new object?[] { item, delivery ?? DirectEventDeliveryOptions.Default, null })!;
+
+        foreach (var slew in new global::NINA.Sequencer.SequenceItem.ISequenceItem[]
+        {
+            new global::SequencerPlus.TestDoubles.SlewToRADec(),
+            new global::SequencerPlus.TestDoubles.SlewToAltAz(),
+        })
+        {
+            var projection = Project(slew);
+            AssertEqual("mount_slew", projection["OperationKind"] as string);
+            AssertTrue(Convert.ToBoolean(projection["ChatEnabled"]));
+
+            var disabled = Project(
+                slew,
+                DirectEventDeliveryOptions.Default with { Mount = false });
+            AssertFalse(Convert.ToBoolean(disabled["ChatEnabled"]));
+            AssertTrue(Convert.ToBoolean(disabled["Suppressed"]));
+            AssertFalse(disabled.ContainsKey("OperationKind"));
+        }
+
+        var condition = new global::SequencerPlus.TestDoubles.WaitUntil
+        {
+            WaitInterval = TimeSpan.FromSeconds(11),
+        };
+        var conditionProjection = Project(condition);
+        AssertEqual("condition_wait", conditionProjection["OperationKind"] as string);
+        AssertEqual(TimeSpan.FromSeconds(11), (TimeSpan)conditionProjection["WaitInterval"]!);
+        AssertTrue(Convert.ToBoolean(conditionProjection["ChatEnabled"]));
+        AssertFalse(conditionProjection.ContainsKey("Delay"));
+        AssertFalse(conditionProjection.ContainsKey("Predicate"));
+        AssertFalse(conditionProjection.ContainsKey("PredicateExpr"));
+        AssertFalse(JsonSerializer.Serialize(conditionProjection, DirectProtocol.JsonOptions)
+            .Contains("PRIVATE_", StringComparison.Ordinal));
+
+        foreach (var manualWait in new global::NINA.Sequencer.SequenceItem.ISequenceItem[]
+        {
+            new global::SequencerPlus.TestDoubles.WaitIndefinitely(),
+            new global::SequencerPlus.TestDoubles.Break(),
+        })
+        {
+            var projection = Project(manualWait);
+            AssertEqual("manual_wait", projection["OperationKind"] as string);
+            AssertTrue(Convert.ToBoolean(projection["ChatEnabled"]));
+            AssertFalse(projection.ContainsKey("Delay"));
+            AssertFalse(projection.ContainsKey("Reason"));
+            AssertFalse(JsonSerializer.Serialize(projection, DirectProtocol.JsonOptions)
+                .Contains("PRIVATE_", StringComparison.Ordinal));
+
+            var disabled = Project(
+                manualWait,
+                DirectEventDeliveryOptions.Default with { Sequence = false });
+            AssertFalse(Convert.ToBoolean(disabled["ChatEnabled"]));
+            AssertTrue(Convert.ToBoolean(disabled["Suppressed"]));
+            AssertFalse(disabled.ContainsKey("OperationKind"));
+        }
+
+        var disabledCondition = Project(
+            condition,
+            DirectEventDeliveryOptions.Default with { Sequence = false });
+        AssertFalse(Convert.ToBoolean(disabledCondition["ChatEnabled"]));
+        AssertTrue(Convert.ToBoolean(disabledCondition["Suppressed"]));
+        AssertFalse(disabledCondition.ContainsKey("OperationKind"));
+        AssertFalse(disabledCondition.ContainsKey("WaitInterval"));
+    }
+
+    private static async Task SafetyMonitorTransitionsAreNormalized()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var record = typeof(NinaDirectDataProvider).GetMethod(
+            "RecordSafetyState",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Safety state recorder was not found.");
+        var captureGeneration = typeof(NinaDirectDataProvider).GetMethod(
+            "CaptureHistoryGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("History generation reader was not found.");
+        void Record(bool connected, bool isSafe) =>
+            record.Invoke(provider, new object[]
+            {
+                (long)captureGeneration.Invoke(provider, null)!,
+                connected,
+                isSafe,
+            });
+
+        Record(connected: false, isSafe: false); // Initial unused monitor stays quiet.
+        Record(connected: true, isSafe: false);
+        Record(connected: true, isSafe: false); // Duplicate polling observation.
+        Record(connected: true, isSafe: true);
+        Record(connected: false, isSafe: false);
+        Record(connected: false, isSafe: false); // Duplicate disconnect callback.
+
+        var events = await SnapshotEvents(provider);
+        AssertEqual(4, events.Length);
+        AssertEqual("SAFETY-CONNECTED", events[0].GetProperty("Event").GetString());
+        AssertEqual("SAFETY-CHANGED", events[1].GetProperty("Event").GetString());
+        AssertFalse(events[1].GetProperty("IsSafe").GetBoolean());
+        AssertEqual("SAFETY-CHANGED", events[2].GetProperty("Event").GetString());
+        AssertTrue(events[2].GetProperty("IsSafe").GetBoolean());
+        AssertEqual("SAFETY-DISCONNECTED", events[3].GetProperty("Event").GetString());
+
+        delivery.Update(delivery.Current with { Safety = false });
+        Record(connected: true, isSafe: false);
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+        delivery.Update(DirectEventDeliveryOptions.Default);
+        AssertEqual(4, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task AutofocusCompletionWaitsForMatchingReport()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var timestamp = new DateTime(2026, 8, 25, 4, 15, 0, DateTimeKind.Utc);
+            var profileId = Guid.NewGuid();
+            var completion = new DirectAutofocusCompletion(
+                "L",
+                Position: 4_068,
+                Temperature: -8.5,
+                timestamp,
+                profileId,
+                ChatEnabled: true);
+            var stalePath = Path.Combine(
+                reportDirectory,
+                $"2026-08-25--04-13-30--{profileId:D}.json");
+            await File.WriteAllTextAsync(
+                stalePath,
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp.AddSeconds(-90),
+                    Filter = "L",
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                }));
+
+            // A report from another simultaneously active N.I.N.A. profile
+            // can otherwise match every payload field. It must never satisfy
+            // this profile's completion.
+            var otherProfilePath = Path.Combine(
+                reportDirectory,
+                $"2026-08-25--04-15-00--{Guid.NewGuid():D}.json");
+            await File.WriteAllTextAsync(
+                otherProfilePath,
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    Filter = "L",
+                    Temperature = -8.5,
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                    MeasurePoints = new[] { new { Position = 1, Value = 99.0 } },
+                }));
+
+            var pending = NinaDirectDataProvider.ReadCompletedAutofocusReportAsync(
+                reportDirectory,
+                completion,
+                CancellationToken.None);
+            await Task.Delay(150);
+            var matchingPath = Path.Combine(
+                reportDirectory,
+                $"2026-08-25--04-15-00--{profileId:D}.json");
+            await File.WriteAllTextAsync(
+                matchingPath,
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp.AddSeconds(1),
+                    Filter = "L",
+                    Temperature = -8.5,
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                    MeasurePoints = new[]
+                    {
+                        new { Position = 4_050, Value = 2.8, Error = 0.1 },
+                        new { Position = 4_068, Value = 2.4, Error = 0.1 },
+                    },
+                }));
+
+            var report = await pending;
+            AssertEqual(4_068.0, report
+                .GetProperty("CalculatedFocusPoint")
+                .GetProperty("Position")
+                .GetDouble());
+            AssertEqual(2, report.GetProperty("MeasurePoints").GetArrayLength());
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task AutofocusReportsRequireProvenanceAndLiveConsent()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-consent-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                autofocusReportDirectory: reportDirectory);
+            var query = new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus);
+            var timestamp = new DateTime(2026, 8, 25, 4, 30, 0, DateTimeKind.Utc);
+            var profileId = Guid.NewGuid();
+
+            // A plausible report on disk is not evidence that it came from a
+            // run observed during this profile session.
+            await File.WriteAllTextAsync(
+                Path.Combine(reportDirectory, $"2026-08-25--04-30-00--{profileId:D}.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    Filter = "L",
+                    CalculatedFocusPoint = new { Position = 4_200 },
+                }));
+            await AssertThrowsAsync<InvalidOperationException>(() =>
+                provider.ExecuteAsync(query, CancellationToken.None));
+
+            var pendingTimestamp = timestamp.AddMinutes(5);
+            var completion = new DirectAutofocusCompletion(
+                "Ha",
+                Position: 5_100,
+                Temperature: -7.25,
+                pendingTimestamp,
+                profileId,
+                ChatEnabled: true);
+            SetPendingAutofocusCompletion(provider, completion);
+
+            var delayed = provider.ExecuteAsync(query, CancellationToken.None);
+            await Task.Delay(150);
+            delivery.Update(delivery.Current with { Autofocus = false });
+            await File.WriteAllTextAsync(
+                Path.Combine(reportDirectory, $"2026-08-25--04-35-00--{profileId:D}.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = pendingTimestamp,
+                    Filter = "Ha",
+                    CalculatedFocusPoint = new { Position = 5_100 },
+                    MeasurePoints = new[] { new { Position = 5_100, Value = 2.1 } },
+                }));
+
+            // Consent is checked again after the delayed disk read, not only
+            // when the Direct query first arrives.
+            await AssertThrowsAsync<InvalidOperationException>(async () => await delayed);
+
+            delivery.Update(delivery.Current with { Autofocus = true });
+            _ = await provider.ExecuteAsync(query, CancellationToken.None);
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task AutofocusCaptureHonorsConsentAndGenerations()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var query = new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus);
+        var timestamp = new DateTime(2026, 8, 25, 5, 0, 0, DateTimeKind.Utc);
+        var report = JsonSerializer.SerializeToElement(new
+        {
+            Timestamp = timestamp,
+            Filter = "OIII",
+            CalculatedFocusPoint = new { Position = 6_250 },
+        });
+
+        var generation = GetAutofocusCaptureGeneration(provider);
+        SetPendingAutofocusCompletion(
+            provider,
+            new DirectAutofocusCompletion(
+                "OIII",
+                Position: 6_250,
+                Temperature: -6.0,
+                timestamp,
+                ProfileId: null,
+                ChatEnabled: false));
+
+        // Re-enabling before the command-task continuation runs must not turn
+        // an off-at-callback result into a shareable cached report.
+        AssertFalse(provider.TryCacheObservedAutofocusReport(
+            report,
+            generation,
+            chatEnabledAtCompletion: true));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(query, CancellationToken.None));
+
+        provider.Reset();
+        AssertFalse(provider.TryCacheObservedAutofocusReport(
+            report,
+            generation,
+            chatEnabledAtCompletion: true));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(query, CancellationToken.None));
+
+        generation = GetAutofocusCaptureGeneration(provider);
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            report,
+            generation,
+            chatEnabledAtCompletion: true));
+        _ = await provider.ExecuteAsync(query, CancellationToken.None);
+
+        provider.RevokeProfileAccess();
+        AssertFalse(provider.TryCacheObservedAutofocusReport(
+            report,
+            generation,
+            chatEnabledAtCompletion: true));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(query, CancellationToken.None));
+
+        generation = GetAutofocusCaptureGeneration(provider);
+        AssertFalse(provider.TryCacheObservedAutofocusReport(
+            report,
+            generation,
+            chatEnabledAtCompletion: false));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            provider.ExecuteAsync(query, CancellationToken.None));
+    }
+
+    private static async Task ProfileChangesCancelPendingAutofocusReads()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-profile-cancellation-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                autofocusReportDirectory: reportDirectory);
+            var completion = new DirectAutofocusCompletion(
+                "SII",
+                Position: 7_100,
+                Temperature: -5.0,
+                new DateTime(2026, 8, 25, 5, 30, 0, DateTimeKind.Utc),
+                Guid.NewGuid(),
+                ChatEnabled: true);
+            var capture = typeof(NinaDirectDataProvider).GetMethod(
+                "CaptureCompletedAutofocusAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Autofocus capture task was not found.");
+            var pending = (Task)capture.Invoke(
+                provider,
+                new object[]
+                {
+                    completion,
+                    GetAutofocusCaptureGeneration(provider),
+                    CancellationToken.None,
+                    provider.ProfileSessionToken,
+                })!;
+
+            await Task.Delay(150);
+            provider.RevokeProfileAccess();
+            var completed = await Task.WhenAny(pending, Task.Delay(500));
+            AssertTrue(ReferenceEquals(pending, completed));
+            await pending;
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static long GetAutofocusCaptureGeneration(NinaDirectDataProvider provider) =>
+        (long)(typeof(NinaDirectDataProvider).GetField(
+            "autofocusCaptureGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            ?? throw new InvalidOperationException("Autofocus generation was not found."));
+
+    private static long GetCommandGeneration(NinaDirectDataProvider provider) =>
+        (long)(typeof(NinaDirectDataProvider).GetField(
+            "commandGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            ?? throw new InvalidOperationException("Command generation was not found."));
+
+    private static long GetHistoryGeneration(NinaDirectDataProvider provider) =>
+        (long)(typeof(NinaDirectDataProvider).GetField(
+            "historyGeneration",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            ?? throw new InvalidOperationException("History generation was not found."));
+
+    private static void SetPendingAutofocusCompletion(
+        NinaDirectDataProvider provider,
+        DirectAutofocusCompletion completion)
+    {
+        var type = typeof(NinaDirectDataProvider);
+        var generation = GetAutofocusCaptureGeneration(provider);
+        (type.GetField("pendingAutofocusCompletion", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Pending autofocus completion was not found."))
+            .SetValue(provider, completion);
+        (type.GetField("pendingAutofocusGeneration", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Pending autofocus generation was not found."))
+            .SetValue(provider, generation);
     }
 
     private static void DirectGuiderPayloadMatchesRustChart()
@@ -2388,6 +3879,61 @@ internal static class Program
         AssertEqual(1.1, response.GetProperty("Interval").GetDouble());
         AssertEqual("0.01", response.GetProperty("GuideSteps")[2].GetProperty("Dither").GetString());
         AssertEqual(2, response.GetProperty("RMS").GetProperty("DataPoints").GetInt32());
+    }
+
+    private static async Task DisabledGuidingSamplesAreNotRetained()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        var type = typeof(NinaDirectDataProvider);
+        var recordStep = type.GetMethod(
+            "GuiderGuideEvent",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Guider sample callback was not found.");
+        var recordDither = type.GetMethod(
+            "GuiderDithered",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Guider dither callback was not found.");
+        var history = (BoundedHistory<DirectGuideStep>)(type.GetField(
+            "guideSteps",
+            BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(provider)
+            ?? throw new InvalidOperationException("Guider history was not found."));
+
+        recordStep.Invoke(provider, new object?[] { null, new TestGuideStep(1, -1) });
+        await (Task)recordDither.Invoke(provider, new object?[] { provider, EventArgs.Empty })!;
+        AssertEqual(2, history.Snapshot().Count);
+
+        delivery.Update(delivery.Current with { Guiding = false });
+        recordStep.Invoke(provider, new object?[] { null, new TestGuideStep(99, -99) });
+        await (Task)recordDither.Invoke(provider, new object?[] { provider, EventArgs.Empty })!;
+        AssertEqual(2, history.Snapshot().Count);
+
+        delivery.Update(delivery.Current with { Guiding = true });
+        var retained = history.Snapshot();
+        AssertEqual(2, retained.Count);
+        AssertFalse(retained.Any(step => step.RADistanceRaw == 99));
+        recordStep.Invoke(provider, new object?[] { null, new TestGuideStep(2, -2) });
+        retained = history.Snapshot();
+        AssertEqual(3, retained.Count);
+        AssertEqual(3L, retained[^1].Id);
+    }
+
+    private sealed class TestGuideStep(double ra, double dec) : global::NINA.Core.Interfaces.IGuideStep
+    {
+        public double Frame => 0;
+        public double Time => 0;
+        public double RADistanceRaw { get; set; } = ra;
+        public double DECDistanceRaw { get; set; } = dec;
+        public double RADuration => 100;
+        public double DECDuration => 100;
+        public string Event => string.Empty;
+        public string TimeStamp => string.Empty;
+        public string Host => string.Empty;
+        public int Inst => 0;
+        public global::NINA.Core.Interfaces.IGuideStep Clone() =>
+            new TestGuideStep(RADistanceRaw, DECDistanceRaw);
     }
 
     private static void DirectRuntimeBootstrapCarriesOnlyPipe()
@@ -3917,6 +5463,8 @@ internal static class Program
             TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<object?> release = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenSource directSession = new();
+        private Guid directSessionId = Guid.NewGuid();
         private CancellationTokenSource profileSession = new();
         private int queryCount;
 
@@ -3932,6 +5480,11 @@ internal static class Program
 
         public CancellationToken ProfileSessionToken =>
             Volatile.Read(ref profileSession).Token;
+
+        public CancellationToken DirectSessionToken =>
+            Volatile.Read(ref directSession).Token;
+
+        public Guid DirectSessionId => directSessionId;
 
         internal Task Started => started.Task;
 
@@ -3960,8 +5513,18 @@ internal static class Program
         {
         }
 
+        public void RotateDirectSession()
+        {
+            directSessionId = Guid.NewGuid();
+            var previous = Interlocked.Exchange(
+                ref directSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+        }
+
         public void RevokeProfileAccess()
         {
+            RotateDirectSession();
             var previous = Interlocked.Exchange(
                 ref profileSession,
                 new CancellationTokenSource());
@@ -3971,13 +5534,20 @@ internal static class Program
 
         public async Task<object?> ExecuteAsync(
             DirectQuery query,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            CancellationToken? directSessionToken = null)
         {
             Interlocked.Increment(ref queryCount);
             started.TrySetResult();
             // Model a synchronous UI/provider call that cannot honor the
             // connection token until N.I.N.A. gives control back.
             return await release.Task.ConfigureAwait(false);
+        }
+
+        public void ConfirmDirectQueryResponse(
+            DirectQuery query,
+            CancellationToken directSessionToken)
+        {
         }
 
         public void Dispose() => Release();
@@ -3987,9 +5557,15 @@ internal static class Program
     {
         private readonly DirectAccessPolicy? accessPolicy;
         private readonly Exception? executeFailure;
+        private CancellationTokenSource directSession = new();
+        private Guid directSessionId = Guid.NewGuid();
         private CancellationTokenSource profileSession = new();
         private int queryCount;
         private int revocationCount;
+        private int directSessionRotationCount;
+        private int eventCaptureSuspendCount;
+        private int eventCaptureResumeCount;
+        private int eventCaptureSuspended;
         private readonly ConcurrentBag<DirectQueryKind> queriedKinds = new();
 
         internal FakeDirectDataProvider(
@@ -4013,8 +5589,18 @@ internal static class Program
         public CancellationToken ProfileSessionToken =>
             Volatile.Read(ref profileSession).Token;
 
+        public CancellationToken DirectSessionToken =>
+            Volatile.Read(ref directSession).Token;
+
+        public Guid DirectSessionId => directSessionId;
+
         public int QueryCount => Volatile.Read(ref queryCount);
         public int RevocationCount => Volatile.Read(ref revocationCount);
+        public int DirectSessionRotationCount =>
+            Volatile.Read(ref directSessionRotationCount);
+        public int EventCaptureSuspendCount => Volatile.Read(ref eventCaptureSuspendCount);
+        public int EventCaptureResumeCount => Volatile.Read(ref eventCaptureResumeCount);
+        public bool EventCaptureSuspended => Volatile.Read(ref eventCaptureSuspended) != 0;
         public IReadOnlyCollection<DirectQueryKind> QueriedKinds => queriedKinds;
 
         public void Start()
@@ -4038,8 +5624,31 @@ internal static class Program
             Interlocked.Increment(ref revocationCount);
         }
 
+        public void RotateDirectSession()
+        {
+            Interlocked.Increment(ref directSessionRotationCount);
+            directSessionId = Guid.NewGuid();
+            var previous = Interlocked.Exchange(
+                ref directSession,
+                new CancellationTokenSource());
+            previous.Cancel();
+        }
+
+        public void SuspendEventCapture()
+        {
+            Interlocked.Increment(ref eventCaptureSuspendCount);
+            Interlocked.Exchange(ref eventCaptureSuspended, 1);
+        }
+
+        public void ResumeEventCapture()
+        {
+            Interlocked.Increment(ref eventCaptureResumeCount);
+            Interlocked.Exchange(ref eventCaptureSuspended, 0);
+        }
+
         public void RevokeProfileAccess()
         {
+            RotateDirectSession();
             var previous = Interlocked.Exchange(
                 ref profileSession,
                 new CancellationTokenSource());
@@ -4049,7 +5658,8 @@ internal static class Program
 
         public Task<object?> ExecuteAsync(
             DirectQuery query,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            CancellationToken? directSessionToken = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref queryCount);
@@ -4088,6 +5698,12 @@ internal static class Program
                 _ => throw new NotSupportedException(),
             };
             return Task.FromResult<object?>(response);
+        }
+
+        public void ConfirmDirectQueryResponse(
+            DirectQuery query,
+            CancellationToken directSessionToken)
+        {
         }
 
         private static object GuiderGraph()

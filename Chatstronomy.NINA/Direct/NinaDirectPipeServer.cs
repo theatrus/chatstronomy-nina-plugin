@@ -14,8 +14,9 @@ internal sealed class NinaDirectPipeServer : IDisposable
 {
     private const int MaxFrameCharacters = 1024 * 1024;
     private readonly INinaDirectDataProvider provider;
+    private readonly CancellationToken directSessionToken;
     private readonly CancellationTokenSource stopping;
-    private readonly CancellationTokenRegistration invalidateOnProfileChange;
+    private readonly CancellationTokenRegistration invalidateOnSessionChange;
     private NamedPipeServerStream? pipe;
     private Task? runTask;
     private int invalidated;
@@ -24,13 +25,14 @@ internal sealed class NinaDirectPipeServer : IDisposable
     internal NinaDirectPipeServer(
         INinaDirectDataProvider provider,
         string pipeName,
-        CancellationToken? profileSessionToken = null)
+        CancellationToken? directSessionToken = null)
     {
         this.provider = provider;
         PipeName = pipeName;
-        var session = profileSessionToken ?? provider.ProfileSessionToken;
+        var session = directSessionToken ?? provider.DirectSessionToken;
+        this.directSessionToken = session;
         stopping = CancellationTokenSource.CreateLinkedTokenSource(session);
-        invalidateOnProfileChange = session.Register(
+        invalidateOnSessionChange = session.Register(
             static state => ((NinaDirectPipeServer)state!).Invalidate(),
             this);
     }
@@ -57,7 +59,7 @@ internal sealed class NinaDirectPipeServer : IDisposable
         }
 
         Invalidate();
-        invalidateOnProfileChange.Dispose();
+        invalidateOnSessionChange.Dispose();
         stopping.Dispose();
     }
 
@@ -83,6 +85,7 @@ internal sealed class NinaDirectPipeServer : IDisposable
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
+            provider.BeginDirectTransport(directSessionToken);
 
             using var reader = new StreamReader(
                 pipe,
@@ -113,6 +116,7 @@ internal sealed class NinaDirectPipeServer : IDisposable
 
                 var query = DirectProtocol.ParseQuery(line);
                 string response;
+                var queryCompleted = false;
                 if (query.IsExpiredAt(DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
                 {
                     response = DirectProtocol.SerializeFailure(
@@ -123,9 +127,13 @@ internal sealed class NinaDirectPipeServer : IDisposable
                 {
                     try
                     {
-                        var payload = await provider.ExecuteAsync(query, cancellationToken)
+                        var payload = await provider.ExecuteAsync(
+                            query,
+                            cancellationToken,
+                            directSessionToken)
                             .ConfigureAwait(false);
                         response = DirectProtocol.SerializeSuccess(query.Id, payload);
+                        queryCompleted = true;
                     }
                     catch (Exception exception) when (
                         exception is not OperationCanceledException
@@ -139,6 +147,10 @@ internal sealed class NinaDirectPipeServer : IDisposable
 
                 await writer.WriteLineAsync(response.AsMemory(), cancellationToken)
                     .ConfigureAwait(false);
+                if (queryCompleted)
+                {
+                    provider.ConfirmDirectQueryResponse(query, directSessionToken);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

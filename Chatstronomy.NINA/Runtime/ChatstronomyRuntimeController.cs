@@ -75,12 +75,13 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
         LocalRuntimeIdentity identity,
         CancellationToken cancellationToken)
     {
-        // The bootstrap identity and data pipe must share the profile that
-        // requested them, including starts queued behind an older lifecycle.
-        var profileSessionToken = directDataProvider.ProfileSessionToken;
+        // The bootstrap identity and data pipe must share the Direct session
+        // that requested them, including starts queued behind an older
+        // privacy policy or N.I.N.A. profile lifecycle.
+        var directSessionToken = directDataProvider.DirectSessionToken;
         using var starting = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
-            profileSessionToken);
+            directSessionToken);
         await lifecycleGate.WaitAsync(starting.Token).ConfigureAwait(false);
         try
         {
@@ -101,7 +102,7 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
             NinaDirectPipeServer? pendingDirectPipe = new NinaDirectPipeServer(
                 directDataProvider,
                 NinaDirectPipeServer.CreatePipeName(),
-                profileSessionToken);
+                directSessionToken);
             pendingDirectPipe.Start();
 
             var payload = PluginRuntimeBootstrap.Serialize(
@@ -209,7 +210,7 @@ internal sealed class ChatstronomyRuntimeController : IChatstronomyRuntimeContro
                 pendingDirectPipe?.Dispose();
                 if (exception is OperationCanceledException
                     && !cancellationToken.IsCancellationRequested
-                    && !profileSessionToken.IsCancellationRequested)
+                    && !directSessionToken.IsCancellationRequested)
                 {
                     throw new TimeoutException(
                         $"Chatstronomy did not accept its local configuration within {StartupTimeout.TotalSeconds:0} seconds.",

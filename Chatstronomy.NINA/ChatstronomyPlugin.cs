@@ -45,10 +45,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     private readonly AsyncCommand disconnectHostedCommand;
     private readonly AsyncCommand forgetHostedCredentialCommand;
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
+    private readonly object profileBoundaryGate = new();
     private readonly Guid nodeId = NodeIdentityStore.LoadOrCreate();
-    private readonly Guid sessionId = Guid.NewGuid();
     private string? hostedOperationError;
-    private bool initialized;
+    private volatile bool initialized;
 
     [ImportingConstructor]
     public ChatstronomyPlugin(
@@ -60,6 +60,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         IRotatorMediator rotator,
         IFocuserMediator focuser,
         ISequenceMediator sequence,
+        ISafetyMonitorMediator safetyMonitor,
         IImageSaveMediator imageSave,
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
@@ -80,6 +81,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             rotator,
             focuser,
             sequence,
+            safetyMonitor,
             imageSave,
             applicationStatus,
             autoFocusFactory,
@@ -394,11 +396,16 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
                 return;
             }
 
-            settings.ShareObservatoryLocation = value;
-            // Queries project data at execution time, so privacy changes take
-            // effect immediately without disturbing the live connection.
-            accessPolicy.Update(settings.AccessOptions);
+            ApplyLocationPrivacyChange(
+                directDataProvider,
+                accessPolicy,
+                () => settings.ShareObservatoryLocation = value,
+                () => settings.AccessOptions);
             RaisePropertyChanged();
+            if (initialized)
+            {
+                _ = StartConfiguredModeAsync(CancellationToken.None);
+            }
         }
     }
 
@@ -514,6 +521,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         get => settings.SendSequenceEvents;
         set => SetEventDeliveryOption(() => settings.SendSequenceEvents = value);
+    }
+
+    public bool SendSafetyEvents
+    {
+        get => settings.SendSafetyEvents;
+        set => SetEventDeliveryOption(() => settings.SendSafetyEvents = value);
     }
 
     public bool SendTargetSchedulerEvents
@@ -633,7 +646,13 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         hubClient.StateChanged += HubClientStateChanged;
         hubClient.CredentialIssued += HubClientCredentialIssued;
         await base.Initialize();
-        initialized = true;
+        // A profile event can fire while PluginBase initializes. Serialize a
+        // final active-profile resynchronization with that callback before
+        // allowing the first transport to authenticate.
+        CompleteInitializationProfileBoundary(
+            profileBoundaryGate,
+            SynchronizeActiveProfileBoundary,
+            () => initialized = true);
         await StartConfiguredModeAsync(CancellationToken.None);
     }
 
@@ -644,6 +663,11 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         hubClient.StateChanged -= HubClientStateChanged;
         hubClient.CredentialIssued -= HubClientCredentialIssued;
         initialized = false;
+        // Invalidate callbacks that entered before the event handlers were
+        // detached. In particular, a ProfileChanged callback may already be
+        // waiting for lifecycleGate; it must not restart either transport
+        // after teardown has stopped it.
+        directDataProvider.RotateDirectSession();
         await lifecycleGate.WaitAsync(CancellationToken.None);
         try
         {
@@ -719,7 +743,8 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     /// <summary>
     /// Build the identity handshake used when this N.I.N.A. process connects
     /// to a local or remote Chatstronomy hub. The node and profile GUIDs are
-    /// stable; the session GUID changes each time the plugin is loaded.
+    /// stable; the session GUID changes for a new plugin lifecycle, profile,
+    /// or local transmission-policy boundary but survives ordinary reconnects.
     /// </summary>
     internal ClientHello CreateClientHello()
     {
@@ -731,7 +756,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             ProtocolVersion: DirectProtocol.CurrentVersion,
             PayloadVersion: DirectProtocol.CurrentPayloadVersion,
             NodeId: nodeId,
-            SessionId: sessionId,
+            SessionId: directDataProvider.DirectSessionId,
             ProcessId: Environment.ProcessId,
             ProfileId: activeProfile.Id,
             ProfileName: activeProfile.Name,
@@ -758,34 +783,93 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
     private async void ProfileServiceProfileChanged(object? sender, EventArgs args)
     {
-        // Hardware operations belong to the originating profile, even when the
-        // next profile also permits control. End that trust window before any
-        // queued lifecycle work can delay connection teardown.
-        ApplyProfileAccessChange(accessPolicy, directDataProvider, settings.AccessOptions);
+        bool restart;
+        lock (profileBoundaryGate)
+        {
+            // Always publish/reset the active profile, including events raised
+            // while base.Initialize() is still running. The lock prevents the
+            // initial transport from observing a mixed old/new profile.
+            SynchronizeActiveProfileBoundary();
+            restart = initialized;
+        }
+        RefreshAllProperties();
+        if (!restart)
+        {
+            return;
+        }
 
-        await lifecycleGate.WaitAsync(CancellationToken.None);
         try
         {
-            await hubClient.StopAsync(CancellationToken.None);
-            if (runtimeController.IsRunning)
-            {
-                await runtimeController.StopAsync(CancellationToken.None);
-            }
-            eventDelivery.Update(settings.EventDeliveryOptions);
-            directDataProvider.ApplyLogDeliveryOptions();
-            directDataProvider.Reset();
-            RefreshAllProperties();
-            await StartConfiguredModeCoreAsync(CancellationToken.None);
+            await RunProfileChangeRestartAsync(
+                directDataProvider,
+                lifecycleGate,
+                () => initialized,
+                async () =>
+                {
+                    await hubClient.StopAsync(CancellationToken.None);
+                    if (runtimeController.IsRunning)
+                    {
+                        await runtimeController.StopAsync(CancellationToken.None);
+                    }
+                },
+                StartConfiguredModeCoreAsync);
         }
         catch
         {
             RefreshStatus();
         }
+    }
+
+    /// Restart transports for the profile that owns the Direct session
+    /// captured on entry. Teardown and later profile changes rotate that
+    /// session synchronously, making callbacks waiting at or already inside
+    /// the lifecycle gate stale before they can start another transport.
+    internal static async Task RunProfileChangeRestartAsync(
+        INinaDirectDataProvider provider,
+        SemaphoreSlim lifecycleGate,
+        Func<bool> isInitialized,
+        Func<Task> stop,
+        Func<CancellationToken, Task> start)
+    {
+        var directSessionToken = provider.DirectSessionToken;
+        var gateHeld = false;
+        try
+        {
+            await lifecycleGate.WaitAsync(directSessionToken);
+            gateHeld = true;
+            if (!IsCurrentLifecycleSession(provider, directSessionToken, isInitialized))
+            {
+                return;
+            }
+
+            await stop();
+            if (!IsCurrentLifecycleSession(provider, directSessionToken, isInitialized))
+            {
+                return;
+            }
+
+            await start(directSessionToken);
+        }
+        catch (OperationCanceledException) when (directSessionToken.IsCancellationRequested)
+        {
+            // A later profile or teardown owns lifecycle cleanup now.
+        }
         finally
         {
-            lifecycleGate.Release();
+            if (gateHeld)
+            {
+                lifecycleGate.Release();
+            }
         }
     }
+
+    private static bool IsCurrentLifecycleSession(
+        INinaDirectDataProvider provider,
+        CancellationToken directSessionToken,
+        Func<bool> isInitialized) =>
+        isInitialized()
+        && !directSessionToken.IsCancellationRequested
+        && directSessionToken == provider.DirectSessionToken;
 
     internal static void ApplyProfileAccessChange(
         DirectAccessPolicy policy,
@@ -798,12 +882,50 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         policy.Update(currentAccess);
     }
 
+    private void SynchronizeActiveProfileBoundary()
+    {
+        // End the predecessor's hardware and transport trust before publishing
+        // the active profile's policy or clearing/restarting its producers.
+        ApplyProfileAccessChange(accessPolicy, directDataProvider, settings.AccessOptions);
+        eventDelivery.Update(settings.EventDeliveryOptions);
+        directDataProvider.Reset();
+    }
+
+    internal static void CompleteInitializationProfileBoundary(
+        object gate,
+        Action synchronizeActiveProfile,
+        Action markInitialized)
+    {
+        lock (gate)
+        {
+            synchronizeActiveProfile();
+            markInitialized();
+        }
+    }
+
+    internal static void ApplyLocationPrivacyChange(
+        INinaDirectDataProvider provider,
+        DirectAccessPolicy policy,
+        Action update,
+        Func<DirectAccessOptions> readOptions)
+    {
+        // Invalidate the writer before changing consent. A Sequence/Mount
+        // response already built with exact coordinates can therefore never
+        // finish on the old socket after location sharing is disabled.
+        provider.RotateDirectSession();
+        update();
+        policy.Update(readOptions());
+    }
+
     private async Task StartConfiguredModeAsync(CancellationToken cancellationToken)
     {
-        await lifecycleGate.WaitAsync(cancellationToken);
         try
         {
-            await StartConfiguredModeCoreAsync(cancellationToken);
+            await RunForCurrentDirectSessionAsync(
+                directDataProvider,
+                lifecycleGate,
+                StartConfiguredModeCoreAsync,
+                cancellationToken);
         }
         catch (InvalidOperationException)
         {
@@ -816,8 +938,33 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
         finally
         {
-            lifecycleGate.Release();
             RefreshStatus();
+        }
+    }
+
+    /// Bind queued automatic starts to the Direct session that requested
+    /// them. A privacy or profile transition rotates that session before
+    /// publishing its new policy, so stale work cannot later reconnect with
+    /// an identity or baseline captured for a superseded lifecycle.
+    internal static async Task RunForCurrentDirectSessionAsync(
+        INinaDirectDataProvider provider,
+        SemaphoreSlim lifecycleGate,
+        Func<CancellationToken, Task> start,
+        CancellationToken cancellationToken)
+    {
+        var directSessionToken = provider.DirectSessionToken;
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            directSessionToken);
+        await lifecycleGate.WaitAsync(request.Token);
+        try
+        {
+            request.Token.ThrowIfCancellationRequested();
+            await start(request.Token);
+        }
+        finally
+        {
+            lifecycleGate.Release();
         }
     }
 
@@ -860,14 +1007,21 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
     private async Task RestartLocalRuntimeAsync()
     {
-        await lifecycleGate.WaitAsync(CancellationToken.None);
         try
         {
-            if (runtimeController.IsRunning)
-            {
-                await runtimeController.StopAsync(CancellationToken.None);
-            }
-            await StartLocalRuntimeCoreAsync(CancellationToken.None);
+            await RunForCurrentDirectSessionAsync(
+                directDataProvider,
+                lifecycleGate,
+                async cancellationToken =>
+                {
+                    if (runtimeController.IsRunning)
+                    {
+                        await runtimeController.StopAsync(CancellationToken.None);
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await StartLocalRuntimeCoreAsync(cancellationToken);
+                },
+                CancellationToken.None);
         }
         catch
         {
@@ -875,7 +1029,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
         finally
         {
-            lifecycleGate.Release();
             RefreshStatus();
         }
     }
@@ -901,12 +1054,19 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
 
     private async Task RestartHostedConnectionAsync()
     {
-        await lifecycleGate.WaitAsync(CancellationToken.None);
         try
         {
-            ClearHostedOperationError();
-            await hubClient.StopAsync(CancellationToken.None);
-            await StartHostedCoreAsync(CancellationToken.None);
+            await RunForCurrentDirectSessionAsync(
+                directDataProvider,
+                lifecycleGate,
+                async cancellationToken =>
+                {
+                    ClearHostedOperationError();
+                    await hubClient.StopAsync(CancellationToken.None);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await StartHostedCoreAsync(cancellationToken);
+                },
+                CancellationToken.None);
         }
         catch (Exception exception)
         {
@@ -914,7 +1074,6 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         }
         finally
         {
-            lifecycleGate.Release();
             RefreshStatus();
         }
     }
@@ -1136,6 +1295,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(SendGuidingEvents),
             nameof(SendMountEvents),
             nameof(SendSequenceEvents),
+            nameof(SendSafetyEvents),
             nameof(SendTargetSchedulerEvents),
             nameof(SendFilterFocuserRotatorEvents),
             nameof(SendEquipmentConnectionEvents),
@@ -1169,10 +1329,49 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         Action update,
         [CallerMemberName] string? propertyName = null)
     {
-        update();
-        eventDelivery.Update(settings.EventDeliveryOptions);
+        // Every delivery option is a local transmission/privacy boundary.
+        // Rotate the logical Direct session so the consumer drops pending work
+        // created under the preceding policy before it sees the new one.
+        const bool rollsDirectSession = true;
+        ApplyEventDeliveryChange(
+            directDataProvider,
+            eventDelivery,
+            rollsDirectSession,
+            update,
+            () => settings.EventDeliveryOptions);
         directDataProvider.ApplyLogDeliveryOptions();
         RaisePropertyChanged(propertyName);
+        if (initialized && rollsDirectSession)
+        {
+            // An older payload-v3 consumer cannot interpret privacy
+            // tombstones. The old transport was invalidated before consent
+            // changed, so start a fresh updater baseline instead of allowing
+            // it to infer a terminal event from cached operation state.
+            _ = StartConfiguredModeAsync(CancellationToken.None);
+        }
+    }
+
+    internal static void ApplyEventDeliveryChange(
+        INinaDirectDataProvider provider,
+        DirectEventDeliveryPolicy policy,
+        bool rollDirectSession,
+        Action update,
+        Func<DirectEventDeliveryOptions> readOptions)
+    {
+        var previous = policy.Current;
+        if (rollDirectSession)
+        {
+            // Cancellation synchronously aborts the hosted socket or local
+            // Direct pipe before the new policy is published. Category-aware
+            // capture provenance below prevents a same-category callback from
+            // crossing the boundary; unrelated callbacks remain valid.
+            provider.RotateDirectSession();
+        }
+        update();
+        var current = readOptions();
+        provider.EventDeliveryPolicyChanging(previous, current);
+        policy.Update(current);
+        provider.EventDeliveryPolicyChanged(previous, current);
     }
 
     private void SetCommandPermission(

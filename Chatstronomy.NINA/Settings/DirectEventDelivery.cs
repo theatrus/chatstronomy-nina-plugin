@@ -11,6 +11,7 @@ internal sealed record DirectEventDeliveryOptions(
     bool Guiding,
     bool Mount,
     bool Sequence,
+    bool Safety,
     bool TargetScheduler,
     bool FilterFocuserRotator,
     bool EquipmentConnections,
@@ -28,6 +29,7 @@ internal sealed record DirectEventDeliveryOptions(
         Guiding: true,
         Mount: true,
         Sequence: true,
+        Safety: true,
         TargetScheduler: true,
         FilterFocuserRotator: true,
         EquipmentConnections: true,
@@ -56,6 +58,10 @@ internal sealed record DirectEventDeliveryOptions(
         if (eventName.StartsWith("SEQUENCE-", StringComparison.Ordinal))
         {
             return Sequence;
+        }
+        if (eventName.StartsWith("SAFETY-", StringComparison.Ordinal))
+        {
+            return Safety;
         }
         if (eventName.StartsWith("IMAGE-", StringComparison.Ordinal)
             || eventName.Equals("API-CAPTURE-FINISHED", StringComparison.Ordinal))
