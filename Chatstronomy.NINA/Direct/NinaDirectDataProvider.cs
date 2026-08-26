@@ -18,7 +18,9 @@ using NINA.Equipment.Interfaces.Mediator;
 using NINA.Equipment.Interfaces.ViewModel;
 using NINA.Profile.Interfaces;
 using NINA.Plugin.Interfaces;
+using NINA.Sequencer.Container;
 using NINA.Sequencer.Interfaces.Mediator;
+using NINA.Sequencer.Utility;
 using NINA.WPF.Base.Interfaces;
 using NINA.WPF.Base.Interfaces.Mediator;
 using NINA.WPF.Base.Interfaces.ViewModel;
@@ -41,6 +43,8 @@ internal sealed class NinaDirectDataProvider :
     private const int EventHistoryCapacity = 10_000;
     private const int ImageHistoryCapacity = 500;
     private const int GuideHistoryCapacity = 10_000;
+    private const string SequenceFailureDeliveryScopesField =
+        "ChatstronomyRequiredDeliveryScopes";
     /// Forwarded log lines live in their own ring. Sharing the equipment ring
     /// let an evening of INFO chatter evict every real event, leaving the
     /// consumer's state reconstruction with nothing to read.
@@ -64,6 +68,10 @@ internal sealed class NinaDirectDataProvider :
     private readonly IFocuserMediator focuser;
     private readonly ISequenceMediator sequence;
     private readonly ISafetyMonitorMediator safetyMonitor;
+    private readonly IDomeMediator dome;
+    private readonly IFlatDeviceMediator flatDevice;
+    private readonly IWeatherDataMediator weatherData;
+    private readonly ISwitchMediator switchMediator;
     private readonly IImageSaveMediator imageSave;
     private readonly IApplicationStatusMediator applicationStatus;
     private readonly IAutoFocusVMFactory autoFocusFactory;
@@ -74,6 +82,8 @@ internal sealed class NinaDirectDataProvider :
     private readonly DirectAccessPolicy accessPolicy;
     private readonly NinaLogWatcher logWatcher;
     private readonly NinaNotificationWatcher notificationWatcher;
+    private readonly NinaImageSaveFailureWatcher imageSaveFailureWatcher;
+    private readonly Func<BitmapSource, byte[]> thumbnailEncoder;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
     private readonly BoundedHistory<Dictionary<string, object?>> logEvents =
@@ -83,14 +93,30 @@ internal sealed class NinaDirectDataProvider :
     private readonly BoundedHistory<DirectGuideStep> guideSteps =
         new(GuideHistoryCapacity);
     private readonly object sequenceGate = new();
+    private readonly object sequenceFailureGate = new();
     private CancellationTokenSource? sequenceSubscriptionStop;
     private bool sequenceSubscribed;
+    private Func<object, EventArgs, Task>? sequenceStartingHandler;
+    private Func<object, EventArgs, Task>? sequenceFinishedHandler;
+    private long sequenceLifecycleVersion;
+    private bool sequenceSubscriptionsPaused;
+    private bool sequenceRunning;
+    private ISequenceRootContainer? sequenceFailureRoot;
+    private Func<object, SequenceEntityFailureEventArgs, Task>? sequenceFailureHandler;
+    private long sequenceFailureGeneration = -1;
+    private long sequenceFailureSubscriptionVersion;
+    private string? lastSequenceFailureKey;
+    private DateTimeOffset lastSequenceFailureAt;
+    private bool sequenceHadFailure;
+    private bool sequenceOutcomeProvenanceComplete;
+    private bool sequenceFailureCoverageBlocked;
     private readonly object commandGate = new();
     private readonly object commandGenerationGate = new();
     private readonly object historyGenerationGate = new();
     private readonly object autofocusReportGate = new();
     private readonly object safetyStateGate = new();
     private readonly object directSessionGate = new();
+    private readonly object thumbnailGate = new();
     private readonly string autofocusReportDirectory;
     private CancellationTokenSource? guideCommandStop;
     private CancellationTokenSource? cameraCommandStop;
@@ -102,14 +128,24 @@ internal sealed class NinaDirectDataProvider :
     private DirectAutofocusCompletion? pendingAutofocusCompletion;
     private long pendingAutofocusGeneration;
     private long pendingAutofocusHistoryGeneration;
+    private bool autofocusSharingBlocked;
+    private bool autofocusRunActive;
+    private bool autofocusRunContinuouslyShareable;
+    private long autofocusRunGeneration = -1;
     private long autofocusCaptureGeneration;
     private long imageCaptureGeneration;
     private long guideCaptureGeneration;
     private long historyGeneration;
     private bool historyWritesSuspended;
     private DirectSafetyState safetyState;
+    private long safetyStateRevision;
+    private long safetyPublicationEpoch;
+    private bool safetySharingBlocked;
     private long guideStepId;
     private long commandGeneration;
+    private ThumbnailWork? pendingThumbnail;
+    private bool thumbnailWorkerActive;
+    private long thumbnailWorkEpoch;
     private volatile bool started;
 
     internal NinaDirectDataProvider(
@@ -122,6 +158,10 @@ internal sealed class NinaDirectDataProvider :
         IFocuserMediator focuser,
         ISequenceMediator sequence,
         ISafetyMonitorMediator safetyMonitor,
+        IDomeMediator dome,
+        IFlatDeviceMediator flatDevice,
+        IWeatherDataMediator weatherData,
+        ISwitchMediator switchMediator,
         IImageSaveMediator imageSave,
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
@@ -130,7 +170,8 @@ internal sealed class NinaDirectDataProvider :
         IMessageBroker messageBroker,
         DirectEventDeliveryPolicy eventDelivery,
         DirectAccessPolicy accessPolicy,
-        string? autofocusReportDirectory = null)
+        string? autofocusReportDirectory = null,
+        Func<BitmapSource, byte[]>? thumbnailEncoder = null)
     {
         this.profileService = profileService;
         this.telescope = telescope;
@@ -141,6 +182,10 @@ internal sealed class NinaDirectDataProvider :
         this.focuser = focuser;
         this.sequence = sequence;
         this.safetyMonitor = safetyMonitor;
+        this.dome = dome;
+        this.flatDevice = flatDevice;
+        this.weatherData = weatherData;
+        this.switchMediator = switchMediator;
         this.imageSave = imageSave;
         this.applicationStatus = applicationStatus;
         this.autoFocusFactory = autoFocusFactory;
@@ -149,11 +194,28 @@ internal sealed class NinaDirectDataProvider :
         this.messageBroker = messageBroker;
         this.eventDelivery = eventDelivery;
         this.accessPolicy = accessPolicy;
+        this.thumbnailEncoder = thumbnailEncoder ?? DirectThumbnailEncoder.Encode;
+        autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
+        safetySharingBlocked = !eventDelivery.Current.Safety;
+        sequenceFailureCoverageBlocked = !NinaDirectSequenceSnapshot
+            .HasCompleteSequenceFailureCoverage(eventDelivery.Current);
         this.autofocusReportDirectory = autofocusReportDirectory
             ?? Path.Combine(CoreUtil.APPLICATIONTEMPPATH, "AutoFocus");
         logWatcher = new NinaLogWatcher(RecordLog);
         notificationWatcher = new NinaNotificationWatcher(RecordNotification);
+        imageSaveFailureWatcher = new NinaImageSaveFailureWatcher(RecordImageSaveFailure);
     }
+
+    private sealed record ThumbnailWork(
+        long Epoch,
+        BitmapSource Source,
+        bool SourceIsFrozen,
+        System.Windows.Threading.Dispatcher? SourceDispatcher,
+        DirectSavedImage SavedImage,
+        long HistoryGeneration,
+        long ImageCaptureGeneration,
+        CancellationToken ProviderCancellation,
+        CancellationToken ProfileCancellation);
 
     public DirectCapabilities Capabilities => new(
         EventHistory: true,
@@ -186,6 +248,7 @@ internal sealed class NinaDirectDataProvider :
         // way to detach them — a zombie uploader after the user disables the
         // plugin.
         started = true;
+        sequenceSubscriptionsPaused = false;
         eventCaptureStop = new CancellationTokenSource();
 
         telescope.Connected += TelescopeConnected;
@@ -195,6 +258,7 @@ internal sealed class NinaDirectDataProvider :
         telescope.Homed += TelescopeHomed;
         telescope.Parked += TelescopeParked;
         telescope.Unparked += TelescopeUnparked;
+        telescope.Slewed += TelescopeSlewed;
 
         camera.Connected += CameraConnected;
         camera.Disconnected += CameraDisconnected;
@@ -226,7 +290,29 @@ internal sealed class NinaDirectDataProvider :
         safetyMonitor.IsSafeChanged += SafetyChanged;
         safetyMonitor.RegisterConsumer(this);
 
+        dome.Connected += DomeConnected;
+        dome.Disconnected += DomeDisconnected;
+        dome.Synced += DomeSynced;
+        dome.Opened += DomeOpened;
+        dome.Closed += DomeClosed;
+        dome.Parked += DomeParked;
+        dome.Homed += DomeHomed;
+        dome.Slewed += DomeSlewed;
+
+        flatDevice.Connected += FlatConnected;
+        flatDevice.Disconnected += FlatDisconnected;
+        flatDevice.Opened += FlatOpened;
+        flatDevice.Closed += FlatClosed;
+        flatDevice.BrightnessChanged += FlatBrightnessChanged;
+        flatDevice.LightToggled += FlatLightToggled;
+
+        weatherData.Connected += WeatherConnected;
+        weatherData.Disconnected += WeatherDisconnected;
+        switchMediator.Connected += SwitchConnected;
+        switchMediator.Disconnected += SwitchDisconnected;
+
         imageSave.ImageSaved += ImageSaved;
+        imageSaveFailureWatcher.Start(imageSave);
         foreach (var topic in TargetSchedulerTopics)
         {
             messageBroker.Subscribe(topic, this);
@@ -320,9 +406,10 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        var imagePolicyChanged = previous.Images != current.Images;
         lock (historyGenerationGate)
         {
-            if (previous.Images != current.Images)
+            if (imagePolicyChanged)
             {
                 imageCaptureGeneration++;
             }
@@ -331,12 +418,65 @@ internal sealed class NinaDirectDataProvider :
                 guideCaptureGeneration++;
             }
         }
+        if (imagePolicyChanged)
+        {
+            CancelPendingThumbnailWork();
+        }
+        if (previous.Safety != current.Safety)
+        {
+            lock (safetyStateGate)
+            {
+                // Invalidate every baseline read that began in the previous
+                // consent epoch. A disable closes publication before the
+                // policy object itself is replaced.
+                safetyPublicationEpoch++;
+                if (!current.Safety)
+                {
+                    safetySharingBlocked = true;
+                }
+            }
+        }
         if (previous.Autofocus != current.Autofocus)
         {
+            if (!current.Autofocus)
+            {
+                lock (autofocusReportGate)
+                {
+                    // Like sequence failure coverage, autofocus capture must
+                    // close before the policy object publishes a disable.
+                    autofocusSharingBlocked = true;
+                }
+            }
             // Completion provenance belongs to the consent state observed at
             // capture. Toggling autofocus sharing revokes every pending/cached
             // report so an old-enabled run cannot surface after re-enabling.
             InvalidateAutofocusCapture();
+        }
+        if (!NinaDirectSequenceSnapshot.HasCompleteSequenceFailureCoverage(current))
+        {
+            lock (sequenceGate)
+            {
+                // This runs before DirectEventDeliveryPolicy publishes the
+                // new value. Block first so a SequenceStarting callback in
+                // that window cannot observe the old all-enabled policy and
+                // restore complete provenance.
+                sequenceFailureCoverageBlocked = true;
+                if (sequenceRunning)
+                {
+                    lock (sequenceFailureGate)
+                    {
+                        // A terminal success is provable only while every
+                        // entity-failure category is visible. Invalidate at
+                        // the policy boundary rather than when a hidden
+                        // failure happens, so the neutral outcome itself does
+                        // not reveal whether such a failure occurred.
+                        sequenceOutcomeProvenanceComplete = false;
+                        sequenceHadFailure = false;
+                        lastSequenceFailureKey = null;
+                        lastSequenceFailureAt = default;
+                    }
+                }
+            }
         }
     }
 
@@ -344,6 +484,39 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        if (previous.Autofocus != current.Autofocus)
+        {
+            lock (autofocusReportGate)
+            {
+                // Enabling opens only after publication. An active run that
+                // crossed the transition remains unshareable through its
+                // separate continuous-run provenance bit.
+                autofocusSharingBlocked = !current.Autofocus;
+            }
+        }
+        lock (sequenceGate)
+        {
+            // Enabling is published only after the policy value itself. A run
+            // that started during the transition already marked its own
+            // provenance incomplete and is intentionally not upgraded here.
+            sequenceFailureCoverageBlocked = !NinaDirectSequenceSnapshot
+                .HasCompleteSequenceFailureCoverage(current);
+        }
+        if (previous.Safety != current.Safety)
+        {
+            lock (safetyStateGate)
+            {
+                // Enabling opens only after the new policy is visible.
+                // Incrementing again also protects callers that invoke only
+                // the post-publication hook in a compatibility integration.
+                safetyPublicationEpoch++;
+                safetySharingBlocked = !current.Safety;
+            }
+        }
+        if (!previous.Safety && current.Safety)
+        {
+            PublishCurrentSafetyBaseline(CaptureHistoryGeneration());
+        }
     }
 
     public void RevokeProfileAccess()
@@ -355,6 +528,14 @@ internal sealed class NinaDirectDataProvider :
         // profile boundary.
         logWatcher.Stop();
         notificationWatcher.Stop();
+        imageSaveFailureWatcher.Stop();
+        CancelPendingThumbnailWork();
+        lock (safetyStateGate)
+        {
+            safetyPublicationEpoch++;
+            safetySharingBlocked = true;
+        }
+        PauseSequenceSubscriptions();
         // Transport invalidation is independent from the stronger profile
         // trust revocation below. Keeping it separate lets event-policy
         // changes reconnect without cancelling accepted hardware operations
@@ -385,6 +566,7 @@ internal sealed class NinaDirectDataProvider :
         // in the interval between cancellation and RemoveConsumer().
         started = false;
         InvalidateAutofocusCapture();
+        CancelPendingThumbnailWork();
         var captureStop = eventCaptureStop;
         eventCaptureStop = null;
         captureStop?.Cancel();
@@ -396,6 +578,7 @@ internal sealed class NinaDirectDataProvider :
         telescope.Homed -= TelescopeHomed;
         telescope.Parked -= TelescopeParked;
         telescope.Unparked -= TelescopeUnparked;
+        telescope.Slewed -= TelescopeSlewed;
 
         camera.Connected -= CameraConnected;
         camera.Disconnected -= CameraDisconnected;
@@ -426,9 +609,36 @@ internal sealed class NinaDirectDataProvider :
         safetyMonitor.Disconnected -= SafetyDisconnected;
         safetyMonitor.IsSafeChanged -= SafetyChanged;
         safetyMonitor.RemoveConsumer(this);
+
+        dome.Connected -= DomeConnected;
+        dome.Disconnected -= DomeDisconnected;
+        dome.Synced -= DomeSynced;
+        dome.Opened -= DomeOpened;
+        dome.Closed -= DomeClosed;
+        dome.Parked -= DomeParked;
+        dome.Homed -= DomeHomed;
+        dome.Slewed -= DomeSlewed;
+
+        flatDevice.Connected -= FlatConnected;
+        flatDevice.Disconnected -= FlatDisconnected;
+        flatDevice.Opened -= FlatOpened;
+        flatDevice.Closed -= FlatClosed;
+        flatDevice.BrightnessChanged -= FlatBrightnessChanged;
+        flatDevice.LightToggled -= FlatLightToggled;
+
+        weatherData.Connected -= WeatherConnected;
+        weatherData.Disconnected -= WeatherDisconnected;
+        switchMediator.Connected -= SwitchConnected;
+        switchMediator.Disconnected -= SwitchDisconnected;
         lock (safetyStateGate)
         {
+            if (safetyState != DirectSafetyState.Unknown)
+            {
+                safetyStateRevision++;
+            }
             safetyState = DirectSafetyState.Unknown;
+            safetyPublicationEpoch++;
+            safetySharingBlocked = true;
         }
 
         foreach (var topic in TargetSchedulerTopics)
@@ -441,32 +651,59 @@ internal sealed class NinaDirectDataProvider :
         var subscriptionStop = sequenceSubscriptionStop;
         sequenceSubscriptionStop = null;
         subscriptionStop?.Cancel();
-        lock (sequenceGate)
-        {
-            if (sequenceSubscribed)
-            {
-                sequence.SequenceStarting -= SequenceStarting;
-                sequence.SequenceFinished -= SequenceFinished;
-                sequenceSubscribed = false;
-            }
-        }
+        PauseSequenceSubscriptions();
         subscriptionStop?.Dispose();
         captureStop?.Dispose();
         imageSave.ImageSaved -= ImageSaved;
+        imageSaveFailureWatcher.Stop();
         CancelOutstandingCommands();
     }
 
     public void Reset()
     {
+        CancelPendingThumbnailWork();
+        PauseSequenceSubscriptions();
+        lock (sequenceGate)
+        {
+            // Profile synchronization publishes its policy directly between
+            // RevokeProfileAccess and Reset rather than through the two-phase
+            // per-setting callbacks. Rebuild the transition barrier from the
+            // newly active profile before lifecycle handlers are rebound.
+            sequenceFailureCoverageBlocked = !NinaDirectSequenceSnapshot
+                .HasCompleteSequenceFailureCoverage(eventDelivery.Current);
+        }
+        lock (autofocusReportGate)
+        {
+            autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
+        }
         InvalidateAutofocusCapture();
         ResetHistoryBuffers();
+        lock (sequenceFailureGate)
+        {
+            sequenceHadFailure = false;
+            sequenceOutcomeProvenanceComplete = false;
+            lastSequenceFailureKey = null;
+            lastSequenceFailureAt = default;
+        }
         lock (safetyStateGate)
         {
+            if (safetyState != DirectSafetyState.Unknown)
+            {
+                safetyStateRevision++;
+            }
             safetyState = DirectSafetyState.Unknown;
+            safetyPublicationEpoch++;
+            safetySharingBlocked = !eventDelivery.Current.Safety;
         }
         Interlocked.Exchange(ref guideStepId, 0);
         ApplyLogDeliveryOptions();
         _ = notificationWatcher.Start(CaptureHistoryGeneration());
+        imageSaveFailureWatcher.Start(imageSave);
+        if (eventDelivery.Current.Safety)
+        {
+            PublishCurrentSafetyBaseline(CaptureHistoryGeneration());
+        }
+        ResumeSequenceSubscriptions();
     }
 
     private long CaptureHistoryGeneration() => Volatile.Read(ref historyGeneration);
@@ -812,18 +1049,12 @@ internal sealed class NinaDirectDataProvider :
         // the new generation makes this completion stale.
         var profileSessionToken = ProfileSessionToken;
         var generation = Volatile.Read(ref autofocusCaptureGeneration);
-        var chatEnabled = eventDelivery.Current.Autofocus;
-        var completion = new DirectAutofocusCompletion(
-            info.Filter ?? string.Empty,
-            info.Position,
-            info.Temperature,
-            info.Timestamp,
-            TryGetActiveProfileId(),
-            chatEnabled);
         if (!IsHistoryGenerationCurrent(historyGeneration))
         {
             return;
         }
+        DirectAutofocusCompletion completion;
+        bool chatEnabled;
         lock (autofocusReportGate)
         {
             if (!started || generation != Volatile.Read(ref autofocusCaptureGeneration))
@@ -834,6 +1065,25 @@ internal sealed class NinaDirectDataProvider :
             {
                 return;
             }
+
+            // A saved report contains every point from the run, not only the
+            // final measurement. Re-enabling autofocus sharing just before
+            // completion must not release points captured during an off gap.
+            chatEnabled = !autofocusSharingBlocked
+                && eventDelivery.Current.Autofocus
+                && autofocusRunActive
+                && autofocusRunGeneration == generation
+                && autofocusRunContinuouslyShareable;
+            autofocusRunActive = false;
+            autofocusRunContinuouslyShareable = false;
+            autofocusRunGeneration = -1;
+            completion = new DirectAutofocusCompletion(
+                info.Filter ?? string.Empty,
+                info.Position,
+                info.Temperature,
+                info.Timestamp,
+                TryGetActiveProfileId(),
+                chatEnabled);
 
             // Never answer a completion-triggered query with the preceding
             // run. The report file is written by N.I.N.A. just before this
@@ -868,15 +1118,49 @@ internal sealed class NinaDirectDataProvider :
     public void UpdateUserFocused(FocuserInfo info) =>
         AddEvent(CaptureHistoryGeneration(), "FOCUSER-USER-FOCUSED");
 
-    public void AutoFocusRunStarting() =>
-        AddEvent(CaptureHistoryGeneration(), "AUTOFOCUS-STARTING");
+    public void AutoFocusRunStarting()
+    {
+        var historyGeneration = CaptureHistoryGeneration();
+        var generation = Volatile.Read(ref autofocusCaptureGeneration);
+        bool chatEnabled;
+        lock (autofocusReportGate)
+        {
+            if (!started || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return;
+            }
+            autofocusRunActive = true;
+            autofocusRunGeneration = generation;
+            autofocusRunContinuouslyShareable = !autofocusSharingBlocked
+                && eventDelivery.Current.Autofocus
+                && generation == Volatile.Read(ref autofocusCaptureGeneration);
+            chatEnabled = autofocusRunContinuouslyShareable;
+        }
+        AddEventCore(
+            historyGeneration,
+            DateTime.Now,
+            "AUTOFOCUS-STARTING",
+            chatEnabled);
+    }
 
     public void NewAutoFocusPoint(DataPoint dataPoint)
     {
         var historyGeneration = CaptureHistoryGeneration();
-        AddEvent(
+        var generation = Volatile.Read(ref autofocusCaptureGeneration);
+        bool chatEnabled;
+        lock (autofocusReportGate)
+        {
+            chatEnabled = !autofocusSharingBlocked
+                && eventDelivery.Current.Autofocus
+                && autofocusRunActive
+                && autofocusRunGeneration == generation
+                && autofocusRunContinuouslyShareable;
+        }
+        AddEventCore(
             historyGeneration,
+            DateTime.Now,
             "AUTOFOCUS-POINT-ADDED",
+            chatEnabled,
             ("Position", FiniteInt(dataPoint.X)),
             ("HFR", FiniteOrZero(dataPoint.Y)));
     }
@@ -937,9 +1221,12 @@ internal sealed class NinaDirectDataProvider :
 
     private void RequireAutofocusSharing(long generation)
     {
-        if (!eventDelivery.Current.Autofocus)
+        lock (autofocusReportGate)
         {
-            throw new InvalidOperationException("Autofocus result sharing is disabled.");
+            if (autofocusSharingBlocked || !eventDelivery.Current.Autofocus)
+            {
+                throw new InvalidOperationException("Autofocus result sharing is disabled.");
+            }
         }
         if (generation != Volatile.Read(ref autofocusCaptureGeneration))
         {
@@ -998,6 +1285,8 @@ internal sealed class NinaDirectDataProvider :
             if (generation == Volatile.Read(ref autofocusCaptureGeneration)
                 && pendingAutofocusGeneration == generation
                 && pendingAutofocusCompletion == completion
+                && !autofocusSharingBlocked
+                && eventDelivery.Current.Autofocus
                 && completion.ChatEnabled)
             {
                 lastAutofocusReport = report.Clone();
@@ -1014,7 +1303,9 @@ internal sealed class NinaDirectDataProvider :
     {
         lock (autofocusReportGate)
         {
-            if (!chatEnabledAtCompletion
+            if (autofocusSharingBlocked
+                || !eventDelivery.Current.Autofocus
+                || !chatEnabledAtCompletion
                 || generation != Volatile.Read(ref autofocusCaptureGeneration))
             {
                 return false;
@@ -1042,6 +1333,10 @@ internal sealed class NinaDirectDataProvider :
         var generation = Interlocked.Increment(ref autofocusCaptureGeneration);
         lock (autofocusReportGate)
         {
+            if (autofocusRunActive)
+            {
+                autofocusRunContinuouslyShareable = false;
+            }
             lastAutofocusReport = null;
             pendingAutofocusCompletion = null;
             pendingAutofocusGeneration = generation;
@@ -1749,13 +2044,23 @@ internal sealed class NinaDirectDataProvider :
         AddEventCore(
             DateTime.Now,
             "CHATSTRONOMY-COMMAND-FAILED",
-            chatEnabled: eventDelivery.Current.ShouldSendEvent(
-                "CHATSTRONOMY-COMMAND-FAILED"),
+            chatEnabled: true,
             ("Command", commandName),
             ("Error", RedactCommandError(error)));
 
     internal static string RedactCommandError(string error) =>
         LocalPathPattern.Replace(error, "[local path redacted]");
+
+    internal static string SanitizeEventText(string? value, int maximumLength)
+    {
+        var redacted = RedactCommandError(value ?? string.Empty)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        return redacted.Length <= maximumLength
+            ? redacted
+            : $"{redacted[..maximumLength]}…";
+    }
 
     private IProgress<ApplicationStatus> CreateProgress() =>
         new Progress<ApplicationStatus>(applicationStatus.StatusUpdate);
@@ -2147,36 +2452,164 @@ internal sealed class NinaDirectDataProvider :
             // Images captured without consent can never leave N.I.N.A. Avoid
             // cloning/freezing their large WPF source on its UI thread or
             // retaining a private JPEG in a needless background encoding job.
-            QueueThumbnail(args.Image, savedImage);
+            QueueThumbnail(
+                args.Image,
+                savedImage,
+                historyGeneration,
+                captureGeneration);
         }
     }
 
-    private static void QueueThumbnail(BitmapSource? source, DirectSavedImage savedImage)
+    private void QueueThumbnail(
+        BitmapSource? source,
+        DirectSavedImage savedImage,
+        long historyGeneration,
+        long captureGeneration)
     {
         if (source is null)
         {
             return;
         }
 
-        BitmapSource frozen = source;
-        if (!source.IsFrozen)
+        bool sourceIsFrozen;
+        System.Windows.Threading.Dispatcher? sourceDispatcher;
+        try
         {
-            frozen = source.Clone();
-            frozen.Freeze();
+            sourceIsFrozen = source.IsFrozen;
+            sourceDispatcher = source.Dispatcher;
+        }
+        catch (Exception)
+        {
+            // A third-party saver can raise its callback on a thread that
+            // does not own the WPF image. Metadata is still retained; never
+            // let optional thumbnail work fail the image-save callback.
+            return;
         }
 
-        _ = Task.Run(() =>
+        var providerCancellation = eventCaptureStop?.Token;
+        if (!started
+            || providerCancellation is null
+            || providerCancellation.Value.IsCancellationRequested)
         {
+            return;
+        }
+
+        lock (thumbnailGate)
+        {
+            var epoch = thumbnailWorkEpoch;
+            pendingThumbnail = new ThumbnailWork(
+                epoch,
+                source,
+                sourceIsFrozen,
+                sourceDispatcher,
+                savedImage,
+                historyGeneration,
+                captureGeneration,
+                providerCancellation.Value,
+                ProfileSessionToken);
+            if (thumbnailWorkerActive)
+            {
+                return;
+            }
+            thumbnailWorkerActive = true;
+        }
+        _ = Task.Run(ProcessThumbnailQueueAsync);
+    }
+
+    private async Task ProcessThumbnailQueueAsync()
+    {
+        while (true)
+        {
+            ThumbnailWork? work;
+            lock (thumbnailGate)
+            {
+                work = pendingThumbnail;
+                pendingThumbnail = null;
+                if (work is null)
+                {
+                    thumbnailWorkerActive = false;
+                    return;
+                }
+            }
+
             try
             {
-                savedImage.ThumbnailData = DirectThumbnailEncoder.Encode(frozen);
+                if (!IsThumbnailWorkCurrent(work))
+                {
+                    continue;
+                }
+                var frozen = await FreezeThumbnailSourceAsync(work).ConfigureAwait(false);
+                if (frozen is null || !IsThumbnailWorkCurrent(work))
+                {
+                    continue;
+                }
+                var encoded = thumbnailEncoder(frozen);
+                if (IsThumbnailWorkCurrent(work))
+                {
+                    work.SavedImage.ThumbnailData = encoded;
+                }
             }
-            catch
+            catch (Exception)
             {
                 // The metadata remains useful and the runtime degrades to a
-                // notification without an attachment.
+                // notification without an attachment. This observational
+                // worker must never fail N.I.N.A.'s image-save callback.
             }
-        });
+        }
+    }
+
+    private async Task<BitmapSource?> FreezeThumbnailSourceAsync(ThumbnailWork work)
+    {
+        if (work.SourceIsFrozen)
+        {
+            return work.Source;
+        }
+
+        var dispatcher = work.SourceDispatcher;
+        if (dispatcher is null)
+        {
+            return null;
+        }
+        var operation = dispatcher.InvokeAsync(
+            () =>
+            {
+                if (!IsThumbnailWorkCurrent(work))
+                {
+                    return null;
+                }
+                var frozen = work.Source.Clone();
+                frozen.Freeze();
+                return frozen;
+            },
+            System.Windows.Threading.DispatcherPriority.Background);
+        return await operation.Task.ConfigureAwait(false);
+    }
+
+    private bool IsThumbnailWorkCurrent(ThumbnailWork work)
+    {
+        if (!started
+            || work.ProviderCancellation.IsCancellationRequested
+            || work.ProfileCancellation.IsCancellationRequested
+            || work.Epoch != Volatile.Read(ref thumbnailWorkEpoch)
+            || !eventDelivery.Current.Images)
+        {
+            return false;
+        }
+        lock (historyGenerationGate)
+        {
+            return !historyWritesSuspended
+                && work.HistoryGeneration == historyGeneration
+                && work.ImageCaptureGeneration == imageCaptureGeneration;
+        }
+    }
+
+    private void CancelPendingThumbnailWork()
+    {
+        lock (thumbnailGate)
+        {
+            thumbnailWorkEpoch++;
+            pendingThumbnail = null;
+        }
     }
 
     private void GuiderGuideEvent(object? sender, IGuideStep step)
@@ -2318,8 +2751,9 @@ internal sealed class NinaDirectDataProvider :
                 && eventName is string name
                 && delivery.ShouldSendEvent(name)
                 && item.TryGetValue("ChatEnabled", out var chatEnabled)
-                && chatEnabled is true)
-            .Select(item => DirectPrivacyProjection.RedactedCopy(item, access))
+                && chatEnabled is true
+                && StoredEventScopesEnabled(item, delivery))
+            .Select(item => ProjectEventForTransport(item, access))
             .ToArray();
         var logs = logSnapshot
             .Where(entry => !maximumLogSequence.HasValue
@@ -2339,6 +2773,24 @@ internal sealed class NinaDirectDataProvider :
             .Concat(logs)
             .OrderBy(item => item.TryGetValue("Time", out var time) ? ToSortableTime(time) : default)
             .ToArray();
+    }
+
+    private static bool StoredEventScopesEnabled(
+        IReadOnlyDictionary<string, object?> item,
+        DirectEventDeliveryOptions delivery) =>
+        !item.TryGetValue(SequenceFailureDeliveryScopesField, out var value)
+        || value is int deliveryScopeMask
+            && NinaDirectSequenceSnapshot.ShouldSendSequenceFailure(
+                deliveryScopeMask,
+                delivery);
+
+    private static Dictionary<string, object?> ProjectEventForTransport(
+        IReadOnlyDictionary<string, object?> item,
+        DirectAccessOptions access)
+    {
+        var projected = DirectPrivacyProjection.RedactedCopy(item, access);
+        projected.Remove(SequenceFailureDeliveryScopesField);
+        return projected;
     }
 
     private static DateTimeOffset ToSortableTime(object? time) => time switch
@@ -2364,6 +2816,18 @@ internal sealed class NinaDirectDataProvider :
             ("Level", notification.Level),
             ("Header", notification.Header),
             ("Message", notification.Message));
+    }
+
+    private void RecordImageSaveFailure(NinaImageSaveFailureRecord failure)
+    {
+        AddEventCore(
+            CaptureHistoryGeneration(),
+            DateTime.Now,
+            "IMAGE-SAVE-FAILED",
+            eventDelivery.Current.Images,
+            ("Stage", SanitizeEventText(failure.Stage, 128)),
+            ("DiskFull", failure.DiskFull),
+            ("Error", SanitizeEventText(failure.Error, 1_024)));
     }
 
     private void AddEvent(string eventName, params (string Name, object? Value)[] details) =>
@@ -2416,6 +2880,19 @@ internal sealed class NinaDirectDataProvider :
         string eventName,
         bool chatEnabled,
         params (string Name, object? Value)[] details) =>
+        _ = TryAddEventCore(
+            generation,
+            time,
+            eventName,
+            chatEnabled,
+            details);
+
+    private bool TryAddEventCore(
+        long generation,
+        object time,
+        string eventName,
+        bool chatEnabled,
+        params (string Name, object? Value)[] details) =>
         AddHistoryIfCurrent(
             events,
             BuildEvent(time, eventName, chatEnabled, details),
@@ -2456,27 +2933,9 @@ internal sealed class NinaDirectDataProvider :
             {
                 // N.I.N.A.'s SequenceMediator.Initialized getter itself cannot
                 // be called before sequence navigation has registered.
-                if (sequence.Initialized)
+                if (TrySubscribeToSequenceLifecycle(cancellationToken))
                 {
-                    lock (sequenceGate)
-                    {
-                        if (!started || cancellationToken.IsCancellationRequested)
-                        {
-                            return;
-                        }
-                        sequence.SequenceStarting += SequenceStarting;
-                        try
-                        {
-                            sequence.SequenceFinished += SequenceFinished;
-                        }
-                        catch
-                        {
-                            sequence.SequenceStarting -= SequenceStarting;
-                            throw;
-                        }
-                        sequenceSubscribed = true;
-                        return;
-                    }
+                    RefreshSequenceFailureRoot();
                 }
             }
             catch (NullReferenceException)
@@ -2486,7 +2945,11 @@ internal sealed class NinaDirectDataProvider :
 
             try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken)
+                await Task.Delay(
+                        sequenceSubscribed
+                            ? TimeSpan.FromSeconds(1)
+                            : TimeSpan.FromMilliseconds(250),
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -2496,6 +2959,231 @@ internal sealed class NinaDirectDataProvider :
         }
     }
 
+    private bool TrySubscribeToSequenceLifecycle(CancellationToken cancellationToken)
+    {
+        if (!started || cancellationToken.IsCancellationRequested || !sequence.Initialized)
+        {
+            return false;
+        }
+
+        lock (sequenceGate)
+        {
+            if (!started
+                || sequenceSubscriptionsPaused
+                || cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+            if (sequenceSubscribed)
+            {
+                return true;
+            }
+
+            var lifecycleVersion = Interlocked.Increment(ref sequenceLifecycleVersion);
+            var historyGeneration = CaptureHistoryGeneration();
+            Func<object, EventArgs, Task> starting = (sender, args) =>
+                HandleSequenceStarting(sender, args, lifecycleVersion, historyGeneration);
+            Func<object, EventArgs, Task> finished = (sender, args) =>
+                HandleSequenceFinished(sender, args, lifecycleVersion, historyGeneration);
+            sequenceStartingHandler = starting;
+            sequenceFinishedHandler = finished;
+            try
+            {
+                sequence.SequenceStarting += starting;
+                sequence.SequenceFinished += finished;
+                sequenceSubscribed = true;
+                return true;
+            }
+            catch
+            {
+                // Invalidate an invocation list that captured the first
+                // handler before the second subscription failed.
+                Interlocked.Increment(ref sequenceLifecycleVersion);
+                try
+                {
+                    sequence.SequenceStarting -= starting;
+                }
+                catch
+                {
+                    // The navigation object may be rotating. The version
+                    // guard still makes an orphaned callback inert.
+                }
+                try
+                {
+                    sequence.SequenceFinished -= finished;
+                }
+                catch
+                {
+                }
+                sequenceStartingHandler = null;
+                sequenceFinishedHandler = null;
+                sequenceSubscribed = false;
+                throw;
+            }
+        }
+    }
+
+    private void PauseSequenceSubscriptions()
+    {
+        lock (sequenceGate)
+        {
+            sequenceSubscriptionsPaused = true;
+            sequenceRunning = false;
+            DetachSequenceLifecycleHandlers();
+            BindSequenceFailureRoot(null);
+        }
+    }
+
+    private void ResumeSequenceSubscriptions()
+    {
+        lock (sequenceGate)
+        {
+            if (!started)
+            {
+                return;
+            }
+            sequenceSubscriptionsPaused = false;
+        }
+
+        try
+        {
+            if (TrySubscribeToSequenceLifecycle(CancellationToken.None))
+            {
+                RefreshSequenceFailureRoot();
+            }
+        }
+        catch (NullReferenceException)
+        {
+            // The background subscription loop will retry once sequence
+            // navigation finishes rotating to the new profile.
+        }
+    }
+
+    /// <summary>Caller must hold <see cref="sequenceGate"/>.</summary>
+    private void DetachSequenceLifecycleHandlers()
+    {
+        Interlocked.Increment(ref sequenceLifecycleVersion);
+        var starting = sequenceStartingHandler;
+        var finished = sequenceFinishedHandler;
+        sequenceStartingHandler = null;
+        sequenceFinishedHandler = null;
+        sequenceSubscribed = false;
+
+        if (starting is not null)
+        {
+            try
+            {
+                sequence.SequenceStarting -= starting;
+            }
+            catch
+            {
+                // The old navigation object can disappear during a profile
+                // switch. Its captured delegate is inert by version anyway.
+            }
+        }
+        if (finished is not null)
+        {
+            try
+            {
+                sequence.SequenceFinished -= finished;
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private void RefreshSequenceFailureRoot(
+        Func<ISequenceRootContainer?>? readRoot = null)
+    {
+        long lifecycleVersion;
+        long historyGeneration;
+        lock (sequenceGate)
+        {
+            if (!started || sequenceSubscriptionsPaused || sequenceRunning)
+            {
+                return;
+            }
+            lifecycleVersion = Volatile.Read(ref sequenceLifecycleVersion);
+            historyGeneration = CaptureHistoryGeneration();
+        }
+
+        ISequenceRootContainer? root = null;
+        try
+        {
+            if (readRoot is not null)
+            {
+                root = readRoot();
+            }
+            else if (sequence.Initialized)
+            {
+                root = RunOnUiThread(() => NinaDirectSequenceSnapshot.TryGetSequenceRoot(sequence));
+            }
+        }
+        catch (NullReferenceException)
+        {
+            // Sequence navigation has not registered yet.
+        }
+
+        lock (sequenceGate)
+        {
+            if (started
+                && !sequenceSubscriptionsPaused
+                && !sequenceRunning
+                && lifecycleVersion == Volatile.Read(ref sequenceLifecycleVersion)
+                && IsHistoryGenerationCurrent(historyGeneration))
+            {
+                BindSequenceFailureRoot(root);
+            }
+        }
+    }
+
+    /// <summary>Caller must hold <see cref="sequenceGate"/>.</summary>
+    private void BindSequenceFailureRoot(ISequenceRootContainer? root)
+    {
+        var historyGeneration = CaptureHistoryGeneration();
+        if (ReferenceEquals(sequenceFailureRoot, root)
+            && (root is null || sequenceFailureGeneration == historyGeneration))
+        {
+            return;
+        }
+
+        var subscriptionVersion = Interlocked.Increment(
+            ref sequenceFailureSubscriptionVersion);
+
+        if (sequenceFailureRoot is not null && sequenceFailureHandler is not null)
+        {
+            try
+            {
+                sequenceFailureRoot.FailureEvent -= sequenceFailureHandler;
+            }
+            catch
+            {
+                // A detached root may already be tearing down. The version
+                // guard prevents any captured invocation from writing.
+            }
+        }
+        sequenceFailureRoot = null;
+        sequenceFailureHandler = null;
+        sequenceFailureGeneration = -1;
+
+        if (root is null)
+        {
+            return;
+        }
+
+        Func<object, SequenceEntityFailureEventArgs, Task> handler =
+            (_, args) => SequenceEntityFailed(
+                args,
+                historyGeneration,
+                root,
+                subscriptionVersion);
+        root.FailureEvent += handler;
+        sequenceFailureRoot = root;
+        sequenceFailureHandler = handler;
+        sequenceFailureGeneration = historyGeneration;
+    }
+
     private Task TelescopeConnected(object sender, EventArgs args) => AddSimpleEvent("MOUNT-CONNECTED");
     private Task TelescopeDisconnected(object sender, EventArgs args) => AddSimpleEvent("MOUNT-DISCONNECTED");
     private Task TelescopeBeforeMeridianFlip(object sender, BeforeMeridianFlipEventArgs args) => AddSimpleEvent("MOUNT-BEFORE-FLIP");
@@ -2503,6 +3191,15 @@ internal sealed class NinaDirectDataProvider :
     private Task TelescopeHomed(object sender, EventArgs args) => AddSimpleEvent("MOUNT-HOMED");
     private Task TelescopeParked(object sender, EventArgs args) => AddSimpleEvent("MOUNT-PARKED");
     private Task TelescopeUnparked(object sender, EventArgs args) => AddSimpleEvent("MOUNT-UNPARKED");
+    private Task TelescopeSlewed(object sender, MountSlewedEventArgs args)
+    {
+        var access = accessPolicy.Current;
+        AddEvent(
+            "MOUNT-SLEWED",
+            ("From", NinaDirectSequenceSnapshot.ProjectCoordinates(args.From, access)),
+            ("To", NinaDirectSequenceSnapshot.ProjectCoordinates(args.To, access)));
+        return Task.CompletedTask;
+    }
     private Task CameraConnected(object sender, EventArgs args) => AddSimpleEvent("CAMERA-CONNECTED");
     private Task CameraDisconnected(object sender, EventArgs args) => AddSimpleEvent("CAMERA-DISCONNECTED");
     private Task CameraDownloadTimeout(object sender, EventArgs args) => AddSimpleEvent("CAMERA-DOWNLOAD-TIMEOUT");
@@ -2543,6 +3240,46 @@ internal sealed class NinaDirectDataProvider :
     private Task RotatorDisconnected(object sender, EventArgs args) => AddSimpleEvent("ROTATOR-DISCONNECTED");
     private Task FocuserConnected(object sender, EventArgs args) => AddSimpleEvent("FOCUSER-CONNECTED");
     private Task FocuserDisconnected(object sender, EventArgs args) => AddSimpleEvent("FOCUSER-DISCONNECTED");
+    private Task DomeConnected(object sender, EventArgs args) => AddSimpleEvent("DOME-CONNECTED");
+    private Task DomeDisconnected(object sender, EventArgs args) => AddSimpleEvent("DOME-DISCONNECTED");
+    private void DomeSynced(object? sender, EventArgs args) => AddEvent("DOME-SYNCED");
+    private Task DomeOpened(object sender, EventArgs args) => AddSimpleEvent("DOME-SHUTTER-OPENED");
+    private Task DomeClosed(object sender, EventArgs args) => AddSimpleEvent("DOME-SHUTTER-CLOSED");
+    private Task DomeParked(object sender, EventArgs args) => AddSimpleEvent("DOME-PARKED");
+    private Task DomeHomed(object sender, EventArgs args) => AddSimpleEvent("DOME-HOMED");
+    private Task DomeSlewed(object sender, DomeEventArgs args)
+    {
+        AddEvent("DOME-SLEWED", ("FromAzimuth", args.From), ("ToAzimuth", args.To));
+        return Task.CompletedTask;
+    }
+    private Task FlatConnected(object sender, EventArgs args) => AddSimpleEvent("FLAT-CONNECTED");
+    private Task FlatDisconnected(object sender, EventArgs args) => AddSimpleEvent("FLAT-DISCONNECTED");
+    private Task FlatOpened(object sender, EventArgs args) => AddSimpleEvent("FLAT-COVER-OPENED");
+    private Task FlatClosed(object sender, EventArgs args) => AddSimpleEvent("FLAT-COVER-CLOSED");
+    private Task FlatBrightnessChanged(object sender, FlatDeviceBrightnessChangedEventArgs args)
+    {
+        AddEvent("FLAT-BRIGHTNESS-CHANGED", ("Previous", args.From), ("New", args.To));
+        return Task.CompletedTask;
+    }
+    private Task FlatLightToggled(object sender, EventArgs args)
+    {
+        bool? lightOn = null;
+        try
+        {
+            lightOn = flatDevice.GetInfo().LightOn;
+        }
+        catch (Exception)
+        {
+            // The lifecycle transition remains useful even if a disconnect
+            // races the state read; absent details are omitted on the wire.
+        }
+        AddEvent("FLAT-LIGHT-TOGGLED", ("On", lightOn));
+        return Task.CompletedTask;
+    }
+    private Task WeatherConnected(object sender, EventArgs args) => AddSimpleEvent("WEATHER-CONNECTED");
+    private Task WeatherDisconnected(object sender, EventArgs args) => AddSimpleEvent("WEATHER-DISCONNECTED");
+    private Task SwitchConnected(object sender, EventArgs args) => AddSimpleEvent("SWITCH-CONNECTED");
+    private Task SwitchDisconnected(object sender, EventArgs args) => AddSimpleEvent("SWITCH-DISCONNECTED");
     private Task SafetyConnected(object sender, EventArgs args)
     {
         RecordCurrentSafetyState(
@@ -2614,45 +3351,313 @@ internal sealed class NinaDirectDataProvider :
             : isSafe
                 ? DirectSafetyState.Safe
                 : DirectSafetyState.Unsafe;
-        DirectSafetyState previous;
         lock (safetyStateGate)
         {
-            if (historyGeneration != CaptureHistoryGeneration())
+            if (!IsHistoryGenerationCurrent(historyGeneration))
             {
                 return;
             }
-            previous = safetyState;
+            var previous = safetyState;
             if (previous == next)
             {
                 return;
             }
             safetyState = next;
-        }
+            safetyStateRevision++;
 
-        // An unused safety monitor reports disconnected when the consumer is
-        // first registered. Keep that baseline quiet; real transitions are
-        // announced once a monitor connects.
-        if (previous == DirectSafetyState.Unknown && next == DirectSafetyState.Disconnected)
-        {
-            return;
+            if (!CanPublishSafetyLocked(historyGeneration))
+            {
+                return;
+            }
+
+            // Keep the state commit and its history publication in one
+            // serialization order. Otherwise a baseline could validate an
+            // older read, then append after this newer transition.
+            // An unused safety monitor reports disconnected when the
+            // consumer is first registered; keep that baseline quiet.
+            if (previous == DirectSafetyState.Unknown
+                && next == DirectSafetyState.Disconnected)
+            {
+                return;
+            }
+            if (next == DirectSafetyState.Disconnected)
+            {
+                AddEvent(historyGeneration, "SAFETY-DISCONNECTED");
+                return;
+            }
+            if (previous is DirectSafetyState.Unknown or DirectSafetyState.Disconnected)
+            {
+                AddEvent(historyGeneration, "SAFETY-CONNECTED");
+            }
+            AddEvent(
+                historyGeneration,
+                "SAFETY-CHANGED",
+                ("IsSafe", next == DirectSafetyState.Safe));
         }
-        if (next == DirectSafetyState.Disconnected)
-        {
-            AddEvent(historyGeneration, "SAFETY-DISCONNECTED");
-            return;
-        }
-        if (previous is DirectSafetyState.Unknown or DirectSafetyState.Disconnected)
-        {
-            AddEvent(historyGeneration, "SAFETY-CONNECTED");
-        }
-        AddEvent(
-            historyGeneration,
-            "SAFETY-CHANGED",
-            ("IsSafe", next == DirectSafetyState.Safe));
     }
 
-    private Task SequenceStarting(object sender, EventArgs args) => AddSimpleEvent("SEQUENCE-STARTING");
-    private Task SequenceFinished(object sender, EventArgs args) => AddSimpleEvent("SEQUENCE-FINISHED");
+    private void PublishCurrentSafetyBaseline(long historyGeneration)
+    {
+        long observedRevision;
+        long observedPublicationEpoch;
+        DirectSafetyState fallback;
+        lock (safetyStateGate)
+        {
+            if (!CanPublishSafetyLocked(historyGeneration))
+            {
+                return;
+            }
+            observedRevision = safetyStateRevision;
+            observedPublicationEpoch = safetyPublicationEpoch;
+            fallback = safetyState;
+        }
+
+        DirectSafetyState observed;
+        try
+        {
+            var info = safetyMonitor.GetInfo();
+            observed = !info.Connected
+                ? DirectSafetyState.Disconnected
+                : info.IsSafe
+                    ? DirectSafetyState.Safe
+                    : DirectSafetyState.Unsafe;
+        }
+        catch (Exception)
+        {
+            observed = fallback;
+        }
+
+        lock (safetyStateGate)
+        {
+            // A lifecycle, consent, or newer device transition invalidates
+            // this baseline entirely. The transition already committed and
+            // published its authoritative state under this same gate.
+            if (safetyPublicationEpoch != observedPublicationEpoch
+                || safetyStateRevision != observedRevision
+                || !CanPublishSafetyLocked(historyGeneration))
+            {
+                return;
+            }
+
+            var current = observed;
+            if (safetyState != current)
+            {
+                safetyState = current;
+                safetyStateRevision++;
+            }
+            if (current == DirectSafetyState.Unknown)
+            {
+                return;
+            }
+
+            // Publication is ordered under the same gate as transition
+            // publication, so whichever state wins the gate is also last in
+            // the event stream.
+            if (current == DirectSafetyState.Disconnected)
+            {
+                AddEvent(historyGeneration, "SAFETY-DISCONNECTED");
+                return;
+            }
+            AddEvent(historyGeneration, "SAFETY-CONNECTED");
+            AddEvent(
+                historyGeneration,
+                "SAFETY-CHANGED",
+                ("IsSafe", current == DirectSafetyState.Safe));
+        }
+    }
+
+    private bool CanPublishSafetyLocked(long historyGeneration) =>
+        !safetySharingBlocked
+        && eventDelivery.Current.Safety
+        && IsHistoryGenerationCurrent(historyGeneration);
+
+    private Task SequenceStarting(object sender, EventArgs args)
+    {
+        return HandleSequenceStarting(
+            sender,
+            args,
+            Volatile.Read(ref sequenceLifecycleVersion),
+            CaptureHistoryGeneration());
+    }
+
+    private Task HandleSequenceStarting(
+        object sender,
+        EventArgs args,
+        long lifecycleVersion,
+        long historyGeneration)
+    {
+        var root = NinaDirectSequenceSnapshot.TryGetSequenceRootFromOwner(sender);
+        lock (sequenceGate)
+        {
+            if (!started
+                || sequenceSubscriptionsPaused
+                || lifecycleVersion != Volatile.Read(ref sequenceLifecycleVersion)
+                || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return Task.CompletedTask;
+            }
+            sequenceRunning = true;
+            if (root is not null)
+            {
+                BindSequenceFailureRoot(root);
+            }
+            lock (sequenceFailureGate)
+            {
+                sequenceHadFailure = false;
+                sequenceOutcomeProvenanceComplete = !sequenceFailureCoverageBlocked
+                    && NinaDirectSequenceSnapshot.HasCompleteSequenceFailureCoverage(
+                        eventDelivery.Current);
+                lastSequenceFailureKey = null;
+                lastSequenceFailureAt = default;
+            }
+        }
+        AddEvent(historyGeneration, "SEQUENCE-STARTING");
+        return Task.CompletedTask;
+    }
+
+    private Task SequenceFinished(object sender, EventArgs args)
+    {
+        return HandleSequenceFinished(
+            sender,
+            args,
+            Volatile.Read(ref sequenceLifecycleVersion),
+            CaptureHistoryGeneration());
+    }
+
+    private Task HandleSequenceFinished(
+        object sender,
+        EventArgs args,
+        long lifecycleVersion,
+        long historyGeneration)
+    {
+        var root = NinaDirectSequenceSnapshot.TryGetSequenceRootFromOwner(sender);
+        bool hadFailures;
+        bool provenanceComplete;
+        string observedStatus;
+        lock (sequenceGate)
+        {
+            if (!started
+                || sequenceSubscriptionsPaused
+                || lifecycleVersion != Volatile.Read(ref sequenceLifecycleVersion)
+                || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return Task.CompletedTask;
+            }
+            root ??= sequenceFailureRoot;
+            observedStatus = root?.Status.ToString() ?? "UNKNOWN";
+            sequenceRunning = false;
+            lock (sequenceFailureGate)
+            {
+                hadFailures = sequenceHadFailure;
+                provenanceComplete = sequenceOutcomeProvenanceComplete;
+                sequenceHadFailure = false;
+                sequenceOutcomeProvenanceComplete = false;
+            }
+        }
+        var status = provenanceComplete ? observedStatus : "UNKNOWN";
+        var outcome = !provenanceComplete
+            ? "incomplete_provenance"
+            : status switch
+        {
+            "FINISHED" when hadFailures => "completed_with_failures",
+            "FINISHED" => "completed",
+            "FAILED" => "failed",
+            "SKIPPED" => "stopped",
+            "CREATED" => "cancelled_or_not_started",
+            _ => "ended",
+        };
+        AddEvent(
+            historyGeneration,
+            "SEQUENCE-FINISHED",
+            ("Outcome", outcome),
+            ("Status", status),
+            ("HadFailures", provenanceComplete && hadFailures));
+        return Task.CompletedTask;
+    }
+
+    private Task SequenceEntityFailed(
+        SequenceEntityFailureEventArgs args,
+        long historyGeneration,
+        ISequenceRootContainer subscribedRoot,
+        long subscriptionVersion)
+    {
+        lock (sequenceGate)
+        {
+            if (!started
+                || sequenceSubscriptionsPaused
+                || subscriptionVersion != Volatile.Read(
+                    ref sequenceFailureSubscriptionVersion)
+                || !ReferenceEquals(sequenceFailureRoot, subscribedRoot)
+                || sequenceFailureGeneration != historyGeneration
+                || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return Task.CompletedTask;
+            }
+        }
+
+        var delivery = eventDelivery.Current;
+        var deliveryScopeMask = NinaDirectSequenceSnapshot
+            .GetSequenceFailureDeliveryScopeMask(args.Entity);
+        if (!NinaDirectSequenceSnapshot.ShouldSendSequenceFailure(
+            deliveryScopeMask,
+            delivery))
+        {
+            // Category switches are transmission boundaries. Do not retain
+            // names, errors, or deduplication fingerprints for a failure the
+            // active policy does not permit.
+            return Task.CompletedTask;
+        }
+
+        var entityType = args.Entity?.GetType().Name ?? "Unknown";
+        var entity = SanitizeEventText(args.Entity?.Name ?? entityType, 256);
+        var error = SanitizeEventText(args.Exception?.Message ?? "Sequence entity failed.", 1_024);
+        var entityIdentity = args.Entity is null
+            ? 0
+            : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(args.Entity);
+        var key = $"{historyGeneration}|{entityIdentity}|{entityType}|{error}";
+        var now = DateTimeOffset.UtcNow;
+        lock (sequenceFailureGate)
+        {
+            if (string.Equals(lastSequenceFailureKey, key, StringComparison.Ordinal)
+                && now - lastSequenceFailureAt < TimeSpan.FromSeconds(2))
+            {
+                return Task.CompletedTask;
+            }
+            lastSequenceFailureKey = key;
+            lastSequenceFailureAt = now;
+        }
+
+        if (!TryAddEventCore(
+            historyGeneration,
+            DateTime.Now,
+            "SEQUENCE-ENTITY-FAILED",
+            chatEnabled: true,
+            ("Entity", entity),
+            ("EntityType", entityType),
+            ("Error", error),
+            (SequenceFailureDeliveryScopesField, deliveryScopeMask)))
+        {
+            return Task.CompletedTask;
+        }
+        lock (sequenceGate)
+        {
+            if (!started
+                || sequenceSubscriptionsPaused
+                || subscriptionVersion != Volatile.Read(
+                    ref sequenceFailureSubscriptionVersion)
+                || !ReferenceEquals(sequenceFailureRoot, subscribedRoot)
+                || sequenceFailureGeneration != historyGeneration
+                || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return Task.CompletedTask;
+            }
+            lock (sequenceFailureGate)
+            {
+                sequenceHadFailure = true;
+            }
+        }
+        return Task.CompletedTask;
+    }
 
     private Task FilterWheelChanged(object sender, FilterChangedEventArgs args)
     {

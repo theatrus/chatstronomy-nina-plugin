@@ -61,6 +61,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         IFocuserMediator focuser,
         ISequenceMediator sequence,
         ISafetyMonitorMediator safetyMonitor,
+        IDomeMediator dome,
+        IFlatDeviceMediator flatDevice,
+        IWeatherDataMediator weatherData,
+        ISwitchMediator switchMediator,
         IImageSaveMediator imageSave,
         IApplicationStatusMediator applicationStatus,
         IAutoFocusVMFactory autoFocusFactory,
@@ -82,6 +86,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             focuser,
             sequence,
             safetyMonitor,
+            dome,
+            flatDevice,
+            weatherData,
+            switchMediator,
             imageSave,
             applicationStatus,
             autoFocusFactory,
@@ -539,6 +547,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         get => settings.SendFilterFocuserRotatorEvents;
         set => SetEventDeliveryOption(() => settings.SendFilterFocuserRotatorEvents = value);
+    }
+
+    public bool SendObservatoryAndFlatPanelEvents
+    {
+        get => settings.SendObservatoryAndFlatPanelEvents;
+        set => SetEventDeliveryOption(() => settings.SendObservatoryAndFlatPanelEvents = value);
     }
 
     public bool SendEquipmentConnectionEvents
@@ -1298,6 +1312,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(SendSafetyEvents),
             nameof(SendTargetSchedulerEvents),
             nameof(SendFilterFocuserRotatorEvents),
+            nameof(SendObservatoryAndFlatPanelEvents),
             nameof(SendEquipmentConnectionEvents),
             nameof(SendOtherEvents),
             nameof(SendNinaNotifications),

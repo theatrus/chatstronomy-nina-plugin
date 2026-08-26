@@ -506,6 +506,14 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Observatory and flat panel" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendObservatoryAndFlatPanelEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <TextBlock VerticalAlignment="Center" Text="Other N.I.N.A. events" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendOtherEvents}" />
                             </Grid>

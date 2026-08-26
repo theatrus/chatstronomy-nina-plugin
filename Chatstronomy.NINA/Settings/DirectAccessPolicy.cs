@@ -190,6 +190,8 @@ internal static class DirectPrivacyProjection
         "Azimuth",
         "AzimuthString",
         "AzimuthDegrees",
+        "FromAzimuth",
+        "ToAzimuth",
         "TimeToMeridianFlip",
         "TimeToMeridianFlipString",
         "HoursToMeridianString",

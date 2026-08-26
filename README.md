@@ -60,7 +60,10 @@ values before sending telemetry. Hardware device identifiers and structured
 local filesystem or script paths are always redacted, even when position
 sharing is enabled. Images, selected log lines, notifications, user-entered
 target names, and ordinary network connection information can still contain
-identifying information; review them before enabling forwarding.
+identifying information. Enabled sequence sharing can also include user-authored
+annotation and message text. Failure summaries can contain sanitized N.I.N.A.
+operational error text; local path-shaped strings are redacted before
+transmission. Review these choices before enabling forwarding.
 
 Ordinary event categories, image sharing, and popup notifications start
 **enabled by default**. Review those settings before pairing with the Hub or
@@ -79,14 +82,19 @@ level. Before pairing, review the hosted
 
 The plugin provides bounded native histories and typed command handling for:
 
-- equipment connection and state changes;
-- images and larger chat thumbnails;
+- equipment connection and state changes, including dome/shutter activity,
+  flat-panel cover, light, and brightness changes, and connection state for
+  weather and switch devices;
+- images, larger chat thumbnails, and image-save failures;
 - autofocus results and charts from the report matching the completed run;
 - guider state, dithers, history, and graphs;
-- native safety-monitor connection and safe/unsafe transitions;
-- sequence lifecycle, timed waits, and supported long-running Sequencer+ waits,
-  including **Wait Until Safe**;
-- camera cooling, slew, center, and plate-solve results;
+- native safety-monitor connection and safe/unsafe transitions, retained as
+  current status while safety delivery remains enabled;
+- sequence lifecycle, item failures, and explicit completion outcomes;
+- built-in timed, altitude, Moon-altitude, Sun-altitude, horizon, and safety
+  waits, plus supported long-running Sequencer+ condition and manual waits;
+- camera cooling and warming, mount-slew completion, center, and plate-solve
+  results;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
@@ -96,10 +104,17 @@ be disabled independently for each N.I.N.A. profile. Disabled categories never
 leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
 turning a category off immediately removes its buffered events from subsequent
 queries. Images and thumbnails are also withheld when their category is off.
-Hardware-command failure notifications follow the same event-category controls.
-Safety-monitor transitions have their own event switch; a safety wait is sent
-only when both sequence and safety delivery are enabled. Sequencer+ condition
-expressions and free-form pause reasons remain inside N.I.N.A.
+Once N.I.N.A. accepts a locally permitted command, its terminal failure is
+always delivered as part of that command exchange; optional event switches do
+not hide the outcome. Safety-monitor transitions have their own event switch; a
+safety wait is sent only when both sequence and safety delivery are enabled.
+The dedicated **Observatory and flat panel** switch covers dome/shutter actions
+and flat cover, light, and brightness changes. Their connection events, along
+with weather-station and switch-device connection state, use **Equipment
+connections**. Structured weather measurements, switch values, and LiveStack
+data are not captured. Enabled popup notifications and opt-in raw N.I.N.A. logs
+remain unstructured text and may contain operational details. Sequencer+
+condition expressions and free-form pause reasons remain inside N.I.N.A.
 Changing mount, sequence, or safety delivery first closes the current Direct
 session, then applies the new selection and reconnects. This prevents an older
 Hub or local runtime from turning cached operation state into a final message

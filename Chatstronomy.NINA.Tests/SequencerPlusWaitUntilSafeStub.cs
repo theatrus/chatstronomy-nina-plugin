@@ -1,7 +1,7 @@
 using NINA.Core.Model;
 using NINA.Sequencer.SequenceItem;
 
-namespace SequencerPlus.Instructions;
+namespace NINA.Plugin.SequencerPlus;
 
 /// <summary>
 /// Contract-shaped test double for Sequencer+'s instruction. The production

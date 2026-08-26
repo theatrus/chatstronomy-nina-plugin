@@ -367,6 +367,12 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendFilterFocuserRotatorEvents), value);
     }
 
+    public bool SendObservatoryAndFlatPanelEvents
+    {
+        get => options.GetValueBoolean(nameof(SendObservatoryAndFlatPanelEvents), true);
+        set => options.SetValueBoolean(nameof(SendObservatoryAndFlatPanelEvents), value);
+    }
+
     public bool SendEquipmentConnectionEvents
     {
         get => options.GetValueBoolean(nameof(SendEquipmentConnectionEvents), true);
@@ -424,6 +430,7 @@ internal sealed class ChatstronomySettings
         Safety: SendSafetyEvents,
         TargetScheduler: SendTargetSchedulerEvents,
         FilterFocuserRotator: SendFilterFocuserRotatorEvents,
+        ObservatoryAndFlatPanel: SendObservatoryAndFlatPanelEvents,
         EquipmentConnections: SendEquipmentConnectionEvents,
         OtherEvents: SendOtherEvents,
         NinaNotifications: SendNinaNotifications,
