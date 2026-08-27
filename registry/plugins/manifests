@@ -6,7 +6,7 @@
       "Major": "0",
       "Minor": "1",
       "Patch": "0",
-      "Build": "23"
+      "Build": "24"
     },
     "Author": "Yann Ramin",
     "Homepage": "https://chatstronomy.com/",
@@ -34,9 +34,9 @@
       "AltScreenshotURL": ""
     },
     "Installer": {
-      "URL": "https://github.com/theatrus/chatstronomy-nina-plugin/releases/download/v0.1.0.23/Chatstronomy.NINA.0.1.0.23.zip",
+      "URL": "https://github.com/theatrus/chatstronomy-nina-plugin/releases/download/v0.1.0.24/Chatstronomy.NINA.0.1.0.24.zip",
       "Type": "ARCHIVE",
-      "Checksum": "37AD42D93FAB1DAC3D9AE1AE8BBC80E890DAA8BFDBE1EF416C9D8D7858E0DE58",
+      "Checksum": "71486D0310B507BC30F85D57820BE9D3EFC93371D4A5A3C58C8CCC3F440C13E6",
       "ChecksumType": "SHA256"
     }
   }
