@@ -33,65 +33,104 @@ internal sealed class NinaLogWatcher : IDisposable
     /// newline-free megabyte accumulates across every read.
     private const int MaxPendingChars = 64 * 1024;
 
-    private readonly Action<NinaLogRecord> onRecord;
+    private readonly Action<NinaLogRecord, long> onRecord;
     /// Start and Stop are called from plugin lifecycle code and must not
     /// interleave: a Stop that returned before its tail unwound used to let a
     /// following Start run a second tail over the same file.
     private readonly object gate = new();
     private CancellationTokenSource? stop;
     private Task? watcherTask;
+    private bool desiredRunning;
+    private long desiredGeneration;
 
-    internal NinaLogWatcher(Action<NinaLogRecord> onRecord)
+    internal NinaLogWatcher(Action<NinaLogRecord, long> onRecord)
     {
         this.onRecord = onRecord;
     }
 
-    internal void Start()
+    internal void Start(long captureGeneration)
     {
         lock (gate)
         {
-            if (stop is not null)
+            desiredRunning = true;
+            desiredGeneration = captureGeneration;
+            if (watcherTask is not null)
             {
                 return;
             }
-            var cancellation = new CancellationTokenSource();
-            stop = cancellation;
-            watcherTask = Task.Run(() => WatchAsync(cancellation.Token));
+            StartCore(captureGeneration);
         }
     }
 
     internal void Stop()
     {
+        CancellationTokenSource? cancellation;
+        Task? running;
         lock (gate)
         {
-            var cancellation = stop;
-            var running = watcherTask;
-            stop = null;
-            watcherTask = null;
+            desiredRunning = false;
+            cancellation = stop;
+            running = watcherTask;
             if (cancellation is null)
             {
                 return;
             }
-
             cancellation.Cancel();
-            try
+        }
+        try
+        {
+            // A timed-out tail remains registered as the sole active worker;
+            // Start() records the successor generation and its continuation
+            // starts that tail only after this one has actually unwound.
+            running?.Wait(StopTimeout);
+        }
+        catch (AggregateException)
+        {
+            // WatchAsync handles its own failures; nothing to add here.
+        }
+    }
+
+    private void StartCore(long captureGeneration)
+    {
+        var cancellation = new CancellationTokenSource();
+        stop = cancellation;
+        var running = Task.Run(() => WatchAsync(
+            cancellation.Token,
+            captureGeneration));
+        watcherTask = running;
+        _ = running.ContinueWith(
+            _ => WatcherEnded(running, cancellation),
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+    }
+
+    private void WatcherEnded(
+        Task completed,
+        CancellationTokenSource cancellation)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(watcherTask, completed))
             {
-                // Teardown unsubscribes the consumer straight after this
-                // returns, so wait for the loop to leave rather than let it
-                // deliver records into a stopped provider.
-                running?.Wait(StopTimeout);
+                cancellation.Dispose();
+                return;
             }
-            catch (AggregateException)
-            {
-                // WatchAsync handles its own failures; nothing to add here.
-            }
+            watcherTask = null;
+            stop = null;
             cancellation.Dispose();
+            if (desiredRunning)
+            {
+                StartCore(desiredGeneration);
+            }
         }
     }
 
     public void Dispose() => Stop();
 
-    private async Task WatchAsync(CancellationToken cancellationToken)
+    private async Task WatchAsync(
+        CancellationToken cancellationToken,
+        long captureGeneration)
     {
         string? activePath = null;
         long position = 0;
@@ -139,7 +178,10 @@ internal sealed class NinaLogWatcher : IDisposable
                     if (read.Text.Length > 0)
                     {
                         pending += read.Text;
-                        pending = ProcessCompleteLines(pending);
+                        pending = ProcessCompleteLines(
+                            pending,
+                            captureGeneration,
+                            cancellationToken);
                         if (pending.Length > MaxPendingChars)
                         {
                             // A single line this long is not a log record we
@@ -174,11 +216,15 @@ internal sealed class NinaLogWatcher : IDisposable
         }
     }
 
-    private string ProcessCompleteLines(string text)
+    private string ProcessCompleteLines(
+        string text,
+        long captureGeneration,
+        CancellationToken cancellationToken)
     {
         var start = 0;
         while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var newline = text.IndexOf('\n', start);
             if (newline < 0)
             {
@@ -190,7 +236,7 @@ internal sealed class NinaLogWatcher : IDisposable
             {
                 try
                 {
-                    onRecord(record);
+                    onRecord(record, captureGeneration);
                 }
                 catch
                 {

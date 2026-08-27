@@ -426,7 +426,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="Events, images, and popup notifications start enabled. Disable unwanted categories before connecting. Disabled event categories are never sent to the Hub or local bot; disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
+                            Text="Most events, images, and popup notifications start enabled; weather reports are opt-in. Disabled event categories are never sent to the Hub or local bot, and disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
                             <Grid Margin="0,3,18,3">
@@ -466,8 +466,45 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Sequence, waits, and cooling" />
+                                <TextBlock VerticalAlignment="Center" Text="Sequence, timed waits, and cooling" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSequenceEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Safety monitor and safety waits" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSafetyEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Meaningful weather changes" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendWeatherChangeEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="High-wind alerts" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendHighWindAlerts}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="High-wind threshold (m/s)" />
+                                <TextBox
+                                    Grid.Column="1"
+                                    Width="72"
+                                    Margin="8,0,0,0"
+                                    HorizontalContentAlignment="Right"
+                                    Text="{Binding HighWindThresholdMetersPerSecond, UpdateSourceTrigger=LostFocus}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>
@@ -498,6 +535,14 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Observatory and flat panel" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendObservatoryAndFlatPanelEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <TextBlock VerticalAlignment="Center" Text="Other N.I.N.A. events" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendOtherEvents}" />
                             </Grid>
@@ -510,6 +555,11 @@
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendNinaNotifications}" />
                             </Grid>
                         </UniformGrid>
+
+                        <TextBlock
+                            Margin="0,7,0,0"
+                            Text="Weather changes are grouped and rate-limited. High-wind alerts use wind speed or gust, report alert and recovery, and may resynchronize an active alert after reconnecting or changing the threshold. Weather chat is informational and does not replace a safety monitor or hardware interlock."
+                            TextWrapping="Wrap" />
 
                         <TextBlock Margin="0,14,0,3" FontWeight="SemiBold" Text="N.I.N.A. log lines" />
                         <TextBlock

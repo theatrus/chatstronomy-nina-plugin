@@ -11,8 +11,13 @@ internal sealed record DirectEventDeliveryOptions(
     bool Guiding,
     bool Mount,
     bool Sequence,
+    bool Safety,
+    bool WeatherChanges,
+    bool HighWindAlerts,
+    double HighWindThresholdMetersPerSecond,
     bool TargetScheduler,
     bool FilterFocuserRotator,
+    bool ObservatoryAndFlatPanel,
     bool EquipmentConnections,
     bool OtherEvents,
     bool NinaNotifications,
@@ -28,8 +33,13 @@ internal sealed record DirectEventDeliveryOptions(
         Guiding: true,
         Mount: true,
         Sequence: true,
+        Safety: true,
+        WeatherChanges: false,
+        HighWindAlerts: false,
+        HighWindThresholdMetersPerSecond: 10.0,
         TargetScheduler: true,
         FilterFocuserRotator: true,
+        ObservatoryAndFlatPanel: true,
         EquipmentConnections: true,
         OtherEvents: true,
         NinaNotifications: true,
@@ -41,6 +51,13 @@ internal sealed record DirectEventDeliveryOptions(
 
     internal bool ShouldSendEvent(string eventName)
     {
+        // Once N.I.N.A. has accepted a locally permitted command, its terminal
+        // outcome is part of that command exchange rather than optional event
+        // chatter. A delivery toggle must never hide a later failure.
+        if (eventName.Equals("CHATSTRONOMY-COMMAND-FAILED", StringComparison.Ordinal))
+        {
+            return true;
+        }
         if (eventName.Equals("NINA-NOTIFICATION", StringComparison.Ordinal))
         {
             return NinaNotifications;
@@ -57,20 +74,31 @@ internal sealed record DirectEventDeliveryOptions(
         {
             return Sequence;
         }
+        if (eventName.StartsWith("SAFETY-", StringComparison.Ordinal))
+        {
+            return Safety;
+        }
+        if (eventName.Equals("WEATHER-CHANGED", StringComparison.Ordinal))
+        {
+            return WeatherChanges;
+        }
+        if (eventName.Equals("WEATHER-HIGH-WIND", StringComparison.Ordinal))
+        {
+            return HighWindAlerts;
+        }
         if (eventName.StartsWith("IMAGE-", StringComparison.Ordinal)
-            || eventName.Equals("API-CAPTURE-FINISHED", StringComparison.Ordinal))
+            || eventName.Equals("API-CAPTURE-FINISHED", StringComparison.Ordinal)
+            || eventName.Equals("CAMERA-DOWNLOAD-TIMEOUT", StringComparison.Ordinal))
         {
             return Images;
         }
         if (eventName.StartsWith("AUTOFOCUS-", StringComparison.Ordinal)
-            || eventName.Equals("ERROR-AF", StringComparison.Ordinal)
-            || eventName.Equals("FOCUSER-USER-FOCUSED", StringComparison.Ordinal))
+            || eventName.Equals("ERROR-AF", StringComparison.Ordinal))
         {
             return Autofocus;
         }
         if (eventName.EndsWith("-CONNECTED", StringComparison.Ordinal)
-            || eventName.EndsWith("-DISCONNECTED", StringComparison.Ordinal)
-            || eventName.Equals("CAMERA-DOWNLOAD-TIMEOUT", StringComparison.Ordinal))
+            || eventName.EndsWith("-DISCONNECTED", StringComparison.Ordinal))
         {
             return EquipmentConnections;
         }
@@ -85,9 +113,15 @@ internal sealed record DirectEventDeliveryOptions(
         }
         if (eventName.StartsWith("FILTERWHEEL-", StringComparison.Ordinal)
             || eventName.StartsWith("ROTATOR-", StringComparison.Ordinal)
-            || eventName.StartsWith("FOCUSER-", StringComparison.Ordinal))
+            || eventName.StartsWith("FOCUSER-", StringComparison.Ordinal)
+            || eventName.Equals("FOCUSER-USER-FOCUSED", StringComparison.Ordinal))
         {
             return FilterFocuserRotator;
+        }
+        if (eventName.StartsWith("DOME-", StringComparison.Ordinal)
+            || eventName.StartsWith("FLAT-", StringComparison.Ordinal))
+        {
+            return ObservatoryAndFlatPanel;
         }
         return OtherEvents;
     }

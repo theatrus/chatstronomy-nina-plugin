@@ -17,6 +17,23 @@ namespace Chatstronomy.NINA.Direct;
 /// </summary>
 internal static class NinaDirectSequenceSnapshot
 {
+    [Flags]
+    private enum ProjectionScope
+    {
+        None = 0,
+        Images = 1 << 0,
+        Autofocus = 1 << 1,
+        Guiding = 1 << 2,
+        Mount = 1 << 3,
+        Sequence = 1 << 4,
+        Safety = 1 << 5,
+        FilterFocuserRotator = 1 << 6,
+        ObservatoryAndFlatPanel = 1 << 7,
+        EquipmentConnections = 1 << 8,
+        Other = 1 << 9,
+        TargetScheduler = 1 << 10,
+    }
+
     private static readonly IReadOnlyDictionary<string, string> DetailNames =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -36,7 +53,6 @@ internal static class NinaDirectSequenceSnapshot
             ["Intercept"] = "Intercept",
             ["ForceCalibration"] = "ForceCalibration",
             ["PositionAngle"] = "Rotation",
-            ["Value"] = "Value",
             ["Text"] = "Text",
             ["Time"] = "Delay",
             ["Iterations"] = "Iterations",
@@ -46,7 +62,8 @@ internal static class NinaDirectSequenceSnapshot
     internal static IReadOnlyList<Dictionary<string, object?>> Build(
         ISequenceMediator sequence,
         DirectEventDeliveryOptions? delivery = null,
-        DirectAccessOptions? access = null)
+        DirectAccessOptions? access = null,
+        bool? safetyMonitorIsSafe = null)
     {
         if (!sequence.Initialized)
         {
@@ -54,17 +71,20 @@ internal static class NinaDirectSequenceSnapshot
         }
 
         var root = GetSequenceRoot(sequence);
+        var options = delivery ?? DirectEventDeliveryOptions.Default;
         var result = new List<Dictionary<string, object?>>
         {
             new()
             {
                 ["GlobalTriggers"] = root is ITriggerable triggerable
-                    ? triggerable.GetTriggersSnapshot().Select(BuildTrigger).ToArray()
+                    ? triggerable.GetTriggersSnapshot()
+                        .Select(trigger => BuildTrigger(trigger, options))
+                        .ToArray()
                     : Array.Empty<Dictionary<string, object?>>(),
             },
         };
-        var options = delivery ?? DirectEventDeliveryOptions.Default;
-        result.AddRange(root.GetItemsSnapshot().Select(item => BuildItem(item, options)));
+        result.AddRange(root.GetItemsSnapshot()
+            .Select(item => BuildItem(item, options, safetyMonitorIsSafe)));
         var privacy = access ?? DirectAccessOptions.Default;
         foreach (var entity in result)
         {
@@ -87,16 +107,72 @@ internal static class NinaDirectSequenceSnapshot
             ?? throw new InvalidOperationException("The loaded N.I.N.A. sequence has no root container.");
     }
 
+    internal static ISequenceRootContainer? TryGetSequenceRoot(ISequenceMediator sequence)
+    {
+        try
+        {
+            return GetSequenceRoot(sequence) as ISequenceRootContainer;
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException
+                or NullReferenceException
+                or TargetInvocationException)
+        {
+            return null;
+        }
+    }
+
+    internal static ISequenceRootContainer? TryGetSequenceRootFromOwner(object? owner)
+    {
+        try
+        {
+            var sequencer = OptionalProperty(owner, "Sequencer");
+            return OptionalProperty(sequencer, "MainContainer") as ISequenceRootContainer;
+        }
+        catch (Exception exception) when (
+            exception is NullReferenceException or TargetInvocationException)
+        {
+            return null;
+        }
+    }
+
     private static Dictionary<string, object?> BuildItem(
         ISequenceItem item,
-        DirectEventDeliveryOptions delivery)
+        DirectEventDeliveryOptions delivery,
+        bool? safetyMonitorIsSafe)
     {
         var itemType = item.GetType().Name;
-        var expandContainer = item is ISequenceContainer
-            && itemType is not "SmartExposure" and not "TakeManyExposures";
+        var isTargetContainer = IsActualTargetContainer(item);
+        if (isTargetContainer
+            && item is ISequenceContainer privateTarget
+            && !delivery.TargetScheduler)
+        {
+            // Target containers often carry a user label in Name and the
+            // actual object name in Target. Keep neither when target sharing
+            // is disabled. Their nested instructions remain independently
+            // projectable so, for example, a consented cooling or wait state
+            // does not disappear with its private parent.
+            return new Dictionary<string, object?>
+            {
+                ["Name"] = "_Container",
+                ["Status"] = "SUPPRESSED",
+                ["IsTargetContainer"] = true,
+                ["ChatEnabled"] = false,
+                ["Items"] = privateTarget.GetItemsSnapshot()
+                    .Select(child => BuildItem(child, delivery, safetyMonitorIsSafe))
+                    .ToArray(),
+            };
+        }
+        var requiredScopes = RequiredScopes(item);
+        if (!ScopesEnabled(requiredScopes, delivery))
+        {
+            return BuildSuppressedItem(item, delivery, safetyMonitorIsSafe);
+        }
+
+        var expandContainer = ShouldExpandContainer(item);
         var result = BaseEntity(item, expandContainer ? "_Container" : string.Empty);
 
-        if (item is IDeepSkyObjectContainer)
+        if (isTargetContainer)
         {
             result["IsTargetContainer"] = true;
             result["ChatEnabled"] = delivery.TargetScheduler;
@@ -111,40 +187,285 @@ internal static class NinaDirectSequenceSnapshot
         if (expandContainer && item is ISequenceContainer container)
         {
             result["Items"] = container.GetItemsSnapshot()
-                .Select(child => BuildItem(child, delivery))
+                .Select(child => BuildItem(child, delivery, safetyMonitorIsSafe))
                 .ToArray();
             result["Conditions"] = container is IConditionable conditionable
-                ? conditionable.GetConditionsSnapshot().Select(BuildCondition).ToArray()
+                ? conditionable.GetConditionsSnapshot()
+                    .Select(condition => BuildCondition(condition, delivery))
+                    .ToArray()
                 : Array.Empty<Dictionary<string, object?>>();
             result["Triggers"] = container is ITriggerable triggerable
-                ? triggerable.GetTriggersSnapshot().Select(BuildTrigger).ToArray()
+                ? triggerable.GetTriggersSnapshot()
+                    .Select(trigger => BuildTrigger(trigger, delivery))
+                    .ToArray()
                 : Array.Empty<Dictionary<string, object?>>();
         }
 
-        AddItemDetails(item, result);
-        AddDeliveryDetails(item, result, delivery);
+        AddItemDetails(item, result, safetyMonitorIsSafe, delivery);
+        AddDeliveryDetails(result, requiredScopes);
         return result;
     }
 
-    private static void AddDeliveryDetails(
+    private static Dictionary<string, object?> BuildSuppressedItem(
         ISequenceItem item,
-        IDictionary<string, object?> result,
-        DirectEventDeliveryOptions delivery)
+        DirectEventDeliveryOptions delivery,
+        bool? safetyMonitorIsSafe)
     {
-        var typeName = item.GetType().Name;
-        if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz" or "Center" or "CenterAndRotate")
+        var result = SuppressedEntity("SequenceItem");
+        if (ShouldExpandContainer(item) && item is ISequenceContainer container)
         {
-            result["ChatEnabled"] = delivery.Mount;
+            result["Items"] = container.GetItemsSnapshot()
+                .Select(child => BuildItem(child, delivery, safetyMonitorIsSafe))
+                .ToArray();
+            result["Conditions"] = container is IConditionable conditionable
+                ? conditionable.GetConditionsSnapshot()
+                    .Select(condition => BuildCondition(condition, delivery))
+                    .ToArray()
+                : Array.Empty<Dictionary<string, object?>>();
+            result["Triggers"] = container is ITriggerable triggerable
+                ? triggerable.GetTriggersSnapshot()
+                    .Select(trigger => BuildTrigger(trigger, delivery))
+                    .ToArray()
+                : Array.Empty<Dictionary<string, object?>>();
         }
-        else if (typeName is "CoolCamera" or "WarmCamera" or "WaitForTime" or "WaitForTimeSpan")
+        return result;
+    }
+
+    private static Dictionary<string, object?> SuppressedEntity(string kind) => new()
+    {
+        ["Name"] = $"Suppressed_{kind}",
+        ["Status"] = "SUPPRESSED",
+        ["ChatEnabled"] = false,
+        ["Suppressed"] = true,
+    };
+
+    private static bool ShouldExpandContainer(ISequenceItem item) =>
+        item is ISequenceContainer
+        && item.GetType().Name is not "SmartExposure"
+            and not "TakeManyExposures"
+            and not "SmartSubframeExposure";
+
+    private static bool IsActualTargetContainer(ISequenceItem item)
+    {
+        if (item is not IDeepSkyObjectContainer)
         {
-            result["ChatEnabled"] = delivery.Sequence;
+            return false;
+        }
+
+        // IDeepSkyObjectContainer is also used by execution-context and
+        // third-party proxy containers. Only N.I.N.A.'s concrete observing
+        // target types are targets; unknown implementations remain ordinary
+        // containers and are governed by their own event scope.
+        return item.GetType().FullName is
+            "NINA.Sequencer.Container.DeepSkyObjectContainer"
+            or "NINA.ViewModel.Sequencer.SimpleSequence.SimpleDSOContainer";
+    }
+
+    private static ProjectionScope RequiredScopes(ISequenceEntity entity)
+    {
+        if (entity is ISequenceItem item && IsActualTargetContainer(item))
+        {
+            return ProjectionScope.TargetScheduler;
+        }
+
+        var type = entity.GetType();
+        var typeName = type.Name;
+        var namespaceName = type.Namespace ?? string.Empty;
+        if (typeName.StartsWith("UnknownSequence", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Other;
+        }
+        var isNinaSequencer = namespaceName.StartsWith(
+            "NINA.Sequencer",
+            StringComparison.Ordinal);
+        var isSequencerPlus = namespaceName.StartsWith(
+            "NINA.Plugin.SequencerPlus",
+            StringComparison.Ordinal);
+        if (!isNinaSequencer && !isSequencerPlus)
+        {
+            // A third-party item may reuse a familiar simple type name. Do not
+            // let that accidentally bypass Other Events; only N.I.N.A. and the
+            // explicitly supported Sequencer+ surface use the mappings below.
+            return ProjectionScope.Other;
+        }
+        if (IsSafetyEntity(typeName))
+        {
+            return ProjectionScope.Sequence | ProjectionScope.Safety;
+        }
+        if (typeName.StartsWith("Autofocus", StringComparison.Ordinal)
+            || typeName == "RunAutofocus"
+            || namespaceName.Contains(".Autofocus", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Autofocus;
+        }
+        if (typeName.Contains("MeridianFlip", StringComparison.OrdinalIgnoreCase)
+            || typeName is "FindHome" or "ParkScope" or "SetTracking"
+                or "SlewScopeToRaDec" or "SlewScopeToAltAz"
+                or "SlewToRADec" or "SlewToAltAz" or "UnparkScope"
+                or "Center" or "CenterAndRotate" or "SolveAndSync" or "SolveAndRotate"
+                or "CenterAfterDriftTrigger" or "PlatesolvingImageFollower"
+                or "DoFlip" or "PassMeridian"
+            || namespaceName.Contains(".Telescope", StringComparison.Ordinal)
+            || namespaceName.Contains(".Platesolving", StringComparison.Ordinal)
+            || namespaceName.Contains(".MeridianFlip", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Mount;
+        }
+        if (typeName is "TakeExposure" or "TakeSubframeExposure"
+            or "TakeManyExposures" or "SmartExposure" or "SmartSubframeExposure"
+            or "DewHeater" or "SetReadoutMode" or "SetUSBLimit"
+            || namespaceName.Contains(".Imaging", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Images;
+        }
+        if (typeName is "AutoBrightnessFlat" or "AutoExposureFlat" or "SkyFlat"
+            or "TrainedDarkFlatExposure" or "TrainedFlatExposure")
+        {
+            return ProjectionScope.Images | ProjectionScope.ObservatoryAndFlatPanel;
+        }
+        if (typeName is "Dither" or "StartGuiding" or "StopGuiding"
+            or "DitherAfterExposures" or "RestoreGuiding"
+            || namespaceName.Contains(".Guider", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Guiding;
+        }
+        if (typeName is "SwitchFilter" or "MoveFocuserAbsolute"
+            or "MoveFocuserByTemperature" or "MoveFocuserRelative"
+            or "MoveRotatorMechanical" or "RotateImage" or "FlipRotator"
+            || namespaceName.Contains(".FilterWheel", StringComparison.Ordinal)
+            || namespaceName.Contains(".Focuser", StringComparison.Ordinal)
+            || namespaceName.Contains(".Rotator", StringComparison.Ordinal))
+        {
+            return ProjectionScope.FilterFocuserRotator;
+        }
+        if (typeName is "OpenDomeShutter" or "CloseDomeShutter"
+            or "DisableDomeSynchronization" or "EnableDomeSynchronization"
+            or "FindHomeDome" or "ParkDome" or "SlewDomeAzimuth"
+            or "SynchronizeDome" or "CloseCover" or "OpenCover"
+            or "SetBrightness" or "ToggleLight" or "SynchronizeDomeTrigger"
+            || namespaceName.Contains(".Dome", StringComparison.Ordinal)
+            || namespaceName.Contains(".FlatDevice", StringComparison.Ordinal))
+        {
+            return ProjectionScope.ObservatoryAndFlatPanel;
+        }
+        if (typeName is "ConnectAllEquipment" or "ConnectEquipment"
+            or "DisconnectAllEquipment" or "DisconnectEquipment" or "SwitchProfile"
+            or "ReconnectOnDownloadFailure" or "ReconnectTrigger"
+            || namespaceName.Contains(".Connect", StringComparison.Ordinal))
+        {
+            return ProjectionScope.EquipmentConnections;
+        }
+        if (typeName is "CoolCamera" or "WarmCamera"
+            or "WaitForTime" or "WaitForTimeSpan" or "WaitUntil"
+            or "WaitIndefinitely" or "Break" or "WaitForAltitude"
+            or "WaitForMoonAltitude" or "WaitForSunAltitude"
+            or "WaitUntilAboveHorizon")
+        {
+            return ProjectionScope.Sequence;
+        }
+
+        if (typeName == "SetSwitchValue"
+            || namespaceName.Contains(".Switch", StringComparison.Ordinal))
+        {
+            return ProjectionScope.Other;
+        }
+        return isNinaSequencer ? ProjectionScope.Sequence : ProjectionScope.Other;
+    }
+
+    private static bool IsSafetyEntity(string typeName) =>
+        typeName.Contains("Safety", StringComparison.OrdinalIgnoreCase)
+        || typeName.Contains("Unsafe", StringComparison.OrdinalIgnoreCase)
+        || typeName is "WaitUntilSafe" or "IfSafe" or "OnceSafe" or "SafeTrigger";
+
+    private static bool ScopesEnabled(
+        ProjectionScope scopes,
+        DirectEventDeliveryOptions delivery) =>
+        (!scopes.HasFlag(ProjectionScope.Images) || delivery.Images)
+        && (!scopes.HasFlag(ProjectionScope.Autofocus) || delivery.Autofocus)
+        && (!scopes.HasFlag(ProjectionScope.Guiding) || delivery.Guiding)
+        && (!scopes.HasFlag(ProjectionScope.Mount) || delivery.Mount)
+        && (!scopes.HasFlag(ProjectionScope.Sequence) || delivery.Sequence)
+        && (!scopes.HasFlag(ProjectionScope.Safety) || delivery.Safety)
+        && (!scopes.HasFlag(ProjectionScope.FilterFocuserRotator)
+            || delivery.FilterFocuserRotator)
+        && (!scopes.HasFlag(ProjectionScope.ObservatoryAndFlatPanel)
+            || delivery.ObservatoryAndFlatPanel)
+        && (!scopes.HasFlag(ProjectionScope.EquipmentConnections)
+            || delivery.EquipmentConnections)
+        && (!scopes.HasFlag(ProjectionScope.Other) || delivery.OtherEvents)
+        && (!scopes.HasFlag(ProjectionScope.TargetScheduler)
+            || delivery.TargetScheduler);
+
+    internal static bool ShouldSendSequenceFailure(
+        ISequenceEntity? entity,
+        DirectEventDeliveryOptions delivery) =>
+        ShouldSendSequenceFailure(
+            GetSequenceFailureDeliveryScopeMask(entity),
+            delivery);
+
+    internal static int GetSequenceFailureDeliveryScopeMask(ISequenceEntity? entity)
+    {
+        var entityScopes = entity is null
+            ? ProjectionScope.Other
+            : RequiredScopes(entity);
+        return (int)(ProjectionScope.Sequence | entityScopes);
+    }
+
+    internal static bool ShouldSendSequenceFailure(
+        int deliveryScopeMask,
+        DirectEventDeliveryOptions delivery) =>
+        ScopesEnabled((ProjectionScope)deliveryScopeMask, delivery);
+
+    /// <summary>
+    /// A terminal sequence result can only claim success when every category
+    /// that may own an entity failure was visible for the whole run. This is
+    /// intentionally independent from popup and log forwarding: neither is a
+    /// source for the root container's failure event.
+    /// </summary>
+    internal static bool HasCompleteSequenceFailureCoverage(
+        DirectEventDeliveryOptions delivery) =>
+        delivery.Images
+        && delivery.Autofocus
+        && delivery.Guiding
+        && delivery.Mount
+        && delivery.Sequence
+        && delivery.Safety
+        && delivery.FilterFocuserRotator
+        && delivery.ObservatoryAndFlatPanel
+        && delivery.EquipmentConnections
+        && delivery.OtherEvents
+        && delivery.TargetScheduler;
+
+    private static void AddDeliveryDetails(
+        IDictionary<string, object?> result,
+        ProjectionScope requiredScopes)
+    {
+        if (requiredScopes != ProjectionScope.None)
+        {
+            result["ChatEnabled"] = true;
         }
     }
 
-    private static Dictionary<string, object?> BuildTrigger(ISequenceTrigger trigger)
+    private static Dictionary<string, object?> BuildTrigger(
+        ISequenceTrigger trigger,
+        DirectEventDeliveryOptions delivery)
     {
+        var requiredScopes = RequiredScopes(trigger);
+        if (!ScopesEnabled(requiredScopes, delivery))
+        {
+            return SuppressedEntity("Trigger");
+        }
+
         var result = BaseEntity(trigger, "_Trigger");
+        AddDeliveryDetails(result, requiredScopes);
+        if (trigger.GetType().Name.Contains("MeridianFlip", StringComparison.OrdinalIgnoreCase))
+        {
+            result["OperationKind"] = "meridian_flip";
+        }
+        if (IsSafetyEntity(trigger.GetType().Name))
+        {
+            result["OperationKind"] = "safety_trigger";
+        }
         AddIfPresent(trigger, result, "TimeToMeridianFlip", "TimeToFlip");
         AddIfPresent(trigger, result, "HFRTrendPercentage", "HFRTrendPercentage");
         AddIfPresent(trigger, result, "OriginalHFR", "OriginalHFR");
@@ -181,9 +502,23 @@ internal static class NinaDirectSequenceSnapshot
         return result;
     }
 
-    private static Dictionary<string, object?> BuildCondition(ISequenceCondition condition)
+    private static Dictionary<string, object?> BuildCondition(
+        ISequenceCondition condition,
+        DirectEventDeliveryOptions delivery)
     {
+        var requiredScopes = RequiredScopes(condition);
+        if (!ScopesEnabled(requiredScopes, delivery))
+        {
+            return SuppressedEntity("Condition");
+        }
+
         var result = BaseEntity(condition, "_Condition");
+        AddDeliveryDetails(result, requiredScopes);
+        if (IsSafetyEntity(condition.GetType().Name))
+        {
+            result["OperationKind"] = "safety_condition";
+            AddIfPresent(condition, result, "IsSafe", "IsSafe");
+        }
         AddIfPresent(condition, result, "RemainingTime", "RemainingTime");
         AddTargetTime(condition, result);
         AddIfPresent(condition, result, "Iterations", "Iterations");
@@ -197,7 +532,7 @@ internal static class NinaDirectSequenceSnapshot
             AddIfPresent(data, result, "Offset", "Altitude");
             AddIfPresent(data, result, "CurrentAltitude", "CurrentAltitude");
             AddIfPresent(data, result, "ExpectedTime", "ExpectedTime");
-            AddIfPresent(data, result, "ExpectedDateTime", "ExpectedDateTime");
+            AddTimestampIfPresent(data, result, "ExpectedDateTime", "ExpectedDateTime");
         }
         return result;
     }
@@ -211,20 +546,32 @@ internal static class NinaDirectSequenceSnapshot
 
     private static void AddItemDetails(
         ISequenceItem item,
-        IDictionary<string, object?> result)
+        IDictionary<string, object?> result,
+        bool? safetyMonitorIsSafe,
+        DirectEventDeliveryOptions delivery)
     {
-        foreach (var (propertyName, wireName) in DetailNames)
+        var typeName = item.GetType().Name;
+        var hasRestrictedWaitDetails = typeName is "WaitUntil" or "WaitIndefinitely" or "Break";
+        if (!hasRestrictedWaitDetails)
         {
-            AddIfPresent(item, result, propertyName, wireName);
+            foreach (var (propertyName, wireName) in DetailNames)
+            {
+                AddIfPresent(item, result, propertyName, wireName);
+            }
         }
 
-        var typeName = item.GetType().Name;
         if (typeName == "CoolCamera")
         {
             result["OperationKind"] = "camera_cooling";
             AddIfPresent(item, result, "Duration", "MinCoolingTime");
         }
-        else if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz")
+        else if (typeName == "WarmCamera")
+        {
+            result["OperationKind"] = "camera_warming";
+            AddIfPresent(item, result, "Duration", "MinWarmingTime");
+        }
+        else if (typeName is "SlewScopeToRaDec" or "SlewScopeToAltAz"
+            or "SlewToRADec" or "SlewToAltAz")
         {
             result["OperationKind"] = "mount_slew";
         }
@@ -233,9 +580,10 @@ internal static class NinaDirectSequenceSnapshot
             result["OperationKind"] = "mount_center";
             AddPlateSolveOutput(item, result);
         }
-        else if (typeName == "WarmCamera")
+        else if (typeName is "SolveAndSync" or "SolveAndRotate")
         {
-            AddIfPresent(item, result, "Duration", "MinWarmingTime");
+            result["OperationKind"] = "plate_solve";
+            AddPlateSolveOutput(item, result);
         }
         else if (typeName == "DewHeater")
         {
@@ -259,15 +607,9 @@ internal static class NinaDirectSequenceSnapshot
             result["Filter"] = OptionalProperty(filter, "Name") ?? "Current";
         }
 
-        if (typeName is "SmartExposure" or "TakeManyExposures")
+        if (typeName is "SmartExposure" or "TakeManyExposures" or "SmartSubframeExposure")
         {
             AddAggregateExposureDetails(item, result, typeName == "SmartExposure");
-        }
-
-        var selectedSwitch = OptionalProperty(item, "SelectedSwitch");
-        if (selectedSwitch is not null)
-        {
-            AddIfPresent(selectedSwitch, result, "Id", "Index");
         }
 
         AddIfPresent(item, result, "TrackingMode", "TrackingMode");
@@ -290,7 +632,7 @@ internal static class NinaDirectSequenceSnapshot
                 var dateTimeProvider = OptionalProperty(item, "DateTime");
                 if (OptionalProperty(dateTimeProvider, "Now") is DateTime now)
                 {
-                    result["TargetTime"] = now + wait;
+                    AddTimestamp(result, "TargetTime", now + wait);
                 }
             }
         }
@@ -302,6 +644,42 @@ internal static class NinaDirectSequenceSnapshot
             {
                 result["CalculatedWaitDuration"] = wait;
             }
+        }
+        else if (typeName is "WaitForAltitude" or "WaitForMoonAltitude"
+            or "WaitForSunAltitude" or "WaitUntilAboveHorizon")
+        {
+            result["OperationKind"] = "astronomical_wait";
+            if (data is not null)
+            {
+                AddIfPresent(data, result, "TargetAltitude", "TargetAltitude");
+                AddIfPresent(data, result, "Comparator", "Comparator");
+                AddTimestampIfPresent(data, result, "ExpectedDateTime", "ExpectedDateTime");
+            }
+        }
+        else if (typeName == "WaitUntilSafe")
+        {
+            // Both N.I.N.A.'s built-in instruction and Sequencer+ use this
+            // simple type name. The instruction's own IsSafe property can be
+            // stale while it is waiting, so project the mediator state that
+            // was captured by the caller instead.
+            result["OperationKind"] = "safety_wait";
+            result["IsSafe"] = safetyMonitorIsSafe;
+            AddIfPresent(item, result, "WaitInterval", "WaitInterval");
+        }
+        else if (typeName == "WaitUntil")
+        {
+            // The expression can contain private observatory or equipment
+            // values. Only advertise that an expression wait is active and
+            // how often it is evaluated.
+            result["OperationKind"] = "condition_wait";
+            AddIfPresent(item, result, "WaitInterval", "WaitInterval");
+        }
+        else if (typeName is "WaitIndefinitely" or "Break")
+        {
+            // Sequencer+ implements these with placeholder Time values that
+            // do not represent the actual wait. Break.Reason may also carry
+            // arbitrary user text, so neither is part of the wire contract.
+            result["OperationKind"] = "manual_wait";
         }
     }
 
@@ -456,8 +834,52 @@ internal static class NinaDirectSequenceSnapshot
         var dateTimeProvider = OptionalProperty(source, "DateTime");
         if (OptionalProperty(dateTimeProvider, "Now") is DateTime now)
         {
-            destination["TargetTime"] = now + remaining;
+            AddTimestamp(destination, "TargetTime", now + remaining);
         }
+    }
+
+    private static void AddTimestampIfPresent(
+        object source,
+        IDictionary<string, object?> destination,
+        string propertyName,
+        string wireName)
+    {
+        var value = OptionalProperty(source, propertyName);
+        switch (value)
+        {
+            case DateTime dateTime:
+                AddTimestamp(destination, wireName, dateTime);
+                break;
+            case DateTimeOffset dateTimeOffset:
+                destination[wireName] = dateTimeOffset;
+                break;
+        }
+    }
+
+    private static void AddTimestamp(
+        IDictionary<string, object?> destination,
+        string wireName,
+        DateTime value)
+    {
+        // N.I.N.A. computes waits in observatory-local wall time. Some
+        // providers return DateTimeKind.Unspecified, which System.Text.Json
+        // would serialize without an offset and the Hub could then interpret
+        // in its own timezone. Normalize every usable wall-clock value to an
+        // explicit offset before it crosses the Direct boundary.
+        if (value == DateTime.MinValue || value == DateTime.MaxValue)
+        {
+            return;
+        }
+
+        var timestamp = value.Kind switch
+        {
+            DateTimeKind.Utc => new DateTimeOffset(value, TimeSpan.Zero),
+            DateTimeKind.Local => new DateTimeOffset(value),
+            _ => new DateTimeOffset(
+                DateTime.SpecifyKind(value, DateTimeKind.Unspecified),
+                TimeZoneInfo.Local.GetUtcOffset(value)),
+        };
+        destination[wireName] = timestamp;
     }
 
     private static object RequiredProperty(object source, string name) =>
