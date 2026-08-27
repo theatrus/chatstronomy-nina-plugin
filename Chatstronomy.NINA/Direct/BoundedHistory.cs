@@ -78,6 +78,35 @@ internal sealed class BoundedHistory<T>
         }
     }
 
+    /// <summary>
+    /// Removes matching entries without rewinding the monotonic sequence.
+    /// Direct history cursors tolerate gaps, while retaining the sequence
+    /// prevents a later entry from being mistaken for one already observed.
+    /// </summary>
+    internal int RemoveWhere(Func<T, bool> predicate)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+
+        lock (gate)
+        {
+            var originalCount = items.Count;
+            var removed = 0;
+            for (var index = 0; index < originalCount; index++)
+            {
+                var entry = items.Dequeue();
+                if (predicate(entry.Item))
+                {
+                    removed++;
+                }
+                else
+                {
+                    items.Enqueue(entry);
+                }
+            }
+            return removed;
+        }
+    }
+
     internal bool TryGetAt(int index, out T? item)
     {
         lock (gate)

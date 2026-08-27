@@ -537,6 +537,24 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         set => SetEventDeliveryOption(() => settings.SendSafetyEvents = value);
     }
 
+    public bool SendWeatherChangeEvents
+    {
+        get => settings.SendWeatherChangeEvents;
+        set => SetEventDeliveryOption(() => settings.SendWeatherChangeEvents = value);
+    }
+
+    public bool SendHighWindAlerts
+    {
+        get => settings.SendHighWindAlerts;
+        set => SetEventDeliveryOption(() => settings.SendHighWindAlerts = value);
+    }
+
+    public double HighWindThresholdMetersPerSecond
+    {
+        get => settings.HighWindThresholdMetersPerSecond;
+        set => SetEventDeliveryOption(() => settings.HighWindThresholdMetersPerSecond = value);
+    }
+
     public bool SendTargetSchedulerEvents
     {
         get => settings.SendTargetSchedulerEvents;
@@ -1310,6 +1328,9 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(SendMountEvents),
             nameof(SendSequenceEvents),
             nameof(SendSafetyEvents),
+            nameof(SendWeatherChangeEvents),
+            nameof(SendHighWindAlerts),
+            nameof(HighWindThresholdMetersPerSecond),
             nameof(SendTargetSchedulerEvents),
             nameof(SendFilterFocuserRotatorEvents),
             nameof(SendObservatoryAndFlatPanelEvents),

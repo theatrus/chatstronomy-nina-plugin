@@ -13,6 +13,7 @@ internal sealed class ChatstronomySettings
     internal static readonly Guid PluginId =
         Guid.Parse("5e7c25c4-f654-4e22-9e21-3127048221c0");
     internal const string DefaultHostedServiceUrl = "https://hub.chatstronomy.com/";
+    internal const double DefaultHighWindThresholdMetersPerSecond = 10.0;
 
     private const string CredentialPrefix = "Chatstronomy.NINA";
     private const string LegacyHostedServiceOrigin = "https://chatstronomy.com";
@@ -355,6 +356,37 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendSafetyEvents), value);
     }
 
+    public bool SendWeatherChangeEvents
+    {
+        get => options.GetValueBoolean(nameof(SendWeatherChangeEvents), false);
+        set => options.SetValueBoolean(nameof(SendWeatherChangeEvents), value);
+    }
+
+    public bool SendHighWindAlerts
+    {
+        get => options.GetValueBoolean(nameof(SendHighWindAlerts), false);
+        set => options.SetValueBoolean(nameof(SendHighWindAlerts), value);
+    }
+
+    public double HighWindThresholdMetersPerSecond
+    {
+        get
+        {
+            var value = options.GetValueDouble(
+                nameof(HighWindThresholdMetersPerSecond),
+                DefaultHighWindThresholdMetersPerSecond);
+            return NormalizeHighWindThreshold(value);
+        }
+        set => options.SetValueDouble(
+            nameof(HighWindThresholdMetersPerSecond),
+            NormalizeHighWindThreshold(value));
+    }
+
+    internal static double NormalizeHighWindThreshold(double value) =>
+        double.IsFinite(value) && value >= 0.5 && value <= 100.0
+            ? value
+            : DefaultHighWindThresholdMetersPerSecond;
+
     public bool SendTargetSchedulerEvents
     {
         get => options.GetValueBoolean(nameof(SendTargetSchedulerEvents), true);
@@ -428,6 +460,9 @@ internal sealed class ChatstronomySettings
         Mount: SendMountEvents,
         Sequence: SendSequenceEvents,
         Safety: SendSafetyEvents,
+        WeatherChanges: SendWeatherChangeEvents,
+        HighWindAlerts: SendHighWindAlerts,
+        HighWindThresholdMetersPerSecond: HighWindThresholdMetersPerSecond,
         TargetScheduler: SendTargetSchedulerEvents,
         FilterFocuserRotator: SendFilterFocuserRotatorEvents,
         ObservatoryAndFlatPanel: SendObservatoryAndFlatPanelEvents,

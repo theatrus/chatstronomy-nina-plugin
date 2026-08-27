@@ -12,6 +12,9 @@ internal sealed record DirectEventDeliveryOptions(
     bool Mount,
     bool Sequence,
     bool Safety,
+    bool WeatherChanges,
+    bool HighWindAlerts,
+    double HighWindThresholdMetersPerSecond,
     bool TargetScheduler,
     bool FilterFocuserRotator,
     bool ObservatoryAndFlatPanel,
@@ -31,6 +34,9 @@ internal sealed record DirectEventDeliveryOptions(
         Mount: true,
         Sequence: true,
         Safety: true,
+        WeatherChanges: false,
+        HighWindAlerts: false,
+        HighWindThresholdMetersPerSecond: 10.0,
         TargetScheduler: true,
         FilterFocuserRotator: true,
         ObservatoryAndFlatPanel: true,
@@ -71,6 +77,14 @@ internal sealed record DirectEventDeliveryOptions(
         if (eventName.StartsWith("SAFETY-", StringComparison.Ordinal))
         {
             return Safety;
+        }
+        if (eventName.Equals("WEATHER-CHANGED", StringComparison.Ordinal))
+        {
+            return WeatherChanges;
+        }
+        if (eventName.Equals("WEATHER-HIGH-WIND", StringComparison.Ordinal))
+        {
+            return HighWindAlerts;
         }
         if (eventName.StartsWith("IMAGE-", StringComparison.Ordinal)
             || eventName.Equals("API-CAPTURE-FINISHED", StringComparison.Ordinal)

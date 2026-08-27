@@ -5,6 +5,7 @@ using Chatstronomy.NINA.Remote;
 using Chatstronomy.NINA.Runtime;
 using Chatstronomy.NINA.Settings;
 using Newtonsoft.Json.Linq;
+using NINA.Equipment.Equipment.MyWeatherData;
 using NINA.Equipment.Interfaces.Mediator;
 using NINA.Plugin;
 using NINA.Plugin.ManifestDefinition;
@@ -245,6 +246,21 @@ internal static class Program
         await RunAsync(
             "Safety baselines cannot race newer state or consent",
             SafetyBaselinesCannotRaceNewerStateOrConsent);
+        Run(
+            "Weather reporting and high-wind alerts are independent opt-ins",
+            WeatherReportingDefaultsAndRoutingAreIndependent);
+        await RunAsync(
+            "Meaningful weather changes are cumulative, bounded, and sanitized",
+            MeaningfulWeatherChangesAreBoundedAndSanitized);
+        await RunAsync(
+            "High-wind alerts are deduplicated and recover with hysteresis",
+            HighWindAlertsAreDeduplicatedAndHysteretic);
+        await RunAsync(
+            "Weather callbacks cannot cross local consent boundaries",
+            WeatherCallbacksCannotCrossConsentBoundaries);
+        await RunAsync(
+            "Weather history purges preserve Direct replay cursors",
+            WeatherHistoryPurgesPreserveDirectReplayCursors);
         await RunAsync(
             "Autofocus completion waits for the matching N.I.N.A. report",
             AutofocusCompletionWaitsForMatchingReport);
@@ -775,8 +791,8 @@ internal static class Program
             value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)
             && value.Contains("blocks image history and thumbnails", StringComparison.Ordinal)));
         AssertTrue(descriptions.Any(value =>
-            value.Contains("Events, images, and popup notifications start enabled", StringComparison.Ordinal)
-            && value.Contains("Disable unwanted categories before connecting", StringComparison.Ordinal)));
+            value.Contains("weather reports are opt-in", StringComparison.Ordinal)
+            && value.Contains("never sent to the Hub or local bot", StringComparison.Ordinal)));
         AssertTrue(descriptions.Any(value =>
             value.Contains("No N.I.N.A. logs are read or sent until you enable a log level", StringComparison.Ordinal)
             && value.Contains("only selected levels are forwarded", StringComparison.Ordinal)));
@@ -792,6 +808,8 @@ internal static class Program
             ["{Binding SendMountEvents}"] = "Mount, slew, and center",
             ["{Binding SendSequenceEvents}"] = "Sequence, timed waits, and cooling",
             ["{Binding SendSafetyEvents}"] = "Safety monitor and safety waits",
+            ["{Binding SendWeatherChangeEvents}"] = "Meaningful weather changes",
+            ["{Binding SendHighWindAlerts}"] = "High-wind alerts",
             ["{Binding SendTargetSchedulerEvents}"] = "Targets and Target Scheduler",
             ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator",
             ["{Binding SendObservatoryAndFlatPanelEvents}"] = "Observatory and flat panel",
@@ -823,6 +841,21 @@ internal static class Program
                     .Single()
                     .Attribute("Text"));
         }
+
+        var threshold = document
+            .Descendants(presentation + "TextBox")
+            .Single(element =>
+                (string?)element.Attribute("Text")
+                == "{Binding HighWindThresholdMetersPerSecond, UpdateSourceTrigger=LostFocus}");
+        // Let users stage the threshold before enabling alerts. Enabling the
+        // switch evaluates the current wind reading immediately.
+        AssertEqual(null, (string?)threshold.Parent?.Attribute("IsEnabled"));
+        AssertEqual(
+            "High-wind threshold (m/s)",
+            (string?)threshold.Parent?
+                .Elements(presentation + "TextBlock")
+                .Single()
+                .Attribute("Text"));
     }
 
     private static void NewProfilesDefaultToHostedDelivery()
@@ -1954,6 +1987,10 @@ internal static class Program
                 options => options with { Sequence = false }),
             ("safety", new[] { "SAFETY-CONNECTED", "SAFETY-CHANGED", "SAFETY-DISCONNECTED" },
                 options => options with { Safety = false }),
+            ("weather changes", new[] { "WEATHER-CHANGED" },
+                options => options with { WeatherChanges = false }),
+            ("high-wind alerts", new[] { "WEATHER-HIGH-WIND" },
+                options => options with { HighWindAlerts = false }),
             ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
                 options => options with { TargetScheduler = false }),
             ("filter, focuser, and rotator", new[]
@@ -1973,7 +2010,14 @@ internal static class Program
 
         foreach (var (category, eventNames, disable) in cases)
         {
-            var initial = DirectEventDeliveryOptions.Default;
+            var initial = category switch
+            {
+                "weather changes" => DirectEventDeliveryOptions.Default with
+                    { WeatherChanges = true },
+                "high-wind alerts" => DirectEventDeliveryOptions.Default with
+                    { HighWindAlerts = true },
+                _ => DirectEventDeliveryOptions.Default,
+            };
             var delivery = new DirectEventDeliveryPolicy(initial);
             using var provider = CreateSecurityTestProvider(
                 new DirectAccessPolicy(DirectAccessOptions.Default),
@@ -2313,7 +2357,8 @@ internal static class Program
         ITelescopeMediator? telescope = null,
         ISafetyMonitorMediator? safetyMonitor = null,
         string? autofocusReportDirectory = null,
-        Func<System.Windows.Media.Imaging.BitmapSource, byte[]>? thumbnailEncoder = null) => new(
+        Func<System.Windows.Media.Imaging.BitmapSource, byte[]>? thumbnailEncoder = null,
+        Func<DateTimeOffset>? utcNow = null) => new(
             profileService: null!,
             telescope: telescope!,
             camera: null!,
@@ -2337,7 +2382,8 @@ internal static class Program
                 delivery ?? DirectEventDeliveryOptions.Default),
             accessPolicy: access,
             autofocusReportDirectory: autofocusReportDirectory,
-            thumbnailEncoder: thumbnailEncoder);
+            thumbnailEncoder: thumbnailEncoder,
+            utcNow: utcNow);
 
     private static void DirectCommandsUseSemanticWireNames()
     {
@@ -2437,6 +2483,8 @@ internal static class Program
         AssertFalse(options.ShouldSendEvent("GUIDER-CONNECTED"));
         AssertFalse(options.ShouldSendEvent("SAFETY-CONNECTED"));
         AssertFalse(options.ShouldSendEvent("SAFETY-CHANGED"));
+        AssertFalse(options.ShouldSendEvent("WEATHER-CHANGED"));
+        AssertFalse(options.ShouldSendEvent("WEATHER-HIGH-WIND"));
         AssertFalse(options.ShouldSendEvent("TS-TARGETSTART"));
         AssertTrue(options.ShouldSendEvent("MOUNT-CENTER"));
         AssertTrue(options.ShouldSendEvent("CHATSTRONOMY-COMMAND-FAILED"));
@@ -4687,6 +4735,534 @@ internal static class Program
             AssertEqual(0, (await SnapshotEvents(provider)).Length);
         }
     }
+
+    private static void WeatherReportingDefaultsAndRoutingAreIndependent()
+    {
+        var defaults = DirectEventDeliveryOptions.Default;
+        AssertFalse(defaults.WeatherChanges);
+        AssertFalse(defaults.HighWindAlerts);
+        AssertEqual(10.0, defaults.HighWindThresholdMetersPerSecond);
+        AssertFalse(defaults.ShouldSendEvent("WEATHER-CHANGED"));
+        AssertFalse(defaults.ShouldSendEvent("WEATHER-HIGH-WIND"));
+        AssertTrue(defaults.ShouldSendEvent("WEATHER-CONNECTED"));
+        AssertTrue(defaults.OtherEvents);
+        AssertTrue(typeof(IWeatherDataConsumer).IsAssignableFrom(
+            typeof(NinaDirectDataProvider)));
+
+        var changesOnly = defaults with { WeatherChanges = true };
+        AssertTrue(changesOnly.ShouldSendEvent("WEATHER-CHANGED"));
+        AssertFalse(changesOnly.ShouldSendEvent("WEATHER-HIGH-WIND"));
+        var alertsOnly = defaults with { HighWindAlerts = true };
+        AssertFalse(alertsOnly.ShouldSendEvent("WEATHER-CHANGED"));
+        AssertTrue(alertsOnly.ShouldSendEvent("WEATHER-HIGH-WIND"));
+
+        AssertEqual(
+            ChatstronomySettings.DefaultHighWindThresholdMetersPerSecond,
+            ChatstronomySettings.NormalizeHighWindThreshold(double.NaN));
+        AssertEqual(
+            ChatstronomySettings.DefaultHighWindThresholdMetersPerSecond,
+            ChatstronomySettings.NormalizeHighWindThreshold(-1));
+        AssertEqual(17.5, ChatstronomySettings.NormalizeHighWindThreshold(17.5));
+    }
+
+    private static async Task MeaningfulWeatherChangesAreBoundedAndSanitized()
+    {
+        var now = new DateTimeOffset(2026, 8, 26, 4, 0, 0, TimeSpan.Zero);
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { WeatherChanges = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery,
+            utcNow: () => now);
+        SetProviderStarted(provider, true);
+        try
+        {
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 10.0,
+                humidity: 40,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 10.4,
+                humidity: 40,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350));
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 10.8,
+                humidity: 40,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            now = now.AddMinutes(1);
+            var changed = Weather(
+                temperature: 11.1,
+                humidity: 40,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350,
+                skyBrightness: double.PositiveInfinity,
+                starFwhm: -1);
+            changed.Name = "private weather station";
+            changed.DeviceId = "private-weather-id";
+            provider.UpdateDeviceInfo(changed);
+            var first = (await SnapshotEvents(provider)).Single();
+            AssertEqual("WEATHER-CHANGED", first.GetProperty("Event").GetString());
+            AssertEqual("temperature", first.GetProperty("ChangedFields").GetString());
+            AssertEqual(11.1, first.GetProperty("TemperatureCelsius").GetDouble());
+            AssertFalse(first.TryGetProperty("SkyBrightnessLux", out _));
+            AssertFalse(first.TryGetProperty("StarFwhmArcseconds", out _));
+            AssertFalse(first.TryGetProperty("Name", out _));
+            AssertFalse(first.TryGetProperty("DeviceId", out _));
+            AssertFalse(JsonSerializer.Serialize(first).Contains("private", StringComparison.Ordinal));
+
+            // A second ordinary change inside five minutes remains pending.
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 11.1,
+                humidity: 46,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350));
+            AssertEqual(1, (await SnapshotEvents(provider)).Length);
+
+            // Rain onset bypasses the ordinary cooldown and coalesces the
+            // pending humidity change into the same report.
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 11.1,
+                humidity: 46,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0.2,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 350));
+            var afterRain = await SnapshotEvents(provider);
+            AssertEqual(2, afterRain.Length);
+            var rainFields = afterRain[1].GetProperty("ChangedFields").GetString()!;
+            AssertTrue(rainFields.Contains("humidity", StringComparison.Ordinal));
+            AssertTrue(rainFields.Contains("rain rate", StringComparison.Ordinal));
+
+            // Circular direction deltas use the shortest path: 350 -> 30 is
+            // 40 degrees and is reported once wind is at least 2 m/s.
+            now = now.AddMinutes(6);
+            provider.UpdateDeviceInfo(Weather(
+                temperature: 11.1,
+                humidity: 46,
+                pressure: 1_000,
+                cloudCover: 20,
+                rainRate: 0.2,
+                windSpeed: 2,
+                windGust: 2.5,
+                windDirection: 30));
+            var direction = (await SnapshotEvents(provider))[2];
+            AssertEqual("wind direction", direction.GetProperty("ChangedFields").GetString());
+
+            provider.Reset();
+            now = now.AddMinutes(6);
+            provider.UpdateDeviceInfo(Weather(
+                skyBrightness: 0.001,
+                starFwhm: 2.0));
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                skyBrightness: 0.0011,
+                starFwhm: 2.4));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            now = now.AddMinutes(1);
+            provider.UpdateDeviceInfo(Weather(
+                skyBrightness: 0.00125,
+                starFwhm: 2.6));
+            var skyAndSeeing = (await SnapshotEvents(provider)).Single();
+            var skyAndSeeingFields = skyAndSeeing.GetProperty("ChangedFields").GetString()!;
+            AssertTrue(skyAndSeeingFields.Contains("sky brightness", StringComparison.Ordinal));
+            AssertTrue(skyAndSeeingFields.Contains("star FWHM", StringComparison.Ordinal));
+
+            // A system-clock correction backwards must not extend the
+            // five-minute cooldown until wall time catches up again.
+            provider.Reset();
+            now = new DateTimeOffset(2026, 8, 26, 6, 0, 0, TimeSpan.Zero);
+            provider.UpdateDeviceInfo(Weather(temperature: 10.0));
+            now = now.AddMinutes(6);
+            provider.UpdateDeviceInfo(Weather(temperature: 11.1));
+            now = now.AddMinutes(-10);
+            provider.UpdateDeviceInfo(Weather(temperature: 12.2));
+            var afterClockCorrection = await SnapshotEvents(provider);
+            AssertEqual(2, afterClockCorrection.Length);
+            AssertEqual(12.2, afterClockCorrection[^1]
+                .GetProperty("TemperatureCelsius")
+                .GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task HighWindAlertsAreDeduplicatedAndHysteretic()
+    {
+        var now = new DateTimeOffset(2026, 8, 26, 5, 0, 0, TimeSpan.Zero);
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                HighWindAlerts = true,
+                HighWindThresholdMetersPerSecond = 10,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery,
+            utcNow: () => now);
+        SetProviderStarted(provider, true);
+        try
+        {
+            provider.UpdateDeviceInfo(Weather(windSpeed: 9));
+            provider.UpdateDeviceInfo(Weather(windSpeed: 10));
+            provider.UpdateDeviceInfo(Weather(windSpeed: 12));
+            var alert = (await SnapshotEvents(provider)).Single();
+            AssertTrue(alert.GetProperty("IsHighWind").GetBoolean());
+            AssertEqual(10.0, alert.GetProperty("ThresholdMetersPerSecond").GetDouble());
+            AssertEqual(10.0, alert.GetProperty("WindSpeedMetersPerSecond").GetDouble());
+
+            // Missing the wind-speed source cannot manufacture recovery,
+            // and the deadband prevents a 9.5 m/s reading from flapping.
+            provider.UpdateDeviceInfo(Weather(windSpeed: double.NaN, windGust: 0));
+            provider.UpdateDeviceInfo(Weather(windSpeed: 9.5));
+            AssertEqual(1, (await SnapshotEvents(provider)).Length);
+            provider.UpdateDeviceInfo(Weather(windSpeed: 9));
+            var recovered = await SnapshotEvents(provider);
+            AssertEqual(2, recovered.Length);
+            AssertFalse(recovered[1].GetProperty("IsHighWind").GetBoolean());
+
+            provider.Reset();
+            provider.UpdateDeviceInfo(Weather(windSpeed: double.NaN, windGust: 11));
+            AssertTrue((await SnapshotEvents(provider)).Single()
+                .GetProperty("IsHighWind").GetBoolean());
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0, windGust: double.NaN));
+            AssertEqual(1, (await SnapshotEvents(provider)).Length);
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0, windGust: 9));
+            AssertFalse((await SnapshotEvents(provider))[1]
+                .GetProperty("IsHighWind").GetBoolean());
+
+            // A witnessed-safe reading discharges that sensor even if it is
+            // unavailable later. This lets wind speed and gust alternate
+            // without either a false recovery or a permanently latched alert.
+            provider.Reset();
+            provider.UpdateDeviceInfo(Weather(windSpeed: 20, windGust: 0));
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0, windGust: 20));
+            provider.UpdateDeviceInfo(Weather(windSpeed: double.NaN, windGust: 0));
+            var alternatingSources = await SnapshotEvents(provider);
+            AssertEqual(2, alternatingSources.Length);
+            AssertFalse(alternatingSources[^1].GetProperty("IsHighWind").GetBoolean());
+
+            // Raising a threshold while high sends an explicit recovery so a
+            // Hub cannot retain stale durable alert state.
+            provider.Reset();
+            provider.UpdateDeviceInfo(Weather(windSpeed: 12));
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindThresholdMetersPerSecond = 15 });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 12));
+            var raised = await SnapshotEvents(provider);
+            AssertEqual(2, raised.Length);
+            AssertFalse(raised[1].GetProperty("IsHighWind").GetBoolean());
+            AssertEqual(15.0, raised[1].GetProperty("ThresholdMetersPerSecond").GetDouble());
+
+            // Lowering it below the same reading alerts, and a later
+            // threshold-only edit while still high refreshes the durable
+            // threshold without requiring another crossing.
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindThresholdMetersPerSecond = 5 });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 12));
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindThresholdMetersPerSecond = 10 });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 12));
+            var refreshed = await SnapshotEvents(provider);
+            AssertTrue(refreshed[^1].GetProperty("IsHighWind").GetBoolean());
+            AssertEqual(10.0, refreshed[^1]
+                .GetProperty("ThresholdMetersPerSecond")
+                .GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task WeatherCallbacksCannotCrossConsentBoundaries()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { EquipmentConnections = false });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            provider.UpdateDeviceInfo(Weather(
+                connected: false,
+                temperature: 99,
+                windSpeed: 99));
+            await InvokeProviderCallbackAsync(provider, "WeatherDisconnected", EventArgs.Empty);
+            provider.UpdateDeviceInfo(Weather(temperature: 98, windSpeed: 98));
+            await InvokeProviderCallbackAsync(provider, "WeatherConnected", EventArgs.Empty);
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            provider.UpdateDeviceInfo(Weather(temperature: 5, windSpeed: 20));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            // Enabling after a high reading captured while off starts from a
+            // fresh live callback and immediately alerts; the off callback
+            // itself was not retained.
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindAlerts = true });
+            provider.UpdateDeviceInfo(Weather(temperature: 5, windSpeed: 20));
+            var highOnly = (await SnapshotEvents(provider)).Single();
+            AssertEqual("WEATHER-HIGH-WIND", highOnly.GetProperty("Event").GetString());
+            AssertFalse(highOnly.TryGetProperty("TemperatureCelsius", out _));
+
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with
+                {
+                    HighWindAlerts = false,
+                    WeatherChanges = true,
+                });
+            provider.UpdateDeviceInfo(Weather(temperature: 5, windSpeed: 20));
+            provider.UpdateDeviceInfo(Weather(temperature: 6.2, windSpeed: 20));
+            var changesOnly = await SnapshotEvents(provider);
+            AssertEqual(1, changesOnly.Length);
+            AssertEqual("WEATHER-CHANGED", changesOnly[0].GetProperty("Event").GetString());
+            AssertEqual(6.2, changesOnly[0].GetProperty("TemperatureCelsius").GetDouble());
+
+            // The pre-publication hook closes capture before the policy value
+            // changes. A callback in that window is neither sent now nor
+            // released by a later re-enable.
+            var previous = delivery.Current;
+            var disabled = previous with { WeatherChanges = false };
+            provider.EventDeliveryPolicyChanging(previous, disabled);
+            provider.UpdateDeviceInfo(Weather(temperature: 20, windSpeed: 20));
+            delivery.Update(disabled);
+            provider.EventDeliveryPolicyChanged(previous, disabled);
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            ApplyEventDeliveryChange(provider, delivery, previous);
+            provider.UpdateDeviceInfo(Weather(temperature: 20, windSpeed: 20));
+            provider.UpdateDeviceInfo(Weather(temperature: 21.2, windSpeed: 20));
+            var reenabled = await SnapshotEvents(provider);
+            AssertEqual(1, reenabled.Length);
+            AssertEqual(21.2, reenabled[0].GetProperty("TemperatureCelsius").GetDouble());
+
+            // An earlier high-wind alert is also removed at the local consent
+            // boundary. Re-enabling while wind is now low must not let a new
+            // Hub session reconstruct the stale alert from bounded history.
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with
+                {
+                    WeatherChanges = false,
+                    HighWindAlerts = true,
+                });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 20));
+            AssertTrue((await SnapshotEvents(provider)).Single()
+                .GetProperty("IsHighWind")
+                .GetBoolean());
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindAlerts = false });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0));
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindAlerts = true });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0));
+            AssertEqual(0, (await SnapshotEvents(provider)).Length);
+
+            // A station disconnect does not claim recovery. Keeping the
+            // high-wind latch independent of EquipmentConnections lets the
+            // first complete low reading after reconnect clear it.
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with
+                {
+                    WeatherChanges = false,
+                    HighWindAlerts = true,
+                    EquipmentConnections = true,
+            });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 20));
+            provider.UpdateDeviceInfo(Weather(connected: false));
+            await InvokeProviderCallbackAsync(provider, "WeatherDisconnected", EventArgs.Empty);
+            var disconnected = await SnapshotEvents(provider);
+            AssertEqual("WEATHER-DISCONNECTED", disconnected[^1]
+                .GetProperty("Event")
+                .GetString());
+            var countBeforeReconnect = disconnected.Length;
+
+            // N.I.N.A. broadcasts a connected snapshot before raising its
+            // Connected event. The consumer records that lifecycle edge first,
+            // then publishes exactly one reconciliation from the same sample.
+            provider.UpdateDeviceInfo(Weather(
+                windSpeed: double.NaN,
+                windGust: 20));
+            var reconnectedHigh = await SnapshotEvents(provider);
+            AssertEqual(countBeforeReconnect + 2, reconnectedHigh.Length);
+            AssertEqual("WEATHER-CONNECTED", reconnectedHigh[^2]
+                .GetProperty("Event")
+                .GetString());
+            AssertEqual("WEATHER-HIGH-WIND", reconnectedHigh[^1]
+                .GetProperty("Event")
+                .GetString());
+            AssertTrue(reconnectedHigh[^1]
+                .GetProperty("IsHighWind")
+                .GetBoolean());
+
+            await InvokeProviderCallbackAsync(provider, "WeatherConnected", EventArgs.Empty);
+            AssertEqual(reconnectedHigh.Length, (await SnapshotEvents(provider)).Length);
+
+            // A different current sensor can authoritatively confirm the
+            // still-high state. A reading inside the hysteresis band remains
+            // high, and only the recovery boundary clears it.
+            var countBeforeHysteresis = reconnectedHigh.Length;
+            provider.UpdateDeviceInfo(Weather(
+                windSpeed: double.NaN,
+                windGust: 20));
+            AssertEqual(countBeforeHysteresis, (await SnapshotEvents(provider)).Length);
+            provider.UpdateDeviceInfo(Weather(
+                windSpeed: double.NaN,
+                windGust: 9.5));
+            AssertEqual(countBeforeHysteresis, (await SnapshotEvents(provider)).Length);
+            provider.UpdateDeviceInfo(Weather(
+                windSpeed: double.NaN,
+                windGust: 9));
+            AssertEqual(countBeforeHysteresis, (await SnapshotEvents(provider)).Length);
+            provider.UpdateDeviceInfo(Weather(
+                windSpeed: 9,
+                windGust: 9));
+            AssertFalse((await SnapshotEvents(provider))[^1]
+                .GetProperty("IsHighWind")
+                .GetBoolean());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task WeatherHistoryPurgesPreserveDirectReplayCursors()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { HighWindAlerts = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            provider.UpdateDeviceInfo(Weather(windSpeed: 20));
+            var firstSession = provider.DirectSessionToken;
+            AssertEqual(1, (await SnapshotTrackedEvents(provider, firstSession)).Items.Length);
+
+            // Production rotates first, then closes/purges the category. The
+            // successor's inherited sequence cursor must tolerate the gap.
+            provider.RotateDirectSession();
+            var disabledSession = provider.DirectSessionToken;
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindAlerts = false });
+            AssertEqual(
+                0,
+                (await SnapshotTrackedEvents(provider, disabledSession)).Items.Length);
+
+            provider.RotateDirectSession();
+            var reenabledSession = provider.DirectSessionToken;
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                delivery.Current with { HighWindAlerts = true });
+            provider.UpdateDeviceInfo(Weather(windSpeed: 0));
+            provider.UpdateDeviceInfo(Weather(windSpeed: 20));
+
+            // The first successor response is the replay-safe baseline; its
+            // next delta must expose the new post-gap alert exactly once.
+            AssertEqual(
+                0,
+                (await SnapshotTrackedEvents(provider, reenabledSession)).Items.Length);
+            var newAlert = (await SnapshotTrackedEvents(provider, reenabledSession)).Items;
+            AssertEqual(1, newAlert.Length);
+            AssertEqual("WEATHER-HIGH-WIND", newAlert[0].GetProperty("Event").GetString());
+            AssertTrue(newAlert[0].GetProperty("IsHighWind").GetBoolean());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static WeatherDataInfo Weather(
+        bool connected = true,
+        double temperature = double.NaN,
+        double dewPoint = double.NaN,
+        double humidity = double.NaN,
+        double pressure = double.NaN,
+        double cloudCover = double.NaN,
+        double rainRate = double.NaN,
+        double windSpeed = double.NaN,
+        double windGust = double.NaN,
+        double windDirection = double.NaN,
+        double skyTemperature = double.NaN,
+        double skyBrightness = double.NaN,
+        double skyQuality = double.NaN,
+        double starFwhm = double.NaN) => new()
+    {
+        Connected = connected,
+        Temperature = temperature,
+        DewPoint = dewPoint,
+        Humidity = humidity,
+        Pressure = pressure,
+        CloudCover = cloudCover,
+        RainRate = rainRate,
+        WindSpeed = windSpeed,
+        WindGust = windGust,
+        WindDirection = windDirection,
+        SkyTemperature = skyTemperature,
+        SkyBrightness = skyBrightness,
+        SkyQuality = skyQuality,
+        StarFWHM = starFwhm,
+    };
 
     private static async Task AutofocusCompletionWaitsForMatchingReport()
     {

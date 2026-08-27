@@ -65,12 +65,13 @@ annotation and message text. Failure summaries can contain sanitized N.I.N.A.
 operational error text; local path-shaped strings are redacted before
 transmission. Review these choices before enabling forwarding.
 
-Ordinary event categories, image sharing, and popup notifications start
-**enabled by default**. Review those settings before pairing with the Hub or
-starting a local runtime, and turn off anything you do not want to leave
-N.I.N.A. Turning a category off prevents its underlying events from reaching
-the Hub or local bot, including events already buffered before the setting
-changed. Turning off images also blocks image history and thumbnails.
+Most event categories, image sharing, and popup notifications start enabled.
+Weather-change reports and high-wind alerts are separate opt-ins and start
+disabled. Review those settings before pairing with the Hub or starting a local
+runtime, and turn off anything you do not want to leave N.I.N.A. Turning a
+category off prevents its underlying events from reaching the Hub or local bot,
+including events already buffered before the setting changed. Turning off
+images also blocks image history and thumbnails.
 Equipment/status queries remain available, although disabling event categories
 can reduce the detail available for target, sequence, and equipment tracking.
 Raw N.I.N.A. logs are neither read nor sent until you enable at least one log
@@ -90,6 +91,8 @@ The plugin provides bounded native histories and typed command handling for:
 - guider state, dithers, history, and graphs;
 - native safety-monitor connection and safe/unsafe transitions, retained as
   current status while safety delivery remains enabled;
+- optional, rate-limited weather-change reports and independent high-wind and
+  recovery alerts from N.I.N.A.'s wind-speed or gust readings;
 - sequence lifecycle, item failures, and explicit completion outcomes;
 - built-in timed, altitude, Moon-altitude, Sun-altitude, horizon, and safety
   waits, plus supported long-running Sequencer+ condition and manual waits;
@@ -99,11 +102,13 @@ The plugin provides bounded native histories and typed command handling for:
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
 
-Event families, images, and popup notifications are enabled by default and can
-be disabled independently for each N.I.N.A. profile. Disabled categories never
-leave N.I.N.A. over either the hosted WebSocket or the local bot's named pipe;
-turning a category off immediately removes its buffered events from subsequent
-queries. Images and thumbnails are also withheld when their category is off.
+Event families, images, and popup notifications can be controlled independently
+for each N.I.N.A. profile. Weather changes and high-wind alerts are separate and
+start disabled; most other event families start enabled. Disabled categories
+never leave N.I.N.A. over either the hosted WebSocket or the local bot's named
+pipe; turning a category off immediately removes its buffered events from
+subsequent queries. Images and thumbnails are also withheld when their category
+is off.
 Once N.I.N.A. accepts a locally permitted command, its terminal failure is
 always delivered as part of that command exchange; optional event switches do
 not hide the outcome. Safety-monitor transitions have their own event switch; a
@@ -111,9 +116,22 @@ safety wait is sent only when both sequence and safety delivery are enabled.
 The dedicated **Observatory and flat panel** switch covers dome/shutter actions
 and flat cover, light, and brightness changes. Their connection events, along
 with weather-station and switch-device connection state, use **Equipment
-connections**. Structured weather measurements, switch values, and LiveStack
-data are not captured. Enabled popup notifications and opt-in raw N.I.N.A. logs
-remain unstructured text and may contain operational details. Sequencer+
+connections**. Structured weather measurements remain private unless
+**Meaningful weather changes** or **High-wind alerts** is enabled. General
+weather reports group significant changes and send
+at most once every five minutes, except rain onset; they can include available
+temperature, dew point, humidity, pressure, cloud, rain, wind, sky, and seeing
+measurements. High-wind-only mode sends only wind speed, gust, and the local
+threshold in m/s, plus alert/recovery state. An active alert may be resent after
+a station reconnect or threshold change to synchronize status without another
+user-facing high-wind notification. Missing readings never count as recovery;
+observed wind must cross the hysteresis boundary. Weather-station names, device IDs,
+drivers, and raw N.I.N.A. objects are never included. Weather reports are
+informational and can be delayed, unavailable, or inaccurate; they do not
+replace N.I.N.A.'s safety monitor, local automation, or physical interlocks.
+Switch values and LiveStack data are not captured. Enabled popup notifications
+and opt-in raw N.I.N.A. logs remain unstructured text and may contain
+operational details. Sequencer+
 condition expressions and free-form pause reasons remain inside N.I.N.A.
 Changing mount, sequence, or safety delivery first closes the current Direct
 session, then applies the new selection and reconnects. This prevents an older

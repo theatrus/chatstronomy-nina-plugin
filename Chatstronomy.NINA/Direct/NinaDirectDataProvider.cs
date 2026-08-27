@@ -13,6 +13,7 @@ using NINA.Core.Utility;
 using NINA.Core.Utility.WindowService;
 using NINA.Equipment.Equipment.MyFocuser;
 using NINA.Equipment.Equipment.MySafetyMonitor;
+using NINA.Equipment.Equipment.MyWeatherData;
 using NINA.Equipment.Interfaces;
 using NINA.Equipment.Interfaces.Mediator;
 using NINA.Equipment.Interfaces.ViewModel;
@@ -38,6 +39,7 @@ internal sealed class NinaDirectDataProvider :
     INinaDirectDataProvider,
     IFocuserConsumer,
     ISafetyMonitorConsumer,
+    IWeatherDataConsumer,
     ISubscriber
 {
     private const int EventHistoryCapacity = 10_000;
@@ -49,6 +51,7 @@ internal sealed class NinaDirectDataProvider :
     /// let an evening of INFO chatter evict every real event, leaving the
     /// consumer's state reconstruction with nothing to read.
     private const int LogHistoryCapacity = 500;
+    private static readonly TimeSpan WeatherChangeMinimumInterval = TimeSpan.FromMinutes(5);
     private static readonly Regex LocalPathPattern = new(
         "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/(?:Users|home|var|tmp|opt)/)[^\"'\\r\\n]*",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -84,6 +87,7 @@ internal sealed class NinaDirectDataProvider :
     private readonly NinaNotificationWatcher notificationWatcher;
     private readonly NinaImageSaveFailureWatcher imageSaveFailureWatcher;
     private readonly Func<BitmapSource, byte[]> thumbnailEncoder;
+    private readonly Func<DateTimeOffset> utcNow;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
     private readonly BoundedHistory<Dictionary<string, object?>> logEvents =
@@ -115,6 +119,7 @@ internal sealed class NinaDirectDataProvider :
     private readonly object historyGenerationGate = new();
     private readonly object autofocusReportGate = new();
     private readonly object safetyStateGate = new();
+    private readonly object weatherStateGate = new();
     private readonly object directSessionGate = new();
     private readonly object thumbnailGate = new();
     private readonly string autofocusReportDirectory;
@@ -141,6 +146,18 @@ internal sealed class NinaDirectDataProvider :
     private long safetyStateRevision;
     private long safetyPublicationEpoch;
     private bool safetySharingBlocked;
+    private DirectWeatherSnapshot? weatherBaseline;
+    private DateTimeOffset lastWeatherChangePublishedAt;
+    private DirectHighWindState highWindState;
+    private bool highWindRequiredSpeed;
+    private bool highWindRequiredGust;
+    private bool highWindThresholdReconciliationPending;
+    private bool highWindConnectionReconciliationPending;
+    private bool? weatherConnectionState;
+    private long weatherChangesPublicationEpoch;
+    private long highWindPublicationEpoch;
+    private bool weatherChangesSharingBlocked;
+    private bool highWindSharingBlocked;
     private long guideStepId;
     private long commandGeneration;
     private ThumbnailWork? pendingThumbnail;
@@ -171,7 +188,8 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryPolicy eventDelivery,
         DirectAccessPolicy accessPolicy,
         string? autofocusReportDirectory = null,
-        Func<BitmapSource, byte[]>? thumbnailEncoder = null)
+        Func<BitmapSource, byte[]>? thumbnailEncoder = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         this.profileService = profileService;
         this.telescope = telescope;
@@ -195,8 +213,11 @@ internal sealed class NinaDirectDataProvider :
         this.eventDelivery = eventDelivery;
         this.accessPolicy = accessPolicy;
         this.thumbnailEncoder = thumbnailEncoder ?? DirectThumbnailEncoder.Encode;
+        this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
         safetySharingBlocked = !eventDelivery.Current.Safety;
+        weatherChangesSharingBlocked = !eventDelivery.Current.WeatherChanges;
+        highWindSharingBlocked = !eventDelivery.Current.HighWindAlerts;
         sequenceFailureCoverageBlocked = !NinaDirectSequenceSnapshot
             .HasCompleteSequenceFailureCoverage(eventDelivery.Current);
         this.autofocusReportDirectory = autofocusReportDirectory
@@ -306,8 +327,26 @@ internal sealed class NinaDirectDataProvider :
         flatDevice.BrightnessChanged += FlatBrightnessChanged;
         flatDevice.LightToggled += FlatLightToggled;
 
+        var weatherConnectedBeforeRegistration = false;
+        try
+        {
+            // Read only the lifecycle bit. RegisterConsumer immediately sends
+            // another current snapshot, and any edge which races this read is
+            // detected by comparing that snapshot under weatherStateGate.
+            weatherConnectedBeforeRegistration = weatherData.GetInfo()?.Connected == true;
+        }
+        catch (Exception)
+        {
+            // No registered weather handler is equivalent to disconnected for
+            // startup edge detection. The mediator broadcast will correct it.
+        }
+        lock (weatherStateGate)
+        {
+            weatherConnectionState = weatherConnectedBeforeRegistration;
+        }
         weatherData.Connected += WeatherConnected;
         weatherData.Disconnected += WeatherDisconnected;
+        weatherData.RegisterConsumer(this);
         switchMediator.Connected += SwitchConnected;
         switchMediator.Disconnected += SwitchDisconnected;
 
@@ -436,6 +475,39 @@ internal sealed class NinaDirectDataProvider :
                 }
             }
         }
+        if (previous.WeatherChanges != current.WeatherChanges)
+        {
+            lock (weatherStateGate)
+            {
+                weatherChangesPublicationEpoch++;
+                weatherChangesSharingBlocked = true;
+                ClearWeatherChangeBaselineLocked();
+                RemoveWeatherEventsFromHistory("WEATHER-CHANGED");
+            }
+        }
+        var highWindToggleChanged = previous.HighWindAlerts != current.HighWindAlerts;
+        var highWindThresholdChanged = previous.HighWindThresholdMetersPerSecond
+            != current.HighWindThresholdMetersPerSecond;
+        if (highWindToggleChanged || highWindThresholdChanged)
+        {
+            lock (weatherStateGate)
+            {
+                highWindPublicationEpoch++;
+                highWindSharingBlocked = true;
+                if (highWindToggleChanged)
+                {
+                    ResetHighWindStateLocked();
+                    RemoveWeatherEventsFromHistory("WEATHER-HIGH-WIND");
+                }
+                else
+                {
+                    // Keep an active alert until the current reading can be
+                    // reconciled against the new threshold. Silently erasing
+                    // it would leave chat showing a stale high-wind state.
+                    highWindThresholdReconciliationPending = true;
+                }
+            }
+        }
         if (previous.Autofocus != current.Autofocus)
         {
             if (!current.Autofocus)
@@ -513,9 +585,34 @@ internal sealed class NinaDirectDataProvider :
                 safetySharingBlocked = !current.Safety;
             }
         }
+        var weatherChangesChanged = previous.WeatherChanges != current.WeatherChanges;
+        var highWindPolicyChanged = previous.HighWindAlerts != current.HighWindAlerts
+            || previous.HighWindThresholdMetersPerSecond
+                != current.HighWindThresholdMetersPerSecond;
+        if (weatherChangesChanged || highWindPolicyChanged)
+        {
+            lock (weatherStateGate)
+            {
+                if (weatherChangesChanged)
+                {
+                    weatherChangesPublicationEpoch++;
+                    weatherChangesSharingBlocked = !current.WeatherChanges;
+                }
+                if (highWindPolicyChanged)
+                {
+                    highWindPublicationEpoch++;
+                    highWindSharingBlocked = !current.HighWindAlerts;
+                }
+            }
+        }
         if (!previous.Safety && current.Safety)
         {
             PublishCurrentSafetyBaseline(CaptureHistoryGeneration());
+        }
+        if ((!previous.WeatherChanges && current.WeatherChanges)
+            || current.HighWindAlerts && highWindPolicyChanged)
+        {
+            PublishCurrentWeatherBaseline();
         }
     }
 
@@ -535,6 +632,7 @@ internal sealed class NinaDirectDataProvider :
             safetyPublicationEpoch++;
             safetySharingBlocked = true;
         }
+        ResetWeatherState(blockSharing: true);
         PauseSequenceSubscriptions();
         // Transport invalidation is independent from the stronger profile
         // trust revocation below. Keeping it separate lets event-policy
@@ -628,6 +726,7 @@ internal sealed class NinaDirectDataProvider :
 
         weatherData.Connected -= WeatherConnected;
         weatherData.Disconnected -= WeatherDisconnected;
+        weatherData.RemoveConsumer(this);
         switchMediator.Connected -= SwitchConnected;
         switchMediator.Disconnected -= SwitchDisconnected;
         lock (safetyStateGate)
@@ -640,6 +739,7 @@ internal sealed class NinaDirectDataProvider :
             safetyPublicationEpoch++;
             safetySharingBlocked = true;
         }
+        ResetWeatherState(blockSharing: true);
 
         foreach (var topic in TargetSchedulerTopics)
         {
@@ -695,6 +795,16 @@ internal sealed class NinaDirectDataProvider :
             safetyPublicationEpoch++;
             safetySharingBlocked = !eventDelivery.Current.Safety;
         }
+        lock (weatherStateGate)
+        {
+            weatherChangesPublicationEpoch++;
+            highWindPublicationEpoch++;
+            weatherChangesSharingBlocked = !eventDelivery.Current.WeatherChanges;
+            highWindSharingBlocked = !eventDelivery.Current.HighWindAlerts;
+            weatherBaseline = null;
+            lastWeatherChangePublishedAt = default;
+            ResetHighWindStateLocked();
+        }
         Interlocked.Exchange(ref guideStepId, 0);
         ApplyLogDeliveryOptions();
         _ = notificationWatcher.Start(CaptureHistoryGeneration());
@@ -702,6 +812,10 @@ internal sealed class NinaDirectDataProvider :
         if (eventDelivery.Current.Safety)
         {
             PublishCurrentSafetyBaseline(CaptureHistoryGeneration());
+        }
+        if (eventDelivery.Current.WeatherChanges || eventDelivery.Current.HighWindAlerts)
+        {
+            PublishCurrentWeatherBaseline();
         }
         ResumeSequenceSubscriptions();
     }
@@ -1035,6 +1149,110 @@ internal sealed class NinaDirectDataProvider :
             CaptureHistoryGeneration(),
             deviceInfo.Connected,
             deviceInfo.IsSafe);
+
+    public void UpdateDeviceInfo(WeatherDataInfo deviceInfo)
+    {
+        if (!started || deviceInfo is null)
+        {
+            return;
+        }
+
+        long weatherChangesEpoch;
+        long windEpoch;
+        bool captureWeatherChanges;
+        bool captureWind;
+        lock (weatherStateGate)
+        {
+            if (!started)
+            {
+                return;
+            }
+            // N.I.N.A. broadcasts each connection-state snapshot before its
+            // Connected/Disconnected callback. Record that edge first so a
+            // simultaneous high-wind reading can never overtake it. Only the
+            // boolean is observed when both weather permissions are off.
+            RecordWeatherConnectionStateLocked(
+                deviceInfo.Connected,
+                emitWhenPreviouslyUnknown: false);
+            if (!deviceInfo.Connected)
+            {
+                return;
+            }
+            weatherChangesEpoch = weatherChangesPublicationEpoch;
+            windEpoch = highWindPublicationEpoch;
+            captureWeatherChanges = !weatherChangesSharingBlocked
+                && eventDelivery.Current.WeatherChanges;
+            captureWind = !highWindSharingBlocked
+                && eventDelivery.Current.HighWindAlerts;
+        }
+        if (!captureWeatherChanges && !captureWind)
+        {
+            return;
+        }
+
+        // WeatherDataVM mutates and rebroadcasts one WeatherDataInfo instance
+        // from its polling worker. Copy only primitive, unit-defined readings
+        // before taking our state lock; never retain the mutable N.I.N.A.
+        // object or perform I/O on that worker.
+        var snapshot = DirectWeatherSnapshot.FromNina(deviceInfo);
+        var historyGeneration = CaptureHistoryGeneration();
+        var observedAt = utcNow();
+        lock (weatherStateGate)
+        {
+            if (!started || !IsHistoryGenerationCurrent(historyGeneration))
+            {
+                return;
+            }
+            if (weatherConnectionState != true)
+            {
+                // A disconnect invalidated this mutable N.I.N.A. snapshot
+                // while its primitive values were being copied.
+                return;
+            }
+            if (!snapshot.Connected)
+            {
+                RecordWeatherConnectionStateLocked(
+                    connected: false,
+                    emitWhenPreviouslyUnknown: false);
+                return;
+            }
+            var windEdgePublished = false;
+            if (captureWind)
+            {
+                windEdgePublished = ProcessHighWindLocked(
+                    snapshot,
+                    historyGeneration,
+                    windEpoch,
+                    observedAt);
+            }
+            if (captureWeatherChanges)
+            {
+                if (windEdgePublished)
+                {
+                    // One sample should create one chat update. Keep the
+                    // wind portion of the general baseline current so the
+                    // edge is not repeated as a generic change on the next
+                    // poll. Non-wind changes remain pending for that poll.
+                    if (CanPublishWeatherChangesLocked(
+                        historyGeneration,
+                        weatherChangesEpoch))
+                    {
+                        weatherBaseline = weatherBaseline is null
+                            ? snapshot
+                            : weatherBaseline.MergeWindFrom(snapshot);
+                    }
+                }
+                else
+                {
+                    ProcessWeatherChangesLocked(
+                        snapshot,
+                        historyGeneration,
+                        weatherChangesEpoch,
+                        observedAt);
+                }
+            }
+        }
+    }
 
     public void UpdateEndAutoFocusRun(AutoFocusInfo info)
     {
@@ -3276,8 +3494,453 @@ internal sealed class NinaDirectDataProvider :
         AddEvent("FLAT-LIGHT-TOGGLED", ("On", lightOn));
         return Task.CompletedTask;
     }
-    private Task WeatherConnected(object sender, EventArgs args) => AddSimpleEvent("WEATHER-CONNECTED");
-    private Task WeatherDisconnected(object sender, EventArgs args) => AddSimpleEvent("WEATHER-DISCONNECTED");
+    private Task WeatherConnected(object sender, EventArgs args)
+    {
+        bool publishCurrentSnapshot;
+        lock (weatherStateGate)
+        {
+            // Normally the preceding mediator broadcast already recorded the
+            // edge and the callback is a no-op. This remains a fallback for a
+            // weather integration which raises Connected without broadcasting.
+            publishCurrentSnapshot = RecordWeatherConnectionStateLocked(
+                connected: true,
+                emitWhenPreviouslyUnknown: true);
+        }
+        if (publishCurrentSnapshot)
+        {
+            PublishCurrentWeatherBaseline();
+        }
+        return Task.CompletedTask;
+    }
+
+    private Task WeatherDisconnected(object sender, EventArgs args)
+    {
+        lock (weatherStateGate)
+        {
+            // A missing station cannot prove that an active wind condition
+            // recovered. Preserve the high-wind latch so the first complete
+            // reading after reconnect can emit an authoritative recovery,
+            // even when Equipment connection messages are disabled.
+            RecordWeatherConnectionStateLocked(
+                connected: false,
+                emitWhenPreviouslyUnknown: true);
+        }
+        return Task.CompletedTask;
+    }
+
+    private bool RecordWeatherConnectionStateLocked(
+        bool connected,
+        bool emitWhenPreviouslyUnknown)
+    {
+        var previous = weatherConnectionState;
+        weatherConnectionState = connected;
+        if (previous == connected
+            || !previous.HasValue && !emitWhenPreviouslyUnknown)
+        {
+            return false;
+        }
+        weatherChangesPublicationEpoch++;
+        highWindPublicationEpoch++;
+        ClearWeatherChangeBaselineLocked();
+        highWindConnectionReconciliationPending =
+            highWindState == DirectHighWindState.High;
+        AddEvent(connected ? "WEATHER-CONNECTED" : "WEATHER-DISCONNECTED");
+        return true;
+    }
+
+    private void PublishCurrentWeatherBaseline()
+    {
+        if (!started)
+        {
+            return;
+        }
+        try
+        {
+            UpdateDeviceInfo(weatherData.GetInfo());
+        }
+        catch (Exception)
+        {
+            // A disconnect can race the local snapshot read. The next normal
+            // weather broadcast will establish the baseline if sharing is
+            // still enabled; never turn an unavailable reading into a state
+            // change or a false wind recovery.
+        }
+    }
+
+    private void ProcessWeatherChangesLocked(
+        DirectWeatherSnapshot snapshot,
+        long historyGeneration,
+        long publicationEpoch,
+        DateTimeOffset observedAt)
+    {
+        if (!CanPublishWeatherChangesLocked(historyGeneration, publicationEpoch))
+        {
+            return;
+        }
+        if (!snapshot.HasAnyReading)
+        {
+            return;
+        }
+        if (weatherBaseline is null)
+        {
+            weatherBaseline = snapshot;
+            return;
+        }
+
+        var baseline = weatherBaseline;
+        var changedFields = MeaningfulWeatherChanges(baseline, snapshot);
+        // A sensor that appears after the initial baseline is learned silently
+        // and can participate in later comparisons. Missing sensor values do
+        // not erase a known baseline or imply a condition change.
+        weatherBaseline = baseline.FillMissingFrom(snapshot);
+        if (changedFields.Count == 0)
+        {
+            return;
+        }
+
+        var rainStarted = baseline.RainRateMillimetersPerHour is <= 0
+            && snapshot.RainRateMillimetersPerHour is > 0;
+        if (!rainStarted
+            && lastWeatherChangePublishedAt != default
+            && observedAt >= lastWeatherChangePublishedAt
+            && observedAt - lastWeatherChangePublishedAt < WeatherChangeMinimumInterval)
+        {
+            return;
+        }
+
+        var details = WeatherEventDetails(snapshot,
+            ("ChangedFields", string.Join(", ", changedFields)));
+        if (TryAddEventCore(
+            historyGeneration,
+            observedAt,
+            "WEATHER-CHANGED",
+            chatEnabled: true,
+            details))
+        {
+            weatherBaseline = baseline.MergeAvailableFrom(snapshot);
+            lastWeatherChangePublishedAt = observedAt;
+        }
+    }
+
+    private bool CanPublishWeatherChangesLocked(
+        long historyGeneration,
+        long publicationEpoch) =>
+        !weatherChangesSharingBlocked
+        && publicationEpoch == weatherChangesPublicationEpoch
+        && eventDelivery.Current.WeatherChanges
+        && IsHistoryGenerationCurrent(historyGeneration);
+
+    private bool ProcessHighWindLocked(
+        DirectWeatherSnapshot snapshot,
+        long historyGeneration,
+        long publicationEpoch,
+        DateTimeOffset observedAt)
+    {
+        if (highWindSharingBlocked
+            || publicationEpoch != highWindPublicationEpoch
+            || !eventDelivery.Current.HighWindAlerts
+            || !IsHistoryGenerationCurrent(historyGeneration))
+        {
+            return false;
+        }
+
+        var speed = snapshot.WindSpeedMetersPerSecond;
+        var gust = snapshot.WindGustMetersPerSecond;
+        var effectiveWind = MaxAvailable(speed, gust);
+        if (!effectiveWind.HasValue)
+        {
+            return false;
+        }
+        var threshold = ChatstronomySettings.NormalizeHighWindThreshold(
+            eventDelivery.Current.HighWindThresholdMetersPerSecond);
+        var hysteresis = Math.Max(1.0, threshold * 0.1);
+        var recoveryThreshold = Math.Max(0.0, threshold - hysteresis);
+        if ((highWindThresholdReconciliationPending
+                || highWindConnectionReconciliationPending)
+            && highWindState == DirectHighWindState.High)
+        {
+            var remainsHigh = effectiveWind.Value > recoveryThreshold;
+            var nextRequiredSpeed = speed.HasValue
+                ? speed.Value > recoveryThreshold
+                : highWindRequiredSpeed;
+            var nextRequiredGust = gust.HasValue
+                ? gust.Value > recoveryThreshold
+                : highWindRequiredGust;
+            highWindRequiredSpeed = nextRequiredSpeed;
+            highWindRequiredGust = nextRequiredGust;
+            if (!remainsHigh
+                && (nextRequiredSpeed && !speed.HasValue
+                    || nextRequiredGust && !gust.HasValue))
+            {
+                return false;
+            }
+            var refreshedDetails = WindEventDetails(snapshot, threshold, remainsHigh);
+            if (TryAddEventCore(
+                historyGeneration,
+                observedAt,
+                "WEATHER-HIGH-WIND",
+                chatEnabled: true,
+                refreshedDetails))
+            {
+                if (remainsHigh)
+                {
+                    // Any current source above the recovery boundary proves
+                    // the alert is still latched, even if the source which
+                    // originally raised it is temporarily unavailable. Keep
+                    // that missing source unresolved until it is observed
+                    // safe; the alternate source confirms high but cannot
+                    // prove the original source recovered.
+                    highWindRequiredSpeed = nextRequiredSpeed;
+                    highWindRequiredGust = nextRequiredGust;
+                    ClearHighWindReconciliationLocked();
+                }
+                else
+                {
+                    ResetHighWindStateLocked(DirectHighWindState.BelowThreshold);
+                }
+                return true;
+            }
+            return false;
+        }
+        if (highWindState != DirectHighWindState.High)
+        {
+            if (effectiveWind.Value < threshold)
+            {
+                highWindState = DirectHighWindState.BelowThreshold;
+                ClearHighWindReconciliationLocked();
+                return false;
+            }
+            var details = WindEventDetails(snapshot, threshold, isHighWind: true);
+            if (TryAddEventCore(
+                historyGeneration,
+                observedAt,
+                "WEATHER-HIGH-WIND",
+                chatEnabled: true,
+                details))
+            {
+                highWindState = DirectHighWindState.High;
+                highWindRequiredSpeed = speed is { } currentSpeed
+                    && currentSpeed > recoveryThreshold;
+                highWindRequiredGust = gust is { } currentGust
+                    && currentGust > recoveryThreshold;
+                ClearHighWindReconciliationLocked();
+                return true;
+            }
+            return false;
+        }
+
+        // Once an alert is active, a missing sensor cannot prove recovery.
+        // A present safe reading does discharge that source, so alternating
+        // wind-speed/gust availability cannot latch the alert forever.
+        if (speed.HasValue)
+        {
+            highWindRequiredSpeed = speed.Value > recoveryThreshold;
+        }
+        if (gust.HasValue)
+        {
+            highWindRequiredGust = gust.Value > recoveryThreshold;
+        }
+        if (highWindRequiredSpeed && !speed.HasValue
+            || highWindRequiredGust && !gust.HasValue)
+        {
+            return false;
+        }
+        if (effectiveWind.Value > recoveryThreshold)
+        {
+            return false;
+        }
+
+        var recoveryDetails = WindEventDetails(snapshot, threshold, isHighWind: false);
+        if (TryAddEventCore(
+            historyGeneration,
+            observedAt,
+            "WEATHER-HIGH-WIND",
+            chatEnabled: true,
+            recoveryDetails))
+        {
+            ResetHighWindStateLocked(DirectHighWindState.BelowThreshold);
+            return true;
+        }
+        return false;
+    }
+
+    private static IReadOnlyList<string> MeaningfulWeatherChanges(
+        DirectWeatherSnapshot baseline,
+        DirectWeatherSnapshot current)
+    {
+        var changed = new List<string>();
+        AddThresholdChange(changed, "temperature", baseline.TemperatureCelsius,
+            current.TemperatureCelsius, 1.0);
+        AddThresholdChange(changed, "dew point", baseline.DewPointCelsius,
+            current.DewPointCelsius, 1.0);
+        AddThresholdChange(changed, "humidity", baseline.HumidityPercent,
+            current.HumidityPercent, 5.0);
+        AddThresholdChange(changed, "pressure", baseline.PressureHectopascals,
+            current.PressureHectopascals, 2.0);
+        AddThresholdChange(changed, "cloud cover", baseline.CloudCoverPercent,
+            current.CloudCoverPercent, 10.0);
+        AddThresholdChange(changed, "wind speed", baseline.WindSpeedMetersPerSecond,
+            current.WindSpeedMetersPerSecond, 2.0);
+        AddThresholdChange(changed, "wind gust", baseline.WindGustMetersPerSecond,
+            current.WindGustMetersPerSecond, 3.0);
+        AddThresholdChange(changed, "sky temperature", baseline.SkyTemperatureCelsius,
+            current.SkyTemperatureCelsius, 2.0);
+        AddThresholdChange(changed, "sky quality",
+            baseline.SkyQualityMagnitudesPerSquareArcsecond,
+            current.SkyQualityMagnitudesPerSquareArcsecond, 0.25);
+        AddRelativeThresholdChange(changed, "sky brightness",
+            baseline.SkyBrightnessLux,
+            current.SkyBrightnessLux,
+            minimumAbsoluteChange: 0.0001,
+            relativeChange: 0.20);
+        AddThresholdChange(changed, "star FWHM",
+            baseline.StarFwhmArcseconds,
+            current.StarFwhmArcseconds, 0.5);
+
+        if (baseline.RainRateMillimetersPerHour is { } oldRain
+            && current.RainRateMillimetersPerHour is { } newRain
+            && ((oldRain <= 0) != (newRain <= 0) || Math.Abs(newRain - oldRain) >= 0.5))
+        {
+            changed.Add("rain rate");
+        }
+
+        var effectiveWind = MaxAvailable(
+            current.WindSpeedMetersPerSecond,
+            current.WindGustMetersPerSecond);
+        if (effectiveWind is >= 2.0
+            && baseline.WindDirectionDegrees is { } oldDirection
+            && current.WindDirectionDegrees is { } newDirection)
+        {
+            var difference = Math.Abs(newDirection - oldDirection) % 360.0;
+            if (Math.Min(difference, 360.0 - difference) >= 30.0)
+            {
+                changed.Add("wind direction");
+            }
+        }
+        return changed;
+    }
+
+    private static void AddThresholdChange(
+        ICollection<string> changed,
+        string label,
+        double? previous,
+        double? current,
+        double threshold)
+    {
+        if (previous.HasValue
+            && current.HasValue
+            && Math.Abs(current.Value - previous.Value) >= threshold)
+        {
+            changed.Add(label);
+        }
+    }
+
+    private static void AddRelativeThresholdChange(
+        ICollection<string> changed,
+        string label,
+        double? previous,
+        double? current,
+        double minimumAbsoluteChange,
+        double relativeChange)
+    {
+        if (previous.HasValue
+            && current.HasValue
+            && Math.Abs(current.Value - previous.Value)
+                >= Math.Max(minimumAbsoluteChange, Math.Abs(previous.Value) * relativeChange))
+        {
+            changed.Add(label);
+        }
+    }
+
+    private static double? MaxAvailable(double? first, double? second) =>
+        first.HasValue && second.HasValue
+            ? Math.Max(first.Value, second.Value)
+            : first ?? second;
+
+    private static (string Name, object? Value)[] WeatherEventDetails(
+        DirectWeatherSnapshot snapshot,
+        params (string Name, object? Value)[] additional)
+    {
+        var details = new List<(string Name, object? Value)>
+        {
+            ("TemperatureCelsius", snapshot.TemperatureCelsius),
+            ("DewPointCelsius", snapshot.DewPointCelsius),
+            ("HumidityPercent", snapshot.HumidityPercent),
+            ("PressureHectopascals", snapshot.PressureHectopascals),
+            ("CloudCoverPercent", snapshot.CloudCoverPercent),
+            ("RainRateMillimetersPerHour", snapshot.RainRateMillimetersPerHour),
+            ("WindSpeedMetersPerSecond", snapshot.WindSpeedMetersPerSecond),
+            ("WindGustMetersPerSecond", snapshot.WindGustMetersPerSecond),
+            ("WindDirectionDegrees", snapshot.WindDirectionDegrees),
+            ("SkyTemperatureCelsius", snapshot.SkyTemperatureCelsius),
+            ("SkyBrightnessLux", snapshot.SkyBrightnessLux),
+            ("SkyQualityMagnitudesPerSquareArcsecond",
+                snapshot.SkyQualityMagnitudesPerSquareArcsecond),
+            ("StarFwhmArcseconds", snapshot.StarFwhmArcseconds),
+        };
+        details.AddRange(additional);
+        return details.ToArray();
+    }
+
+    private static (string Name, object? Value)[] WindEventDetails(
+        DirectWeatherSnapshot snapshot,
+        double threshold,
+        bool isHighWind) =>
+    [
+        ("IsHighWind", isHighWind),
+        ("ThresholdMetersPerSecond", threshold),
+        ("WindSpeedMetersPerSecond", snapshot.WindSpeedMetersPerSecond),
+        ("WindGustMetersPerSecond", snapshot.WindGustMetersPerSecond),
+    ];
+
+    private void ResetWeatherState(bool blockSharing)
+    {
+        lock (weatherStateGate)
+        {
+            weatherChangesPublicationEpoch++;
+            highWindPublicationEpoch++;
+            if (blockSharing)
+            {
+                weatherChangesSharingBlocked = true;
+                highWindSharingBlocked = true;
+            }
+            ClearWeatherObservationsLocked();
+        }
+    }
+
+    private void ClearWeatherObservationsLocked()
+    {
+        ClearWeatherChangeBaselineLocked();
+        ResetHighWindStateLocked();
+    }
+
+    private void ClearWeatherChangeBaselineLocked()
+    {
+        weatherBaseline = null;
+        lastWeatherChangePublishedAt = default;
+    }
+
+    private void RemoveWeatherEventsFromHistory(string eventName) =>
+        events.RemoveWhere(item =>
+            item.TryGetValue("Event", out var value)
+            && value is string storedEvent
+            && storedEvent.Equals(eventName, StringComparison.Ordinal));
+
+    private void ResetHighWindStateLocked(
+        DirectHighWindState state = DirectHighWindState.Unknown)
+    {
+        highWindState = state;
+        highWindRequiredSpeed = false;
+        highWindRequiredGust = false;
+        ClearHighWindReconciliationLocked();
+    }
+
+    private void ClearHighWindReconciliationLocked()
+    {
+        highWindThresholdReconciliationPending = false;
+        highWindConnectionReconciliationPending = false;
+    }
+
     private Task SwitchConnected(object sender, EventArgs args) => AddSimpleEvent("SWITCH-CONNECTED");
     private Task SwitchDisconnected(object sender, EventArgs args) => AddSimpleEvent("SWITCH-DISCONNECTED");
     private Task SafetyConnected(object sender, EventArgs args)
@@ -3808,6 +4471,130 @@ internal enum DirectSafetyState
     Disconnected,
     Safe,
     Unsafe,
+}
+
+internal enum DirectHighWindState
+{
+    Unknown,
+    BelowThreshold,
+    High,
+}
+
+internal sealed record DirectWeatherSnapshot(
+    bool Connected,
+    double? TemperatureCelsius,
+    double? DewPointCelsius,
+    double? HumidityPercent,
+    double? PressureHectopascals,
+    double? CloudCoverPercent,
+    double? RainRateMillimetersPerHour,
+    double? WindSpeedMetersPerSecond,
+    double? WindGustMetersPerSecond,
+    double? WindDirectionDegrees,
+    double? SkyTemperatureCelsius,
+    double? SkyBrightnessLux,
+    double? SkyQualityMagnitudesPerSquareArcsecond,
+    double? StarFwhmArcseconds)
+{
+    internal bool HasAnyReading =>
+        TemperatureCelsius.HasValue
+        || DewPointCelsius.HasValue
+        || HumidityPercent.HasValue
+        || PressureHectopascals.HasValue
+        || CloudCoverPercent.HasValue
+        || RainRateMillimetersPerHour.HasValue
+        || WindSpeedMetersPerSecond.HasValue
+        || WindGustMetersPerSecond.HasValue
+        || WindDirectionDegrees.HasValue
+        || SkyTemperatureCelsius.HasValue
+        || SkyBrightnessLux.HasValue
+        || SkyQualityMagnitudesPerSquareArcsecond.HasValue
+        || StarFwhmArcseconds.HasValue;
+
+    internal static DirectWeatherSnapshot FromNina(WeatherDataInfo info) => new(
+        Connected: info.Connected,
+        TemperatureCelsius: Finite(info.Temperature),
+        DewPointCelsius: Finite(info.DewPoint),
+        HumidityPercent: InRange(info.Humidity, 0, 100),
+        PressureHectopascals: InRange(info.Pressure, double.Epsilon, 2_000),
+        CloudCoverPercent: InRange(info.CloudCover, 0, 100),
+        RainRateMillimetersPerHour: NonNegative(info.RainRate),
+        WindSpeedMetersPerSecond: NonNegative(info.WindSpeed),
+        WindGustMetersPerSecond: NonNegative(info.WindGust),
+        WindDirectionDegrees: InRange(info.WindDirection, 0, 360),
+        SkyTemperatureCelsius: Finite(info.SkyTemperature),
+        SkyBrightnessLux: NonNegative(info.SkyBrightness),
+        SkyQualityMagnitudesPerSquareArcsecond: Finite(info.SkyQuality),
+        StarFwhmArcseconds: NonNegative(info.StarFWHM));
+
+    internal DirectWeatherSnapshot FillMissingFrom(DirectWeatherSnapshot current) =>
+        this with
+        {
+            TemperatureCelsius = TemperatureCelsius ?? current.TemperatureCelsius,
+            DewPointCelsius = DewPointCelsius ?? current.DewPointCelsius,
+            HumidityPercent = HumidityPercent ?? current.HumidityPercent,
+            PressureHectopascals = PressureHectopascals ?? current.PressureHectopascals,
+            CloudCoverPercent = CloudCoverPercent ?? current.CloudCoverPercent,
+            RainRateMillimetersPerHour = RainRateMillimetersPerHour
+                ?? current.RainRateMillimetersPerHour,
+            WindSpeedMetersPerSecond = WindSpeedMetersPerSecond
+                ?? current.WindSpeedMetersPerSecond,
+            WindGustMetersPerSecond = WindGustMetersPerSecond
+                ?? current.WindGustMetersPerSecond,
+            WindDirectionDegrees = WindDirectionDegrees ?? current.WindDirectionDegrees,
+            SkyTemperatureCelsius = SkyTemperatureCelsius ?? current.SkyTemperatureCelsius,
+            SkyBrightnessLux = SkyBrightnessLux ?? current.SkyBrightnessLux,
+            SkyQualityMagnitudesPerSquareArcsecond =
+                SkyQualityMagnitudesPerSquareArcsecond
+                ?? current.SkyQualityMagnitudesPerSquareArcsecond,
+            StarFwhmArcseconds = StarFwhmArcseconds ?? current.StarFwhmArcseconds,
+        };
+
+    internal DirectWeatherSnapshot MergeAvailableFrom(DirectWeatherSnapshot current) =>
+        this with
+        {
+            Connected = current.Connected,
+            TemperatureCelsius = current.TemperatureCelsius ?? TemperatureCelsius,
+            DewPointCelsius = current.DewPointCelsius ?? DewPointCelsius,
+            HumidityPercent = current.HumidityPercent ?? HumidityPercent,
+            PressureHectopascals = current.PressureHectopascals ?? PressureHectopascals,
+            CloudCoverPercent = current.CloudCoverPercent ?? CloudCoverPercent,
+            RainRateMillimetersPerHour = current.RainRateMillimetersPerHour
+                ?? RainRateMillimetersPerHour,
+            WindSpeedMetersPerSecond = current.WindSpeedMetersPerSecond
+                ?? WindSpeedMetersPerSecond,
+            WindGustMetersPerSecond = current.WindGustMetersPerSecond
+                ?? WindGustMetersPerSecond,
+            WindDirectionDegrees = current.WindDirectionDegrees ?? WindDirectionDegrees,
+            SkyTemperatureCelsius = current.SkyTemperatureCelsius ?? SkyTemperatureCelsius,
+            SkyBrightnessLux = current.SkyBrightnessLux ?? SkyBrightnessLux,
+            SkyQualityMagnitudesPerSquareArcsecond =
+                current.SkyQualityMagnitudesPerSquareArcsecond
+                ?? SkyQualityMagnitudesPerSquareArcsecond,
+            StarFwhmArcseconds = current.StarFwhmArcseconds ?? StarFwhmArcseconds,
+        };
+
+    internal DirectWeatherSnapshot MergeWindFrom(DirectWeatherSnapshot current) =>
+        this with
+        {
+            Connected = current.Connected,
+            WindSpeedMetersPerSecond = current.WindSpeedMetersPerSecond
+                ?? WindSpeedMetersPerSecond,
+            WindGustMetersPerSecond = current.WindGustMetersPerSecond
+                ?? WindGustMetersPerSecond,
+            WindDirectionDegrees = current.WindDirectionDegrees ?? WindDirectionDegrees,
+        };
+
+    private static double? Finite(double value) =>
+        double.IsFinite(value) ? value : null;
+
+    private static double? NonNegative(double value) =>
+        double.IsFinite(value) && value >= 0 ? value : null;
+
+    private static double? InRange(double value, double minimum, double maximum) =>
+        double.IsFinite(value) && value >= minimum && value <= maximum
+            ? value
+            : null;
 }
 
 internal sealed record DirectAutofocusCompletion(
