@@ -76,10 +76,14 @@ internal static class DirectProtocol
                     id,
                     Ok: true,
                     JsonSerializer.SerializeToElement(payload, JsonOptions),
-                    Error: null)),
+                    Error: null,
+                    ErrorCode: null)),
             JsonOptions);
 
-    internal static string SerializeFailure(Guid id, string error) =>
+    internal static string SerializeFailure(
+        Guid id,
+        string error,
+        string? errorCode = null) =>
         JsonSerializer.Serialize(
             new DirectWireMessage<QueryResultPayload>(
                 "query_result",
@@ -87,8 +91,12 @@ internal static class DirectProtocol
                     id,
                     Ok: false,
                     JsonSerializer.SerializeToElement<object?>(null, JsonOptions),
-                    string.IsNullOrWhiteSpace(error) ? "Direct query failed." : error)),
+                    string.IsNullOrWhiteSpace(error) ? "Direct query failed." : error,
+                    errorCode)),
             JsonOptions);
+
+    internal static string? FailureCode(Exception exception) =>
+        exception is DirectQueryFailureException failure ? failure.Code : null;
 
     internal static string SerializePair(string pairingToken, ClientHello hello) =>
         JsonSerializer.Serialize(
@@ -372,6 +380,19 @@ internal sealed record DirectRigCommand(
 
 internal sealed class DirectProtocolException(string message) : Exception(message);
 
+internal sealed class DirectQueryFailureException(
+    string code,
+    string message,
+    Exception? innerException = null) : Exception(message, innerException)
+{
+    internal string Code { get; } = code;
+
+    internal static DirectQueryFailureException ResourceNotReady(
+        string message,
+        Exception? innerException = null) =>
+        new("resource_not_ready", message, innerException);
+}
+
 internal sealed record DirectWireMessage<T>(
     [property: JsonPropertyName("type")] string Type,
     [property: JsonPropertyName("payload")] T Payload);
@@ -380,7 +401,8 @@ internal sealed record QueryResultPayload(
     [property: JsonPropertyName("id")] Guid Id,
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("payload")] JsonElement Payload,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("error_code")] string? ErrorCode);
 
 internal sealed record PairRequestPayload(
     [property: JsonPropertyName("pairing_token")] string PairingToken,

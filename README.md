@@ -87,7 +87,9 @@ The plugin provides bounded native histories and typed command handling for:
   flat-panel cover, light, and brightness changes, and connection state for
   weather and switch devices;
 - images, larger chat thumbnails, and image-save failures;
-- autofocus results and charts from the report matching the completed run;
+- autofocus results and charts from the report matching the completed run,
+  including every native N.I.N.A. focus and fitting mode plus Hocus Focus fit
+  quality, star-count, region, validation, and algorithm details when present;
 - guider state, dithers, history, and graphs;
 - native safety-monitor connection and safe/unsafe transitions, retained as
   current status while safety delivery remains enabled;
@@ -101,6 +103,18 @@ The plugin provides bounded native histories and typed command handling for:
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
+
+Hocus Focus 4.0.0.13's normal autofocus workflow publishes N.I.N.A.'s full
+start/completion lifecycle and is supported. Chatstronomy copies a reviewed set
+of result and algorithm fields; raw Hocus settings, paths, device IDs, images,
+and star lists stay inside N.I.N.A. Optional fields fall back naturally to the
+standard N.I.N.A. report. Hocus's Star Detection Optimizer feedback variants are
+not exported in its normal autofocus report. Its Aberration Inspector publishes
+only completion and exposes the complete six-region analysis only through an
+optional private save folder, so Chatstronomy keeps Inspector reports local
+rather than weakening the requirement that autofocus sharing stay enabled for
+the whole run. Full optimizer or Inspector feedback requires a future Hocus
+Focus event or adapter contract.
 
 Event families, images, and popup notifications can be controlled independently
 for each N.I.N.A. profile. Weather changes and high-wind alerts are separate and
