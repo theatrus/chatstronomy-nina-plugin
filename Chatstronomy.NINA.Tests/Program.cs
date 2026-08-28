@@ -16,6 +16,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 
 namespace Chatstronomy.NINA.Tests;
@@ -5944,31 +5945,42 @@ internal static class Program
         // optional inner region. The reflected view also contains conflicting
         // live settings, while the persisted report must remain authoritative.
         // This previously made the last continuation destructive.
-        var withoutMeasurement = JObject.Parse(complete.GetRawText());
-        ((JObject)withoutMeasurement["HocusFocusAlgorithm"]!)
+        // Keep Timestamp as a JSON string while producing partial views.
+        // Newtonsoft's default date coercion reserializes offsets in the host
+        // time zone and can make the synthetic command result fail correlation.
+        var withoutMeasurement = JsonNode.Parse(complete.GetRawText())!.AsObject();
+        withoutMeasurement["HocusFocusAlgorithm"]!.AsObject()
             .Remove("MeasurementAverage");
-        ((JObject)withoutMeasurement["Region"]!)
+        withoutMeasurement["Region"]!.AsObject()
             .Remove("InnerCropBoundary");
-        var firstPartial = JsonSerializer.Deserialize<JsonElement>(
-            withoutMeasurement.ToString(Newtonsoft.Json.Formatting.None),
+        var firstPartial = JsonSerializer.SerializeToElement(
+            withoutMeasurement,
             DirectProtocol.JsonOptions);
 
-        var withoutConfiguredModel = JObject.Parse(complete.GetRawText());
-        var reflectedAlgorithm = (JObject)withoutConfiguredModel["HocusFocusAlgorithm"]!;
+        var withoutConfiguredModel = JsonNode.Parse(complete.GetRawText())!.AsObject();
+        var reflectedAlgorithm = withoutConfiguredModel["HocusFocusAlgorithm"]!.AsObject();
         reflectedAlgorithm.Remove("ConfiguredHyperbolicModel");
         reflectedAlgorithm["HFRImprovementThreshold"] = 0.75;
-        ((JObject)((JObject)withoutConfiguredModel["Region"]!)["OuterBoundary"]!)["Width"] =
+        withoutConfiguredModel["Region"]!["OuterBoundary"]!["Width"] =
             0.75;
-        var secondPartial = JsonSerializer.Deserialize<JsonElement>(
-            withoutConfiguredModel.ToString(Newtonsoft.Json.Formatting.None),
+        var secondPartial = JsonSerializer.SerializeToElement(
+            withoutConfiguredModel,
             DirectProtocol.JsonOptions);
 
-        var timestamp = DateTimeOffset.Parse(
-            "2026-08-26T22:15:30.1250000-07:00").DateTime;
+        AssertEqual(
+            complete.GetProperty("Timestamp").GetString(),
+            firstPartial.GetProperty("Timestamp").GetString());
+        AssertEqual(
+            complete.GetProperty("Timestamp").GetString(),
+            secondPartial.GetProperty("Timestamp").GetString());
+
+        var calculated = complete.GetProperty("CalculatedFocusPoint");
+        var timestamp = complete.GetProperty("Timestamp").GetDateTimeOffset().DateTime;
         var completion = new DirectAutofocusCompletion(
-            "L",
-            Position: 24_980.376175368903,
-            Temperature: -0.92,
+            complete.GetProperty("Filter").GetString()
+                ?? throw new InvalidOperationException("The fixture filter is missing."),
+            Position: calculated.GetProperty("Position").GetDouble(),
+            Temperature: complete.GetProperty("Temperature").GetDouble(),
             timestamp,
             Guid.NewGuid(),
             ChatEnabled: true);
