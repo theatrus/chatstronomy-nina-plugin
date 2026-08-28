@@ -141,7 +141,8 @@ internal sealed class NinaDirectPipeServer : IDisposable
                     {
                         response = DirectProtocol.SerializeFailure(
                             query.Id,
-                            NinaDirectDataProvider.RedactCommandError(exception.Message));
+                            NinaDirectDataProvider.RedactCommandError(exception.Message),
+                            DirectProtocol.FailureCode(exception));
                     }
                 }
 

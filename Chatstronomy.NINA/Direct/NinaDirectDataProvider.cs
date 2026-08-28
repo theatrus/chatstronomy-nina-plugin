@@ -2,6 +2,7 @@ using Chatstronomy.NINA.Protocol;
 using Chatstronomy.NINA.Settings;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -1537,14 +1538,409 @@ internal sealed class NinaDirectDataProvider :
                 return false;
             }
 
+            JsonElement projected;
+            try
+            {
+                projected = DirectAutofocusReportProjection.Project(
+                    report,
+                    pendingAutofocusCompletion);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
             // Keep the completion provenance. In particular, a completion
             // captured with sharing off must remain unavailable after the
             // switch is turned on again.
-            lastAutofocusReport = report.Clone();
+            lastAutofocusReport = lastAutofocusReport is JsonElement current
+                && pendingAutofocusCompletion is not null
+                ? MergeProjectedAutofocusReports(current, projected)
+                : projected;
             pendingAutofocusGeneration = generation;
             return true;
         }
     }
+
+    private static JsonElement MergeProjectedAutofocusReports(
+        JsonElement current,
+        JsonElement incoming)
+    {
+        var currentScore = AutofocusReportRichness(current);
+        var incomingScore = AutofocusReportRichness(incoming);
+        var primary = incomingScore >= currentScore ? incoming : current;
+        var secondary = incomingScore >= currentScore ? current : incoming;
+        var merged = JsonNode.Parse(primary.GetRawText())?.AsObject()
+            ?? throw new JsonException("The projected autofocus report was not an object.");
+
+        foreach (var name in new[]
+        {
+            "FinalHFR",
+            "FinalHFRSource",
+            "InitialHFRMeasured",
+            "HyperbolicMinimumStdError",
+            "HyperbolicReducedChiSquared",
+            "HyperbolicLeaveOneOutStdError",
+            "AcceptedStarCountMin",
+            "AcceptedStarCountMax",
+            "HyperbolicFitModelChosen",
+            "Region",
+            "HocusFocusAlgorithm",
+        })
+        {
+            if (!merged.ContainsKey(name)
+                && secondary.TryGetProperty(name, out var value)
+                && value.ValueKind != JsonValueKind.Null)
+            {
+                merged[name] = JsonNode.Parse(value.GetRawText());
+            }
+        }
+
+        return JsonSerializer.SerializeToElement(merged, DirectProtocol.JsonOptions);
+    }
+
+    private static int AutofocusReportRichness(JsonElement report)
+    {
+        var score = report.TryGetProperty("MeasurePoints", out var points)
+            && points.ValueKind == JsonValueKind.Array
+                ? points.GetArrayLength()
+                : 0;
+        foreach (var name in new[]
+        {
+            "FinalHFR",
+            "FinalHFRSource",
+            "InitialHFRMeasured",
+            "HyperbolicMinimumStdError",
+            "HyperbolicReducedChiSquared",
+            "HyperbolicLeaveOneOutStdError",
+            "AcceptedStarCountMin",
+            "AcceptedStarCountMax",
+            "HyperbolicFitModelChosen",
+            "Region",
+            "HocusFocusAlgorithm",
+        })
+        {
+            if (report.TryGetProperty(name, out var value)
+                && value.ValueKind != JsonValueKind.Null)
+            {
+                score += 8;
+            }
+        }
+        return score;
+    }
+
+    internal static JsonElement SerializeObservedAutofocusReport(AutoFocusReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+
+        // Serialize only N.I.N.A.'s common report surface. A runtime-type
+        // serialization would also traverse Hocus Focus settings containing
+        // local paths and device details before the privacy projection runs.
+        var serialized = JsonSerializer.SerializeToElement<AutoFocusReport>(
+            report,
+            DirectProtocol.JsonOptions);
+        var root = JsonNode.Parse(serialized.GetRawText())?.AsObject()
+            ?? throw new JsonException("The observed autofocus report was not an object.");
+
+        // Hocus Focus returns AutoFocusReport polymorphically. Copy its small,
+        // reviewed result surface one property at a time without traversing
+        // the settings objects that also live on the derived report.
+        foreach (var name in new[]
+        {
+            "FinalHFR",
+            "HyperbolicMinimumStdError",
+            "HyperbolicReducedChiSquared",
+            "HyperbolicLeaveOneOutStdError",
+        })
+        {
+            CopyObservedDoubleProperty(report, root, name);
+        }
+        foreach (var name in new[] { "AcceptedStarCountMin", "AcceptedStarCountMax" })
+        {
+            CopyObservedIntegerProperty(report, root, name);
+        }
+        CopyObservedFitModel(report, root);
+        CopyObservedRegion(report, root);
+        CopyObservedHocusAlgorithm(report, root);
+
+        return JsonSerializer.SerializeToElement(root, DirectProtocol.JsonOptions);
+    }
+
+    private static object? ReadObservedProperty(object source, string name)
+    {
+        try
+        {
+            var property = source.GetType().GetProperty(
+                name,
+                System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.Public);
+            return property?.GetIndexParameters().Length == 0
+                ? property.GetValue(source)
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static void CopyObservedDoubleProperty(
+        AutoFocusReport report,
+        JsonObject root,
+        string name)
+    {
+        if (ReadObservedProperty(report, name) is double value)
+        {
+            root[name] = value;
+        }
+    }
+
+    private static void CopyObservedIntegerProperty(
+        AutoFocusReport report,
+        JsonObject root,
+        string name)
+    {
+        if (ReadObservedProperty(report, name) is int value)
+        {
+            root[name] = value;
+        }
+    }
+
+    private static void CopyObservedFitModel(AutoFocusReport report, JsonObject root)
+    {
+        var value = ReadObservedProperty(report, "HyperbolicFitModelChosen");
+        if (value is not null && value.GetType().IsEnum)
+        {
+            root["HyperbolicFitModelChosen"] = NormalizeObservedEnumName(
+                value.ToString() ?? string.Empty);
+        }
+        else if (value is string text && !string.IsNullOrWhiteSpace(text))
+        {
+            root["HyperbolicFitModelChosen"] = NormalizeObservedEnumName(text);
+        }
+    }
+
+    private static void CopyObservedRegion(AutoFocusReport report, JsonObject root)
+    {
+        var region = ReadObservedProperty(report, "Region");
+        var outer = region is null ? null : ReadObservedProperty(region, "OuterBoundary");
+        if (region is null || outer is null || ProjectObservedRatioRect(outer) is not JsonObject outerJson)
+        {
+            return;
+        }
+
+        var index = ReadObservedProperty(region, "Index") is int regionIndex
+            ? regionIndex
+            : 0;
+        var inner = ReadObservedProperty(region, "InnerCropBoundary");
+        root["Region"] = new JsonObject
+        {
+            ["Index"] = index,
+            ["OuterBoundary"] = outerJson,
+            ["InnerCropBoundary"] = inner is null
+                ? null
+                : ProjectObservedRatioRect(inner),
+        };
+    }
+
+    private static JsonObject? ProjectObservedRatioRect(object rectangle)
+    {
+        if (ReadObservedProperty(rectangle, "StartX") is not double startX
+            || ReadObservedProperty(rectangle, "StartY") is not double startY
+            || ReadObservedProperty(rectangle, "Width") is not double width
+            || ReadObservedProperty(rectangle, "Height") is not double height
+            || !double.IsFinite(startX)
+            || !double.IsFinite(startY)
+            || !double.IsFinite(width)
+            || !double.IsFinite(height))
+        {
+            return null;
+        }
+
+        return new JsonObject
+        {
+            ["StartX"] = startX,
+            ["StartY"] = startY,
+            ["Width"] = width,
+            ["Height"] = height,
+        };
+    }
+
+    private static void CopyObservedHocusAlgorithm(
+        AutoFocusReport report,
+        JsonObject root)
+    {
+        var autofocus = ReadObservedProperty(report, "HocusFocusAutoFocusOptions");
+        var focuser = ReadObservedProperty(report, "FocuserOptions");
+        var detection = ReadObservedProperty(report, "HocusFocusStarDetectionOptions");
+        if (autofocus is null && focuser is null && detection is null)
+        {
+            return;
+        }
+
+        var algorithm = new JsonObject();
+        if (autofocus is not null)
+        {
+            foreach (var name in new[]
+            {
+                "ValidateHfrImprovement",
+                "WeightedHyperbolicFitEnabled",
+            })
+            {
+                CopyObservedBooleanProperty(autofocus, algorithm, name);
+            }
+            foreach (var name in new[]
+            {
+                "HFRImprovementThreshold",
+                "ReducedChiSquaredRejectionThreshold",
+                "OutlierRejectionConfidence",
+            })
+            {
+                CopyObservedNestedDoubleProperty(autofocus, algorithm, name);
+            }
+            CopyObservedNestedIntegerProperty(
+                autofocus,
+                algorithm,
+                "MaxOutlierRejections");
+            CopyObservedEnumProperty(
+                autofocus,
+                algorithm,
+                "HyperbolicFitModel",
+                "ConfiguredHyperbolicModel");
+            CopyObservedEnumProperty(
+                autofocus,
+                algorithm,
+                "FitRejectionCriterion",
+                "FitRejectionCriterion");
+
+            if (ReadObservedProperty(autofocus, "ValidateHfrImprovement") is bool validate)
+            {
+                root["InitialHFRMeasured"] = validate;
+                root["FinalHFRSource"] = validate
+                    ? "measured_validation"
+                    : "fitted_estimate";
+            }
+        }
+
+        if (focuser is not null)
+        {
+            CopyObservedNestedDoubleProperty(
+                focuser,
+                algorithm,
+                "RSquaredThreshold");
+        }
+
+        if (detection is not null)
+        {
+            foreach (var name in new[]
+            {
+                "ModelPSF",
+                "UseOptimizedSettings",
+                "HasOptimizedSettings",
+            })
+            {
+                CopyObservedBooleanProperty(detection, algorithm, name);
+            }
+            CopyObservedEnumOrIntegerProperty(
+                detection,
+                algorithm,
+                "DetectionBinning");
+            CopyObservedEnumProperty(
+                detection,
+                algorithm,
+                "MeasurementAverage",
+                "MeasurementAverage");
+            var optimized = ReadObservedProperty(detection, "UseOptimizedSettings")
+                is true;
+            var hasOptimized = ReadObservedProperty(detection, "HasOptimizedSettings")
+                is true;
+            var advanced = ReadObservedProperty(detection, "UseAdvanced") is true;
+            algorithm["StarDetectionMode"] = advanced
+                ? "Advanced"
+                : optimized && hasOptimized ? "Optimized" : "Simple";
+        }
+
+        if (algorithm.Count > 0)
+        {
+            root["HocusFocusAlgorithm"] = algorithm;
+        }
+    }
+
+    private static void CopyObservedBooleanProperty(
+        object source,
+        JsonObject target,
+        string name)
+    {
+        if (ReadObservedProperty(source, name) is bool value)
+        {
+            target[name] = value;
+        }
+    }
+
+    private static void CopyObservedNestedDoubleProperty(
+        object source,
+        JsonObject target,
+        string name)
+    {
+        if (ReadObservedProperty(source, name) is double value && double.IsFinite(value))
+        {
+            target[name] = value;
+        }
+    }
+
+    private static void CopyObservedNestedIntegerProperty(
+        object source,
+        JsonObject target,
+        string name)
+    {
+        if (ReadObservedProperty(source, name) is int value)
+        {
+            target[name] = value;
+        }
+    }
+
+    private static void CopyObservedEnumOrIntegerProperty(
+        object source,
+        JsonObject target,
+        string name)
+    {
+        var value = ReadObservedProperty(source, name);
+        if (value is int integer)
+        {
+            target[name] = integer;
+        }
+        else if (value is not null && value.GetType().IsEnum)
+        {
+            target[name] = Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    private static void CopyObservedEnumProperty(
+        object source,
+        JsonObject target,
+        string sourceName,
+        string targetName)
+    {
+        var value = ReadObservedProperty(source, sourceName);
+        if (value is null || !value.GetType().IsEnum)
+        {
+            return;
+        }
+
+        target[targetName] = NormalizeObservedEnumName(value.ToString() ?? string.Empty);
+    }
+
+    private static string NormalizeObservedEnumName(string name) => name switch
+        {
+            "UnevenBlend" => "Uneven Blend",
+            "TiltedHyperbola" => "Tilted Hyperbola",
+            "SmoothBlend" => "Smooth Blend",
+            "Hybrid" => "Hybrid (Best Fit)",
+            "RSquared" => "R²",
+            "ReducedChiSquared" => "Reduced χ²",
+            "MeanOutliers" => "Mean + outlier detection",
+            _ => name,
+        };
 
     private void InvalidateAutofocusCapture()
     {
@@ -1631,9 +2027,16 @@ internal sealed class NinaDirectDataProvider :
                         {
                             var report = await ReadAutofocusReportAsync(candidate, cancellationToken)
                                 .ConfigureAwait(false);
-                            if (MatchesAutofocusCompletion(report, completion))
+                            var profileSuffix = $"--{profileId:D}.json";
+                            var isProfileScoped = Path.GetFileName(candidate).EndsWith(
+                                profileSuffix,
+                                StringComparison.OrdinalIgnoreCase);
+                            if (MatchesAutofocusCompletion(
+                                report,
+                                completion,
+                                requireStrongCorrelation: !isProfileScoped))
                             {
-                                return report;
+                                return DirectAutofocusReportProjection.Project(report, completion);
                             }
                         }
                         catch (Exception exception) when (
@@ -1659,7 +2062,7 @@ internal sealed class NinaDirectDataProvider :
             }
         }
 
-        throw new InvalidOperationException(
+        throw DirectQueryFailureException.ResourceNotReady(
             "The autofocus report matching the completed run is not available yet.",
             lastError);
     }
@@ -1671,20 +2074,58 @@ internal sealed class NinaDirectDataProvider :
         CancellationToken cancellationToken)
     {
         var profileSuffix = $"--{profileId:D}.json";
+        var timestamps = AutofocusFilenameTimestamps(completionTimestamp);
 
-        // N.I.N.A. names reports with its local completion timestamp. Probe
-        // the same bounded tolerance used for payload correlation first, so
-        // large historical report folders do not need to be scanned.
-        for (var offset = -5; offset <= 5; offset++)
+        // N.I.N.A. and Hocus Focus name reports from a separate wall-clock
+        // read after building the report. Probe their bounded filename skew,
+        // then require the payload timestamp to match the callback exactly.
+        // Prefer every report explicitly scoped to the active profile before trying
+        // the less authoritative profileless Hocus Focus format.
+        foreach (var timestamp in timestamps)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var name = $"{completionTimestamp.AddSeconds(offset):yyyy-MM-dd--HH-mm-ss}{profileSuffix}";
-            var path = Path.Combine(directory, name);
-            if (File.Exists(path))
+            var profilePath = Path.Combine(directory, $"{timestamp}{profileSuffix}");
+            if (File.Exists(profilePath))
             {
-                yield return path;
+                yield return profilePath;
             }
         }
+
+        // Older Hocus Focus releases publish the same base N.I.N.A. report
+        // without a profile suffix. Require the payload itself to strongly
+        // match this observed completion.
+        foreach (var timestamp in timestamps)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var profilelessPath = Path.Combine(directory, $"{timestamp}.json");
+            if (File.Exists(profilelessPath))
+            {
+                yield return profilelessPath;
+            }
+        }
+    }
+
+    private static IReadOnlyList<string> AutofocusFilenameTimestamps(
+        DateTime completionTimestamp)
+    {
+        var wallClocks = completionTimestamp.Kind == DateTimeKind.Utc
+            ? new[] { completionTimestamp.ToLocalTime(), completionTimestamp }
+            : new[] { completionTimestamp };
+        var offsets = new[] { 0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5 };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var timestamps = new List<string>();
+        foreach (var offset in offsets)
+        {
+            foreach (var wallClock in wallClocks)
+            {
+                var timestamp = $"{wallClock.AddSeconds(offset):yyyy-MM-dd--HH-mm-ss}";
+                if (seen.Add(timestamp))
+                {
+                    timestamps.Add(timestamp);
+                }
+            }
+        }
+        return timestamps;
     }
 
     private static async Task<JsonElement> ReadAutofocusReportAsync(
@@ -1707,35 +2148,98 @@ internal sealed class NinaDirectDataProvider :
 
     private static bool MatchesAutofocusCompletion(
         JsonElement report,
-        DirectAutofocusCompletion completion)
+        DirectAutofocusCompletion completion,
+        bool requireStrongCorrelation = false)
     {
-        if (!report.TryGetProperty("Timestamp", out var timestampValue)
-            || !timestampValue.TryGetDateTime(out var timestamp)
-            || (timestamp - completion.Timestamp).Duration() > TimeSpan.FromSeconds(5))
+        var payload = DirectAutofocusReportProjection.Unwrap(report);
+        if (!payload.TryGetProperty("Timestamp", out var timestampValue)
+            || !TryGetDateTimeOffset(timestampValue, out var timestamp)
+            || AutofocusTimestampDifference(timestamp, completion.Timestamp) != TimeSpan.Zero)
         {
             return false;
         }
 
-        if (!string.IsNullOrWhiteSpace(completion.Filter)
-            && report.TryGetProperty("Filter", out var filterValue)
-            && filterValue.ValueKind == JsonValueKind.String
-            && !string.IsNullOrWhiteSpace(filterValue.GetString())
-            && !completion.Filter.Equals(filterValue.GetString(), StringComparison.Ordinal))
+        var matchedIdentityField = false;
+        if (!string.IsNullOrWhiteSpace(completion.Filter))
         {
-            return false;
+            var hasFilter = payload.TryGetProperty("Filter", out var filterValue)
+                && filterValue.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(filterValue.GetString());
+            if (hasFilter)
+            {
+                if (!completion.Filter.Equals(
+                    filterValue.GetString(),
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                matchedIdentityField = true;
+            }
+            else
+            {
+                return false;
+            }
         }
 
-        if (double.IsFinite(completion.Position)
-            && report.TryGetProperty("CalculatedFocusPoint", out var calculated)
-            && calculated.TryGetProperty("Position", out var positionValue)
-            && positionValue.TryGetDouble(out var position)
-            && double.IsFinite(position)
-            && Math.Abs(position - completion.Position) > 1)
+        if (double.IsFinite(completion.Position))
         {
-            return false;
+            var position = double.NaN;
+            var hasPosition = payload.TryGetProperty(
+                    "CalculatedFocusPoint",
+                    out var calculated)
+                && calculated.ValueKind == JsonValueKind.Object
+                && calculated.TryGetProperty("Position", out var positionValue)
+                && positionValue.TryGetDouble(out position)
+                && double.IsFinite(position);
+            if (hasPosition)
+            {
+                if (Math.Abs(position - completion.Position) > 1)
+                {
+                    return false;
+                }
+                matchedIdentityField = true;
+            }
+            else
+            {
+                return false;
+            }
         }
 
-        return true;
+        return !requireStrongCorrelation || matchedIdentityField;
+    }
+
+    private static TimeSpan AutofocusTimestampDifference(
+        DateTimeOffset reportTimestamp,
+        DateTime completionTimestamp)
+    {
+        // N.I.N.A. callbacks commonly expose a local wall-clock DateTime with
+        // no Kind, while JSON reports include the local UTC offset. Compare
+        // the wall clock in that case so host timezone settings cannot turn a
+        // matching report into a false miss.
+        return completionTimestamp.Kind == DateTimeKind.Unspecified
+            ? (reportTimestamp.DateTime - completionTimestamp).Duration()
+            : (reportTimestamp - new DateTimeOffset(completionTimestamp)).Duration();
+    }
+
+    private static bool TryGetDateTimeOffset(
+        JsonElement value,
+        out DateTimeOffset timestamp)
+    {
+        if (value.TryGetDateTimeOffset(out timestamp))
+        {
+            return true;
+        }
+        if (value.TryGetDateTime(out var dateTime))
+        {
+            timestamp = dateTime.Kind == DateTimeKind.Unspecified
+                ? new DateTimeOffset(
+                    dateTime,
+                    TimeZoneInfo.Local.GetUtcOffset(dateTime))
+                : new DateTimeOffset(dateTime);
+            return true;
+        }
+        timestamp = default;
+        return false;
     }
 
     private Task<object?> ExecuteCommandAsync(
@@ -2177,9 +2681,7 @@ internal sealed class NinaDirectDataProvider :
                     }
 
                     var chatEnabledAtCompletion = eventDelivery.Current.Autofocus;
-                    var serialized = JsonSerializer.SerializeToElement(
-                        report,
-                        DirectProtocol.JsonOptions);
+                    var serialized = SerializeObservedAutofocusReport(report);
                     TryCacheObservedAutofocusReport(
                         serialized,
                         generation,

@@ -526,7 +526,10 @@ internal sealed class ChatstronomyHubClient
                         exception is not OperationCanceledException
                         || !cancellationToken.IsCancellationRequested)
                     {
-                        response = DirectProtocol.SerializeFailure(query.Id, SafeMessage(exception));
+                        response = DirectProtocol.SerializeFailure(
+                            query.Id,
+                            SafeMessage(exception),
+                            DirectProtocol.FailureCode(exception));
                     }
                 }
             }

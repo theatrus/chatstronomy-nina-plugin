@@ -111,6 +111,9 @@ internal static class Program
             "Synchronous local Direct failures never expose observatory filesystem paths",
             LocalDirectPipesRedactSynchronousFailures);
         await RunAsync(
+            "Local Direct pipes mark autofocus reports that are still being written",
+            LocalDirectPipesMarkResourcesNotReady);
+        await RunAsync(
             "Disabled events and images never cross the local Direct pipe",
             LocalDirectPipesDoNotTransmitDisabledEvents);
         await RunAsync(
@@ -119,6 +122,9 @@ internal static class Program
         await RunAsync(
             "Synchronous hosted Direct failures never expose observatory filesystem paths",
             HostedDirectConnectionsRedactSynchronousFailures);
+        await RunAsync(
+            "Hosted Direct connections mark autofocus reports that are still being written",
+            HostedDirectConnectionsMarkResourcesNotReady);
         await RunAsync(
             "Disabled events and images never cross the hosted Hub WebSocket",
             HostedConnectionsDoNotTransmitDisabledEvents);
@@ -264,6 +270,24 @@ internal static class Program
         await RunAsync(
             "Autofocus completion waits for the matching N.I.N.A. report",
             AutofocusCompletionWaitsForMatchingReport);
+        await RunAsync(
+            "Hocus Focus reports support fractional positions without leaking plugin settings",
+            HocusFocusReportsAreProjectedSafely);
+        Run(
+            "Hocus Focus star-detection feedback modes match the effective configuration",
+            HocusFocusStarDetectionModesAreProjectedAccurately);
+        await RunAsync(
+            "Derived Hocus Focus reports survive command and file cache ordering",
+            DerivedHocusFocusReportsSurviveCacheOrdering);
+        await RunAsync(
+            "Profile-scoped autofocus reports precede profileless fallbacks",
+            ProfileScopedAutofocusReportsPrecedeProfilelessFallbacks);
+        await RunAsync(
+            "Profileless autofocus reports require the exact completion timestamp",
+            ProfilelessAutofocusReportsRequireExactTimestamp);
+        await RunAsync(
+            "Profileless autofocus reports require completion identity fields",
+            ProfilelessAutofocusReportsRequireIdentityFields);
         await RunAsync(
             "Autofocus reports require in-session provenance and live consent",
             AutofocusReportsRequireProvenanceAndLiveConsent);
@@ -435,6 +459,19 @@ internal static class Program
             legacyHello.RootElement.GetProperty("payload").TryGetProperty(
                 "payload_version",
                 out _));
+
+        var notReadyFixture = Path.Combine(
+            fixtures,
+            "query-result-resource-not-ready.json");
+        if (File.Exists(notReadyFixture))
+        {
+            using var notReady = JsonDocument.Parse(File.ReadAllText(notReadyFixture));
+            var notReadyPayload = notReady.RootElement.GetProperty("payload");
+            AssertFalse(notReadyPayload.GetProperty("ok").GetBoolean());
+            AssertEqual(
+                "resource_not_ready",
+                notReadyPayload.GetProperty("error_code").GetString());
+        }
     }
 
     private static void MatrixAcceptsHttpsHomeserver()
@@ -1380,6 +1417,34 @@ internal static class Program
         AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
     }
 
+    private static async Task HostedDirectConnectionsMarkResourcesNotReady()
+    {
+        var hello = HostedHello();
+        using var provider = new FakeDirectDataProvider(
+            executeFailure: DirectQueryFailureException.ResourceNotReady(
+                "The autofocus report is still being written."));
+        var sockets = new ScriptedHubSocketFactory(
+            AgentHelloJson(hello),
+            QueryJson(Guid.NewGuid(), "last_autofocus", expiresAt: 4_102_444_800));
+        var client = new ChatstronomyHubClient(provider, sockets);
+
+        await AssertThrowsAsync<HubDisconnectedException>(() =>
+            client.RunSingleConnectionAsync(
+                HostedConfiguration(hello),
+                hello,
+                CancellationToken.None));
+
+        var resultJson = sockets.Socket.SentMessages.Single(message =>
+        {
+            using var candidate = JsonDocument.Parse(message);
+            return candidate.RootElement.GetProperty("type").GetString() == "query_result";
+        });
+        using var response = JsonDocument.Parse(resultJson);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        AssertEqual("resource_not_ready", payload.GetProperty("error_code").GetString());
+    }
+
     private static async Task LocalDirectPipesRejectExpiredCommands()
     {
         var access = new DirectAccessPolicy(new DirectAccessOptions(
@@ -1515,6 +1580,36 @@ internal static class Program
         var error = payload.GetProperty("error").GetString()!;
         AssertTrue(error.Contains("[local path redacted]", StringComparison.Ordinal));
         AssertFalse(error.Contains("astronomer", StringComparison.Ordinal));
+    }
+
+    private static async Task LocalDirectPipesMarkResourcesNotReady()
+    {
+        using var provider = new FakeDirectDataProvider(
+            executeFailure: DirectQueryFailureException.ResourceNotReady(
+                "The autofocus report is still being written."));
+        var pipeName = NinaDirectPipeServer.CreatePipeName();
+        using var server = new NinaDirectPipeServer(provider, pipeName);
+        using var client = new System.IO.Pipes.NamedPipeClientStream(
+            ".",
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await client.ConnectAsync(timeout.Token);
+        using var reader = new StreamReader(client, leaveOpen: true);
+        using var writer = new StreamWriter(client, leaveOpen: true) { AutoFlush = true };
+        await writer.WriteLineAsync(QueryJson(
+            Guid.NewGuid(),
+            "last_autofocus",
+            expiresAt: 4_102_444_800));
+
+        var line = await reader.ReadLineAsync(timeout.Token)
+            ?? throw new InvalidOperationException("Failed Direct query returned no response.");
+        using var response = JsonDocument.Parse(line);
+        var payload = response.RootElement.GetProperty("payload");
+        AssertFalse(payload.GetProperty("ok").GetBoolean());
+        AssertEqual("resource_not_ready", payload.GetProperty("error_code").GetString());
     }
 
     private static async Task LocalDirectPipesDoNotTransmitDisabledEvents()
@@ -2354,12 +2449,13 @@ internal static class Program
         DirectAccessPolicy access,
         DirectEventDeliveryOptions? delivery = null,
         DirectEventDeliveryPolicy? deliveryPolicy = null,
+        global::NINA.Profile.Interfaces.IProfileService? profileService = null,
         ITelescopeMediator? telescope = null,
         ISafetyMonitorMediator? safetyMonitor = null,
         string? autofocusReportDirectory = null,
         Func<System.Windows.Media.Imaging.BitmapSource, byte[]>? thumbnailEncoder = null,
         Func<DateTimeOffset>? utcNow = null) => new(
-            profileService: null!,
+            profileService: profileService!,
             telescope: telescope!,
             camera: null!,
             filterWheel: null!,
@@ -5318,12 +5414,12 @@ internal static class Program
             await Task.Delay(150);
             var matchingPath = Path.Combine(
                 reportDirectory,
-                $"2026-08-25--04-15-00--{profileId:D}.json");
+                $"2026-08-25--04-15-01--{profileId:D}.json");
             await File.WriteAllTextAsync(
                 matchingPath,
                 JsonSerializer.Serialize(new
                 {
-                    Timestamp = timestamp.AddSeconds(1),
+                    Timestamp = timestamp,
                     Filter = "L",
                     Temperature = -8.5,
                     CalculatedFocusPoint = new { Position = 4_068 },
@@ -5340,6 +5436,584 @@ internal static class Program
                 .GetProperty("Position")
                 .GetDouble());
             AssertEqual(2, report.GetProperty("MeasurePoints").GetArrayLength());
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task HocusFocusReportsAreProjectedSafely()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-hocus-focus-report-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var timestamp = DateTimeOffset.Parse(
+                "2026-08-26T22:15:30.1250000-07:00").DateTime;
+            var completion = new DirectAutofocusCompletion(
+                "L",
+                Position: 24_980.376175368903,
+                Temperature: -0.92,
+                timestamp,
+                Guid.NewGuid(),
+                ChatEnabled: true);
+            var fixturePath = Path.Combine(
+                AppContext.BaseDirectory,
+                "Fixtures",
+                "hocus_focus_v4_report.json");
+            var profilelessPath = Path.Combine(
+                reportDirectory,
+                $"{timestamp:yyyy-MM-dd--HH-mm-ss}.json");
+            File.Copy(fixturePath, profilelessPath);
+
+            var report = await NinaDirectDataProvider.ReadCompletedAutofocusReportAsync(
+                reportDirectory,
+                completion,
+                CancellationToken.None);
+
+            AssertTrue(Math.Abs(
+                report.GetProperty("CalculatedFocusPoint").GetProperty("Position").GetDouble()
+                    - 24_980.376175368903) < 1e-9);
+            AssertEqual("Hocus Focus", report.GetProperty("AutoFocuserName").GetString());
+            AssertEqual(
+                "2026-08-26T22:15:30.1250000-07:00",
+                report.GetProperty("Timestamp").GetString());
+            AssertEqual(1.9076325878204998, report.GetProperty("FinalHFR").GetDouble());
+            AssertEqual(
+                0.700941335504908,
+                report.GetProperty("HyperbolicMinimumStdError").GetDouble());
+            AssertEqual(
+                0.00017285645568865563,
+                report.GetProperty("HyperbolicReducedChiSquared").GetDouble());
+            AssertEqual(
+                0.5661868927592,
+                report.GetProperty("HyperbolicLeaveOneOutStdError").GetDouble());
+            AssertEqual(83, report.GetProperty("AcceptedStarCountMin").GetInt32());
+            AssertEqual(119, report.GetProperty("AcceptedStarCountMax").GetInt32());
+            AssertEqual(
+                "Symmetric",
+                report.GetProperty("HyperbolicFitModelChosen").GetString());
+            var region = report.GetProperty("Region");
+            AssertEqual(2, region.GetProperty("Index").GetInt32());
+            AssertEqual(
+                0.5,
+                region.GetProperty("OuterBoundary").GetProperty("Width").GetDouble());
+            AssertEqual(
+                0.3,
+                region.GetProperty("InnerCropBoundary").GetProperty("Width").GetDouble());
+            AssertTrue(report.GetProperty("InitialHFRMeasured").GetBoolean());
+            AssertEqual(
+                "measured_validation",
+                report.GetProperty("FinalHFRSource").GetString());
+            var algorithm = report.GetProperty("HocusFocusAlgorithm");
+            AssertEqual(
+                "Hybrid (Best Fit)",
+                algorithm.GetProperty("ConfiguredHyperbolicModel").GetString());
+            AssertEqual(
+                "Reduced χ²",
+                algorithm.GetProperty("FitRejectionCriterion").GetString());
+            AssertEqual(
+                "Mean + outlier detection",
+                algorithm.GetProperty("MeasurementAverage").GetString());
+            AssertEqual(
+                "Optimized",
+                algorithm.GetProperty("StarDetectionMode").GetString());
+            AssertEqual(2, algorithm.GetProperty("DetectionBinning").GetInt32());
+            AssertEqual(5, report.GetProperty("MeasurePoints").GetArrayLength());
+            AssertFalse(report.TryGetProperty("HocusFocusStarDetectionOptions", out _));
+            AssertFalse(report.TryGetProperty("HocusFocusAutoFocusOptions", out _));
+            AssertFalse(report.TryGetProperty("FocuserOptions", out _));
+
+            var serialized = report.GetRawText();
+            AssertFalse(serialized.Contains("observer", StringComparison.OrdinalIgnoreCase));
+            AssertFalse(serialized.Contains("Observatory", StringComparison.OrdinalIgnoreCase));
+            AssertFalse(serialized.Contains("private-focuser", StringComparison.OrdinalIgnoreCase));
+
+            using var unavailableValues = JsonDocument.Parse(
+                """
+                {
+                  "Timestamp": "2026-08-26T22:15:30.1250000-07:00",
+                  "Temperature": "NaN",
+                  "CalculatedFocusPoint": {
+                    "Position": 24980.376175368903,
+                    "Value": 1.9,
+                    "Error": "NaN"
+                  }
+                }
+                """);
+            var unavailableProjection = DirectAutofocusReportProjection.Project(
+                unavailableValues.RootElement);
+            AssertEqual("NaN", unavailableProjection.GetProperty("Temperature").GetString());
+            AssertEqual(
+                "NaN",
+                unavailableProjection.GetProperty("CalculatedFocusPoint")
+                    .GetProperty("Error")
+                    .GetString());
+
+            // Hocus Focus 4.0.0.13 writes a profile-scoped report and publishes
+            // the normal N.I.N.A. start/completion lifecycle. Prove that exact
+            // route is chat-visible and queryable end to end.
+            var profileScopedPath = Path.Combine(
+                reportDirectory,
+                $"{timestamp:yyyy-MM-dd--HH-mm-ss}--{completion.ProfileId!.Value:D}.json");
+            File.Copy(fixturePath, profileScopedPath);
+            var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+            var activeProfile = DispatchProxy.Create<
+                global::NINA.Profile.Interfaces.IProfile,
+                ActiveProfileProxy>();
+            ((ActiveProfileProxy)(object)activeProfile).Id = completion.ProfileId!.Value;
+            var profileService = DispatchProxy.Create<
+                global::NINA.Profile.Interfaces.IProfileService,
+                ActiveProfileServiceProxy>();
+            ((ActiveProfileServiceProxy)(object)profileService).ActiveProfile = activeProfile;
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                profileService: profileService,
+                autofocusReportDirectory: reportDirectory);
+            using var captureStop = new CancellationTokenSource();
+            SetProviderStarted(provider, true);
+            (typeof(NinaDirectDataProvider).GetField(
+                "eventCaptureStop",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException(
+                    "Provider capture cancellation was not found."))
+            .SetValue(provider, captureStop);
+            try
+            {
+                provider.AutoFocusRunStarting();
+                provider.UpdateEndAutoFocusRun(new AutoFocusInfo(
+                    completion.Temperature,
+                    completion.Position,
+                    completion.Filter,
+                    completion.Timestamp));
+
+                JsonElement[] events = [];
+                for (var attempt = 0; attempt < 50; attempt++)
+                {
+                    events = await SnapshotEvents(provider);
+                    if (events.Any(item =>
+                        item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED"))
+                    {
+                        break;
+                    }
+                    await Task.Delay(10);
+                }
+                var finished = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED");
+                AssertTrue(finished.GetProperty("ChatEnabled").GetBoolean());
+
+                var lifecycleResponse = (DirectApiEnvelope<JsonElement>)(
+                    await provider.ExecuteAsync(
+                        new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+                        CancellationToken.None))!;
+                AssertEqual(
+                    1.9076325878204998,
+                    lifecycleResponse.Response.GetProperty("FinalHFR").GetDouble());
+            }
+            finally
+            {
+                (typeof(NinaDirectDataProvider).GetField(
+                    "eventCaptureStop",
+                    BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?? throw new InvalidOperationException(
+                        "Provider capture cancellation was not found."))
+                .SetValue(provider, null);
+                SetProviderStarted(provider, false);
+            }
+
+            using var malformedPosition = JsonDocument.Parse(
+                """
+                {
+                  "Timestamp": "2026-08-26T22:15:30.1250000-07:00",
+                  "CalculatedFocusPoint": { "Position": "NaN" }
+                }
+                """);
+            AssertThrows<JsonException>(() => DirectAutofocusReportProjection.Project(
+                malformedPosition.RootElement));
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static void HocusFocusStarDetectionModesAreProjectedAccurately()
+    {
+        var fixturePath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "hocus_focus_v4_report.json");
+        var fixture = JObject.Parse(File.ReadAllText(fixturePath));
+        var cases = new (bool Advanced, bool UseOptimized, bool? HasOptimized, string Mode)[]
+        {
+            (true, true, true, "Advanced"),
+            (false, true, true, "Optimized"),
+            (false, true, false, "Simple"),
+            (false, true, null, "Simple"),
+            (false, false, true, "Simple"),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var report = (JObject)fixture.DeepClone();
+            var detection = (JObject)report["HocusFocusStarDetectionOptions"]!;
+            detection["UseAdvanced"] = testCase.Advanced;
+            detection["UseOptimizedSettings"] = testCase.UseOptimized;
+            if (testCase.HasOptimized is bool hasOptimized)
+            {
+                detection["HasOptimizedSettings"] = hasOptimized;
+            }
+            else
+            {
+                detection.Remove("HasOptimizedSettings");
+            }
+
+            using var document = JsonDocument.Parse(
+                report.ToString(Newtonsoft.Json.Formatting.None));
+            var projected = DirectAutofocusReportProjection.Project(document.RootElement);
+            var algorithm = projected.GetProperty("HocusFocusAlgorithm");
+            AssertEqual(
+                testCase.Mode,
+                algorithm.GetProperty("StarDetectionMode").GetString());
+            if (testCase.HasOptimized is bool expected)
+            {
+                AssertEqual(
+                    expected,
+                    algorithm.GetProperty("HasOptimizedSettings").GetBoolean());
+            }
+            else
+            {
+                AssertFalse(algorithm.TryGetProperty("HasOptimizedSettings", out _));
+            }
+
+            if (testCase.HasOptimized is bool reflectedHasOptimized)
+            {
+                var observed = new HocusAutoFocusReportStub
+                {
+                    Timestamp = new DateTime(2026, 8, 27, 5, 45, 0, DateTimeKind.Utc),
+                    CalculatedFocusPoint =
+                        new global::NINA.WPF.Base.Utility.AutoFocus.FocusPoint
+                        {
+                            Position = 4_188.5,
+                            Value = 2.2,
+                            Error = 0.0,
+                        },
+                    HocusFocusStarDetectionOptions = new HocusStarDetectionOptionsStub
+                    {
+                        UseAdvanced = testCase.Advanced,
+                        UseOptimizedSettings = testCase.UseOptimized,
+                        HasOptimizedSettings = reflectedHasOptimized,
+                    },
+                };
+                var observedAlgorithm = NinaDirectDataProvider
+                    .SerializeObservedAutofocusReport(observed)
+                    .GetProperty("HocusFocusAlgorithm");
+                AssertEqual(
+                    testCase.Mode,
+                    observedAlgorithm.GetProperty("StarDetectionMode").GetString());
+                AssertEqual(
+                    reflectedHasOptimized,
+                    observedAlgorithm.GetProperty("HasOptimizedSettings").GetBoolean());
+            }
+        }
+    }
+
+    private static async Task DerivedHocusFocusReportsSurviveCacheOrdering()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        var timestamp = new DateTime(2026, 8, 27, 5, 45, 0, DateTimeKind.Utc);
+        var completion = new DirectAutofocusCompletion(
+            "L",
+            Position: 24_980.376175368903,
+            Temperature: -0.92,
+            timestamp,
+            Guid.NewGuid(),
+            ChatEnabled: true);
+        SetPendingAutofocusCompletion(provider, completion);
+        var generation = GetAutofocusCaptureGeneration(provider);
+
+        using var fileReportDocument = JsonDocument.Parse(
+            """
+            {
+              "Timestamp": "2026-08-27T05:45:00Z",
+              "Filter": "L",
+              "Temperature": -0.92,
+              "CalculatedFocusPoint": {
+                "Position": 24980.376175368903,
+                "Value": 1.95,
+                "Error": 0.03
+              },
+              "FinalHFR": 1.9076325878204998
+            }
+            """);
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            fileReportDocument.RootElement,
+            generation,
+            chatEnabledAtCompletion: true));
+
+        global::NINA.WPF.Base.Utility.AutoFocus.AutoFocusReport commandResult =
+            new HocusAutoFocusReportStub
+            {
+                Timestamp = timestamp,
+                Filter = "L",
+                Temperature = -0.92,
+                CalculatedFocusPoint = new global::NINA.WPF.Base.Utility.AutoFocus.FocusPoint
+                {
+                    Position = 24_980.376175368903,
+                    Value = 1.95,
+                    Error = 0.03,
+                },
+                FinalHFR = 1.9076325878204998,
+                HyperbolicMinimumStdError = 0.70,
+                HyperbolicReducedChiSquared = 0.0017,
+                HyperbolicLeaveOneOutStdError = 0.57,
+                AcceptedStarCountMin = 83,
+                AcceptedStarCountMax = 119,
+                HyperbolicFitModelChosen = HocusFitModelStub.TiltedHyperbola,
+                Region = new HocusRegionStub
+                {
+                    Index = 3,
+                    OuterBoundary = new HocusRatioRectStub(0.5, 0.0, 0.5, 0.5),
+                    InnerCropBoundary = null,
+                },
+                HocusFocusAutoFocusOptions = new HocusAutoFocusOptionsStub
+                {
+                    ValidateHfrImprovement = false,
+                    HFRImprovementThreshold = 0.2,
+                    WeightedHyperbolicFitEnabled = true,
+                    HyperbolicFitModel = HocusFitModelStub.Hybrid,
+                    FitRejectionCriterion = HocusFitCriterionStub.ReducedChiSquared,
+                    ReducedChiSquaredRejectionThreshold = 5.0,
+                    MaxOutlierRejections = 1,
+                    OutlierRejectionConfidence = 0.99,
+                    SavePath = @"D:\Observatory\private",
+                },
+                HocusFocusStarDetectionOptions = new HocusStarDetectionOptionsStub
+                {
+                    UseAdvanced = false,
+                    UseOptimizedSettings = true,
+                    HasOptimizedSettings = true,
+                    ModelPSF = true,
+                    DetectionBinning = HocusDetectionBinningStub.Bin2,
+                    MeasurementAverage = HocusMeasurementAverageStub.MeanOutliers,
+                    IntermediateSavePath = @"C:\Users\observer\private",
+                },
+                FocuserOptions = new HocusFocuserOptionsStub
+                {
+                    RSquaredThreshold = 0.9,
+                    Id = "ASCOM.private-focuser",
+                },
+                ReportPath = @"C:\Users\observer\private\HocusFocus.json",
+            };
+        var serializedCommandResult = NinaDirectDataProvider.SerializeObservedAutofocusReport(
+            commandResult);
+        AssertEqual(
+            1.9076325878204998,
+            serializedCommandResult.GetProperty("FinalHFR").GetDouble());
+        AssertEqual(
+            "Tilted Hyperbola",
+            serializedCommandResult.GetProperty("HyperbolicFitModelChosen").GetString());
+        AssertEqual(
+            83,
+            serializedCommandResult.GetProperty("AcceptedStarCountMin").GetInt32());
+        AssertEqual(
+            3,
+            serializedCommandResult.GetProperty("Region").GetProperty("Index").GetInt32());
+        AssertFalse(serializedCommandResult.GetProperty("InitialHFRMeasured").GetBoolean());
+        AssertEqual(
+            "fitted_estimate",
+            serializedCommandResult.GetProperty("FinalHFRSource").GetString());
+        var commandAlgorithm = serializedCommandResult.GetProperty("HocusFocusAlgorithm");
+        AssertEqual(
+            "Hybrid (Best Fit)",
+            commandAlgorithm.GetProperty("ConfiguredHyperbolicModel").GetString());
+        AssertEqual(
+            "Reduced χ²",
+            commandAlgorithm.GetProperty("FitRejectionCriterion").GetString());
+        AssertEqual(
+            "Optimized",
+            commandAlgorithm.GetProperty("StarDetectionMode").GetString());
+        AssertFalse(serializedCommandResult.TryGetProperty("ReportPath", out _));
+        AssertFalse(serializedCommandResult.GetRawText().Contains(
+            "observer",
+            StringComparison.OrdinalIgnoreCase));
+
+        // The command continuation can run after the file watcher. It must
+        // retain derived Hocus data instead of replacing the complete cached
+        // report with a base AutoFocusReport projection.
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            serializedCommandResult,
+            generation,
+            chatEnabledAtCompletion: true));
+        var response = (DirectApiEnvelope<JsonElement>)(await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+            CancellationToken.None))!;
+        AssertEqual(1.9076325878204998, response.Response.GetProperty("FinalHFR").GetDouble());
+        AssertFalse(response.Response.TryGetProperty("ReportPath", out _));
+        AssertFalse(response.Response.GetRawText().Contains(
+            "observer",
+            StringComparison.OrdinalIgnoreCase));
+
+        var baseOnlyCommandResult =
+            new global::NINA.WPF.Base.Utility.AutoFocus.AutoFocusReport
+            {
+                Timestamp = timestamp,
+                Filter = "L",
+                Temperature = -0.92,
+                CalculatedFocusPoint = new global::NINA.WPF.Base.Utility.AutoFocus.FocusPoint
+                {
+                    Position = 24_980.376175368903,
+                    Value = 1.95,
+                    Error = 0.03,
+                },
+            };
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            NinaDirectDataProvider.SerializeObservedAutofocusReport(baseOnlyCommandResult),
+            generation,
+            chatEnabledAtCompletion: true));
+        var afterBaseOnlyResult = (DirectApiEnvelope<JsonElement>)(await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+            CancellationToken.None))!;
+        AssertEqual(
+            1.9076325878204998,
+            afterBaseOnlyResult.Response.GetProperty("FinalHFR").GetDouble());
+        AssertEqual(
+            "Hybrid (Best Fit)",
+            afterBaseOnlyResult.Response.GetProperty("HocusFocusAlgorithm")
+                .GetProperty("ConfiguredHyperbolicModel")
+                .GetString());
+    }
+
+    private static async Task ProfileScopedAutofocusReportsPrecedeProfilelessFallbacks()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-precedence-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var timestamp = new DateTime(2026, 8, 27, 3, 45, 0, DateTimeKind.Utc);
+            var profileId = Guid.NewGuid();
+            var completion = new DirectAutofocusCompletion(
+                "L",
+                Position: 4_068,
+                Temperature: -5.0,
+                timestamp,
+                profileId,
+                ChatEnabled: true);
+            await File.WriteAllTextAsync(
+                Path.Combine(reportDirectory, "2026-08-27--03-45-00.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    Filter = "L",
+                    AutoFocuserName = "Profileless fallback",
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                }));
+            await File.WriteAllTextAsync(
+                Path.Combine(
+                    reportDirectory,
+                    $"{timestamp.ToLocalTime().AddSeconds(1):yyyy-MM-dd--HH-mm-ss}--{profileId:D}.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    Filter = "L",
+                    AutoFocuserName = "Active profile",
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                }));
+
+            var report = await NinaDirectDataProvider.ReadCompletedAutofocusReportAsync(
+                reportDirectory,
+                completion,
+                CancellationToken.None);
+
+            AssertEqual("Active profile", report.GetProperty("AutoFocuserName").GetString());
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task ProfilelessAutofocusReportsRequireExactTimestamp()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-correlation-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var timestamp = new DateTime(2026, 8, 27, 4, 0, 0, DateTimeKind.Utc);
+            var completion = new DirectAutofocusCompletion(
+                "L",
+                Position: 4_068,
+                Temperature: -5.0,
+                timestamp,
+                Guid.NewGuid(),
+                ChatEnabled: true);
+            await File.WriteAllTextAsync(
+                Path.Combine(reportDirectory, "2026-08-27--04-00-00.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp.AddSeconds(1),
+                    Filter = "L",
+                    AutoFocuserName = "Wrong-timestamp profileless report",
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+            await AssertThrowsAsync<OperationCanceledException>(() =>
+                NinaDirectDataProvider.ReadCompletedAutofocusReportAsync(
+                    reportDirectory,
+                    completion,
+                    timeout.Token));
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static async Task ProfilelessAutofocusReportsRequireIdentityFields()
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-autofocus-identity-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            var timestamp = new DateTime(2026, 8, 27, 4, 15, 0, DateTimeKind.Utc);
+            var completion = new DirectAutofocusCompletion(
+                "L",
+                Position: 4_068,
+                Temperature: -5.0,
+                timestamp,
+                Guid.NewGuid(),
+                ChatEnabled: true);
+            await File.WriteAllTextAsync(
+                Path.Combine(reportDirectory, "2026-08-27--04-15-00.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = timestamp,
+                    AutoFocuserName = "Unidentified profileless report",
+                    CalculatedFocusPoint = new { Position = 4_068 },
+                }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+            await AssertThrowsAsync<OperationCanceledException>(() =>
+                NinaDirectDataProvider.ReadCompletedAutofocusReportAsync(
+                    reportDirectory,
+                    completion,
+                    timeout.Token));
         }
         finally
         {
@@ -5496,6 +6170,22 @@ internal static class Program
         .SetValue(provider, captureStop);
         try
         {
+            // A third-party engine that publishes only a completion gives us
+            // no proof that autofocus sharing stayed enabled for the whole
+            // run. Keep that result local rather than inferring consent.
+            provider.UpdateEndAutoFocusRun(new AutoFocusInfo(
+                temperature: -8.0,
+                position: 4_225,
+                filter: "L",
+                timestamp: DateTime.UtcNow));
+            AssertFalse((await SnapshotEvents(provider)).Any(item =>
+                item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED"));
+            var completion = GetPrivateField<DirectAutofocusCompletion>(
+                provider,
+                "pendingAutofocusCompletion");
+            AssertFalse(completion.ChatEnabled);
+            provider.Reset();
+
             provider.AutoFocusRunStarting();
             ApplyEventDeliveryChange(
                 provider,
@@ -5514,7 +6204,7 @@ internal static class Program
             var withheld = await SnapshotEvents(provider);
             AssertFalse(withheld.Any(item =>
                 item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED"));
-            var completion = GetPrivateField<DirectAutofocusCompletion>(
+            completion = GetPrivateField<DirectAutofocusCompletion>(
                 provider,
                 "pendingAutofocusCompletion");
             AssertFalse(completion.ChatEnabled);
@@ -5720,6 +6410,121 @@ internal static class Program
         AssertEqual(3L, retained[^1].Id);
     }
 
+    private sealed class HocusAutoFocusReportStub
+        : global::NINA.WPF.Base.Utility.AutoFocus.AutoFocusReport
+    {
+        public double FinalHFR { get; init; }
+
+        public double HyperbolicMinimumStdError { get; init; }
+
+        public double HyperbolicReducedChiSquared { get; init; }
+
+        public double HyperbolicLeaveOneOutStdError { get; init; }
+
+        public int AcceptedStarCountMin { get; init; }
+
+        public int AcceptedStarCountMax { get; init; }
+
+        public HocusFitModelStub? HyperbolicFitModelChosen { get; init; }
+
+        public HocusRegionStub? Region { get; init; }
+
+        public HocusAutoFocusOptionsStub? HocusFocusAutoFocusOptions { get; init; }
+
+        public HocusStarDetectionOptionsStub? HocusFocusStarDetectionOptions { get; init; }
+
+        public HocusFocuserOptionsStub? FocuserOptions { get; init; }
+
+        public string ReportPath { get; init; } = string.Empty;
+    }
+
+    private enum HocusFitModelStub
+    {
+        Symmetric,
+        UnevenBlend,
+        TiltedHyperbola,
+        SmoothBlend,
+        Hybrid,
+    }
+
+    private enum HocusFitCriterionStub
+    {
+        RSquared,
+        ReducedChiSquared,
+    }
+
+    private enum HocusDetectionBinningStub
+    {
+        Bin1 = 1,
+        Bin2 = 2,
+    }
+
+    private enum HocusMeasurementAverageStub
+    {
+        Median,
+        MeanOutliers,
+    }
+
+    private sealed class HocusAutoFocusOptionsStub
+    {
+        public bool ValidateHfrImprovement { get; init; }
+
+        public double HFRImprovementThreshold { get; init; }
+
+        public bool WeightedHyperbolicFitEnabled { get; init; }
+
+        public HocusFitModelStub HyperbolicFitModel { get; init; }
+
+        public HocusFitCriterionStub FitRejectionCriterion { get; init; }
+
+        public double ReducedChiSquaredRejectionThreshold { get; init; }
+
+        public int MaxOutlierRejections { get; init; }
+
+        public double OutlierRejectionConfidence { get; init; }
+
+        public string SavePath { get; init; } = string.Empty;
+    }
+
+    private sealed class HocusStarDetectionOptionsStub
+    {
+        public bool UseAdvanced { get; init; }
+
+        public bool UseOptimizedSettings { get; init; }
+
+        public bool HasOptimizedSettings { get; init; }
+
+        public bool ModelPSF { get; init; }
+
+        public HocusDetectionBinningStub DetectionBinning { get; init; }
+
+        public HocusMeasurementAverageStub MeasurementAverage { get; init; }
+
+        public string IntermediateSavePath { get; init; } = string.Empty;
+    }
+
+    private sealed class HocusFocuserOptionsStub
+    {
+        public double RSquaredThreshold { get; init; }
+
+        public string Id { get; init; } = string.Empty;
+    }
+
+    private sealed class HocusRegionStub
+    {
+        public int Index { get; init; }
+
+        public HocusRatioRectStub OuterBoundary { get; init; } = null!;
+
+        public HocusRatioRectStub? InnerCropBoundary { get; init; }
+    }
+
+    private sealed record HocusRatioRectStub(
+        double StartX,
+        double StartY,
+        double Width,
+        double Height);
+
     private sealed class TestGuideStep(double ra, double dec) : global::NINA.Core.Interfaces.IGuideStep
     {
         public double Frame => 0;
@@ -5788,6 +6593,17 @@ internal static class Program
         AssertTrue(envelope.GetProperty("Success").GetBoolean());
         AssertEqual("API", envelope.GetProperty("Type").GetString());
         AssertEqual(0, envelope.GetProperty("Response").GetArrayLength());
+
+        var failure = DirectProtocol.SerializeFailure(
+            id,
+            "The autofocus report is not available yet.",
+            "resource_not_ready");
+        using var failureDocument = JsonDocument.Parse(failure);
+        var failurePayload = failureDocument.RootElement.GetProperty("payload");
+        AssertFalse(failurePayload.GetProperty("ok").GetBoolean());
+        AssertEqual(
+            "resource_not_ready",
+            failurePayload.GetProperty("error_code").GetString());
     }
 
     private static void DirectHistoriesAreBounded()
@@ -7145,6 +7961,38 @@ internal static class Program
         }
     }
 
+    private class ActiveProfileProxy : DispatchProxy
+    {
+        internal Guid Id { get; set; }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? arguments)
+        {
+            return method?.Name switch
+            {
+                "get_Id" => Id,
+                "set_Id" => Id = (Guid)arguments![0]!,
+                "Dispose" => null,
+                _ => throw new NotSupportedException(
+                    $"Unexpected active-profile operation '{method?.Name}'."),
+            };
+        }
+    }
+
+    private class ActiveProfileServiceProxy : DispatchProxy
+    {
+        internal global::NINA.Profile.Interfaces.IProfile ActiveProfile { get; set; } = null!;
+
+        protected override object? Invoke(MethodInfo? method, object?[]? arguments)
+        {
+            return method?.Name switch
+            {
+                "get_ActiveProfile" => ActiveProfile,
+                _ => throw new NotSupportedException(
+                    $"Unexpected profile-service operation '{method?.Name}'."),
+            };
+        }
+    }
+
     private class GuardedTelescopeProxy : DispatchProxy
     {
         private int actuationCount;
@@ -7650,13 +8498,24 @@ internal static class Program
 
         private static object LastAutofocus()
         {
+            var contractsDirectory = Environment.GetEnvironmentVariable(
+                "CHATSTRONOMY_CONTRACTS_DIR");
+            var coordinatedBackend = !string.IsNullOrWhiteSpace(contractsDirectory)
+                && File.Exists(Path.Combine(
+                    contractsDirectory,
+                    "direct",
+                    "v1",
+                    "fixtures",
+                    "query-result-resource-not-ready.json"));
             var fixturePath = Path.Combine(
                 AppContext.BaseDirectory,
                 "Fixtures",
-                "example_last_af.json");
+                coordinatedBackend
+                    ? "hocus_focus_v4_report.json"
+                    : "example_last_af.json");
             using var document = JsonDocument.Parse(File.ReadAllText(fixturePath));
             return DirectApiEnvelope<JsonElement>.Ok(
-                document.RootElement.GetProperty("Response").Clone());
+                DirectAutofocusReportProjection.Project(document.RootElement));
         }
 
         public void Dispose() => Stop();

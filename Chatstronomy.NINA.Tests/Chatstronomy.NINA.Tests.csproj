@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\example_last_af.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\hocus_focus_v4_report.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Chatstronomy.NINA\Options.xaml" Link="Fixtures\Options.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\registry\plugins\manifests" Link="registry\plugins\manifests" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
