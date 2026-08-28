@@ -228,10 +228,15 @@ internal static class DirectAutofocusReportProjection
 
         if (model.ValueKind == JsonValueKind.String)
         {
-            projected["HyperbolicFitModelChosen"] = model.GetString();
+            if (!string.IsNullOrWhiteSpace(model.GetString()))
+            {
+                projected["HyperbolicFitModelChosen"] =
+                    NormalizeHocusEnumName(model.GetString()!);
+            }
             return;
         }
-        if (model.TryGetInt32(out var modelCode))
+        if (model.ValueKind == JsonValueKind.Number
+            && model.TryGetInt32(out var modelCode))
         {
             projected["HyperbolicFitModelChosen"] = HyperbolicFitModelName(modelCode);
         }
@@ -361,14 +366,22 @@ internal static class DirectAutofocusReportProjection
             CopyOptionalInteger(autofocus, algorithm, "MaxOutlierRejections");
 
             if (TryGetProperty(autofocus, "HyperbolicFitModel", out var model)
+                && model.ValueKind == JsonValueKind.Number
                 && model.TryGetInt32(out var modelCode))
             {
                 algorithm["ConfiguredHyperbolicModel"] =
                     HyperbolicFitModelName(modelCode);
             }
+            else if (model.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(model.GetString()))
+            {
+                algorithm["ConfiguredHyperbolicModel"] =
+                    NormalizeHocusEnumName(model.GetString()!);
+            }
             if (TryGetProperty(autofocus, "FitRejectionCriterion", out var criterion))
             {
-                if (criterion.TryGetInt32(out var criterionCode))
+                if (criterion.ValueKind == JsonValueKind.Number
+                    && criterion.TryGetInt32(out var criterionCode))
                 {
                     algorithm["FitRejectionCriterion"] = criterionCode switch
                     {
@@ -377,9 +390,11 @@ internal static class DirectAutofocusReportProjection
                         _ => $"Criterion {criterionCode}",
                     };
                 }
-                else if (criterion.ValueKind == JsonValueKind.String)
+                else if (criterion.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(criterion.GetString()))
                 {
-                    algorithm["FitRejectionCriterion"] = criterion.GetString();
+                    algorithm["FitRejectionCriterion"] =
+                        NormalizeHocusEnumName(criterion.GetString()!);
                 }
             }
             if (TryGetBoolean(autofocus, "ValidateHfrImprovement", out var validate))
@@ -410,7 +425,8 @@ internal static class DirectAutofocusReportProjection
             CopyOptionalInteger(detection, algorithm, "DetectionBinning");
             if (TryGetProperty(detection, "MeasurementAverage", out var average))
             {
-                if (average.TryGetInt32(out var averageCode))
+                if (average.ValueKind == JsonValueKind.Number
+                    && average.TryGetInt32(out var averageCode))
                 {
                     algorithm["MeasurementAverage"] = averageCode switch
                     {
@@ -419,9 +435,11 @@ internal static class DirectAutofocusReportProjection
                         _ => $"Mode {averageCode}",
                     };
                 }
-                else if (average.ValueKind == JsonValueKind.String)
+                else if (average.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(average.GetString()))
                 {
-                    algorithm["MeasurementAverage"] = average.GetString();
+                    algorithm["MeasurementAverage"] =
+                        NormalizeHocusEnumName(average.GetString()!);
                 }
             }
             var optimized = TryGetBoolean(
@@ -524,7 +542,8 @@ internal static class DirectAutofocusReportProjection
     {
         if (TryGetProperty(source, name, out var value))
         {
-            if (value.TryGetInt32(out var integer))
+            if (value.ValueKind == JsonValueKind.Number
+                && value.TryGetInt32(out var integer))
             {
                 return JsonValue.Create(integer)!;
             }
@@ -540,6 +559,18 @@ internal static class DirectAutofocusReportProjection
         }
         return JsonValue.Create(fallback)!;
     }
+
+    private static string NormalizeHocusEnumName(string name) => name switch
+    {
+        "UnevenBlend" => "Uneven Blend",
+        "TiltedHyperbola" => "Tilted Hyperbola",
+        "SmoothBlend" => "Smooth Blend",
+        "Hybrid" => "Hybrid (Best Fit)",
+        "RSquared" => "R²",
+        "ReducedChiSquared" => "Reduced χ²",
+        "MeanOutliers" => "Mean + outlier detection",
+        _ => name,
+    };
 
     private static JsonNode RequiredFiniteNumberProperty(JsonElement source, string name)
     {

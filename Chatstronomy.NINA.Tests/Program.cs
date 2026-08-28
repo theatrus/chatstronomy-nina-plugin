@@ -276,6 +276,9 @@ internal static class Program
         Run(
             "Hocus Focus star-detection feedback modes match the effective configuration",
             HocusFocusStarDetectionModesAreProjectedAccurately);
+        Run(
+            "Hocus Focus string enums are projected without losing the native report",
+            HocusFocusStringEnumsAreProjectedSafely);
         await RunAsync(
             "Derived Hocus Focus reports survive command and file cache ordering",
             DerivedHocusFocusReportsSurviveCacheOrdering);
@@ -5721,6 +5724,39 @@ internal static class Program
                     observedAlgorithm.GetProperty("HasOptimizedSettings").GetBoolean());
             }
         }
+    }
+
+    private static void HocusFocusStringEnumsAreProjectedSafely()
+    {
+        var fixturePath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "hocus_focus_v4_report.json");
+        var report = JObject.Parse(File.ReadAllText(fixturePath));
+        report["HyperbolicFitModelChosen"] = "TiltedHyperbola";
+        ((JObject)report["HocusFocusAutoFocusOptions"]!)["HyperbolicFitModel"] =
+            "Hybrid";
+        ((JObject)report["HocusFocusAutoFocusOptions"]!)["FitRejectionCriterion"] =
+            "ReducedChiSquared";
+        ((JObject)report["HocusFocusStarDetectionOptions"]!)["MeasurementAverage"] =
+            "MeanOutliers";
+
+        using var document = JsonDocument.Parse(
+            report.ToString(Newtonsoft.Json.Formatting.None));
+        var projected = DirectAutofocusReportProjection.Project(document.RootElement);
+        AssertEqual(
+            "Tilted Hyperbola",
+            projected.GetProperty("HyperbolicFitModelChosen").GetString());
+        var algorithm = projected.GetProperty("HocusFocusAlgorithm");
+        AssertEqual(
+            "Hybrid (Best Fit)",
+            algorithm.GetProperty("ConfiguredHyperbolicModel").GetString());
+        AssertEqual(
+            "Reduced χ²",
+            algorithm.GetProperty("FitRejectionCriterion").GetString());
+        AssertEqual(
+            "Mean + outlier detection",
+            algorithm.GetProperty("MeasurementAverage").GetString());
     }
 
     private static async Task DerivedHocusFocusReportsSurviveCacheOrdering()
