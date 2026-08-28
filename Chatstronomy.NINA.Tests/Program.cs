@@ -283,6 +283,9 @@ internal static class Program
             "Derived Hocus Focus reports survive command and file cache ordering",
             DerivedHocusFocusReportsSurviveCacheOrdering);
         await RunAsync(
+            "Partial Hocus Focus enrichment merges in either cache order",
+            PartialHocusFocusEnrichmentMergesInEitherOrder);
+        await RunAsync(
             "Profile-scoped autofocus reports precede profileless fallbacks",
             ProfileScopedAutofocusReportsPrecedeProfilelessFallbacks);
         await RunAsync(
@@ -5924,6 +5927,186 @@ internal static class Program
             afterBaseOnlyResult.Response.GetProperty("HocusFocusAlgorithm")
                 .GetProperty("ConfiguredHyperbolicModel")
                 .GetString());
+    }
+
+    private static async Task PartialHocusFocusEnrichmentMergesInEitherOrder()
+    {
+        var fixturePath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "hocus_focus_v4_report.json");
+        using var fixture = JsonDocument.Parse(File.ReadAllText(fixturePath));
+        var complete = DirectAutofocusReportProjection.Project(fixture.RootElement);
+
+        // Model the two independently produced views of the same Hocus run.
+        // The disk view is missing one reviewed algorithm leaf and the
+        // reflected command result is missing another; only one includes the
+        // optional inner region. The reflected view also contains conflicting
+        // live settings, while the persisted report must remain authoritative.
+        // This previously made the last continuation destructive.
+        var withoutMeasurement = JObject.Parse(complete.GetRawText());
+        ((JObject)withoutMeasurement["HocusFocusAlgorithm"]!)
+            .Remove("MeasurementAverage");
+        ((JObject)withoutMeasurement["Region"]!)
+            .Remove("InnerCropBoundary");
+        var firstPartial = JsonSerializer.Deserialize<JsonElement>(
+            withoutMeasurement.ToString(Newtonsoft.Json.Formatting.None),
+            DirectProtocol.JsonOptions);
+
+        var withoutConfiguredModel = JObject.Parse(complete.GetRawText());
+        var reflectedAlgorithm = (JObject)withoutConfiguredModel["HocusFocusAlgorithm"]!;
+        reflectedAlgorithm.Remove("ConfiguredHyperbolicModel");
+        reflectedAlgorithm["HFRImprovementThreshold"] = 0.75;
+        ((JObject)((JObject)withoutConfiguredModel["Region"]!)["OuterBoundary"]!)["Width"] =
+            0.75;
+        var secondPartial = JsonSerializer.Deserialize<JsonElement>(
+            withoutConfiguredModel.ToString(Newtonsoft.Json.Formatting.None),
+            DirectProtocol.JsonOptions);
+
+        var timestamp = DateTimeOffset.Parse(
+            "2026-08-26T22:15:30.1250000-07:00").DateTime;
+        var completion = new DirectAutofocusCompletion(
+            "L",
+            Position: 24_980.376175368903,
+            Temperature: -0.92,
+            timestamp,
+            Guid.NewGuid(),
+            ChatEnabled: true);
+
+        await AssertPartialHocusFocusMerge(
+            firstPartial,
+            secondPartial,
+            completion,
+            diskFirst: true);
+        await AssertPartialHocusFocusMerge(
+            firstPartial,
+            secondPartial,
+            completion,
+            diskFirst: false);
+        await AssertInFlightHocusFocusMerge(
+            firstPartial,
+            secondPartial,
+            completion);
+    }
+
+    private static async Task AssertPartialHocusFocusMerge(
+        JsonElement diskProjection,
+        JsonElement commandProjection,
+        DirectAutofocusCompletion completion,
+        bool diskFirst)
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default));
+        SetPendingAutofocusCompletion(provider, completion);
+        var generation = GetAutofocusCaptureGeneration(provider);
+        var cacheDiskProjection = typeof(NinaDirectDataProvider).GetMethod(
+            "CacheAutofocusReport",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                "The completed autofocus cache method was not found.");
+        bool CacheDiskProjection()
+        {
+            var arguments = new object[]
+            {
+                diskProjection,
+                completion,
+                generation,
+                default(JsonElement),
+            };
+            return (bool)(cacheDiskProjection.Invoke(provider, arguments) ?? false);
+        }
+
+        if (diskFirst)
+        {
+            AssertTrue(CacheDiskProjection());
+            AssertTrue(provider.TryCacheObservedAutofocusReport(
+                commandProjection,
+                generation,
+                chatEnabledAtCompletion: true));
+        }
+        else
+        {
+            AssertTrue(provider.TryCacheObservedAutofocusReport(
+                commandProjection,
+                generation,
+                chatEnabledAtCompletion: true));
+            AssertTrue(CacheDiskProjection());
+        }
+
+        var response = (DirectApiEnvelope<JsonElement>)(await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+            CancellationToken.None))!;
+        AssertMergedHocusFocusResponse(response.Response);
+    }
+
+    private static async Task AssertInFlightHocusFocusMerge(
+        JsonElement diskProjection,
+        JsonElement commandProjection,
+        DirectAutofocusCompletion completion)
+    {
+        var reportDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "chatstronomy-hocus-focus-in-flight-merge-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(reportDirectory);
+        try
+        {
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                autofocusReportDirectory: reportDirectory);
+            SetPendingAutofocusCompletion(provider, completion);
+            var generation = GetAutofocusCaptureGeneration(provider);
+
+            // Start a disk lookup while the report is absent, then let the
+            // reflected command continuation populate the cache before the
+            // persisted projection appears. This query must return the merged
+            // snapshot, not the pre-merge disk value.
+            var query = provider.ExecuteAsync(
+                new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+                CancellationToken.None);
+            await Task.Delay(150);
+            AssertTrue(provider.TryCacheObservedAutofocusReport(
+                commandProjection,
+                generation,
+                chatEnabledAtCompletion: true));
+            var reportPath = Path.Combine(
+                reportDirectory,
+                $"{completion.Timestamp:yyyy-MM-dd--HH-mm-ss}--{completion.ProfileId!.Value:D}.json");
+            await File.WriteAllTextAsync(reportPath, diskProjection.GetRawText());
+
+            var response = (DirectApiEnvelope<JsonElement>)(await query)!;
+            AssertMergedHocusFocusResponse(response.Response);
+        }
+        finally
+        {
+            Directory.Delete(reportDirectory, recursive: true);
+        }
+    }
+
+    private static void AssertMergedHocusFocusResponse(JsonElement response)
+    {
+        var algorithm = response.GetProperty("HocusFocusAlgorithm");
+        AssertEqual(
+            "Hybrid (Best Fit)",
+            algorithm.GetProperty("ConfiguredHyperbolicModel").GetString());
+        AssertEqual(
+            "Mean + outlier detection",
+            algorithm.GetProperty("MeasurementAverage").GetString());
+        AssertEqual(
+            0.15,
+            algorithm.GetProperty("HFRImprovementThreshold").GetDouble());
+        AssertEqual(
+            0.5,
+            response.GetProperty("Region")
+                .GetProperty("OuterBoundary")
+                .GetProperty("Width")
+                .GetDouble());
+        AssertEqual(
+            0.3,
+            response.GetProperty("Region")
+                .GetProperty("InnerCropBoundary")
+                .GetProperty("Width")
+                .GetDouble());
     }
 
     private static async Task ProfileScopedAutofocusReportsPrecedeProfilelessFallbacks()

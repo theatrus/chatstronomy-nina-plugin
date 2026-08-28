@@ -1424,12 +1424,16 @@ internal sealed class NinaDirectDataProvider :
                     pending,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!CacheAutofocusReport(matched, pending, pendingGeneration))
+            if (!CacheAutofocusReport(
+                matched,
+                pending,
+                pendingGeneration,
+                out var cachedReport))
             {
                 throw new InvalidOperationException(
                     "The autofocus profile session changed while reading the report.");
             }
-            var redacted = DirectPrivacyProjection.Redact(matched, accessPolicy.Current);
+            var redacted = DirectPrivacyProjection.Redact(cachedReport, accessPolicy.Current);
             RequireAutofocusSharing(generation);
             return redacted;
         }
@@ -1471,7 +1475,7 @@ internal sealed class NinaDirectDataProvider :
                     completion,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!CacheAutofocusReport(report, completion, generation))
+            if (!CacheAutofocusReport(report, completion, generation, out _))
             {
                 return;
             }
@@ -1497,7 +1501,8 @@ internal sealed class NinaDirectDataProvider :
     private bool CacheAutofocusReport(
         JsonElement report,
         DirectAutofocusCompletion completion,
-        long generation)
+        long generation,
+        out JsonElement cachedReport)
     {
         lock (autofocusReportGate)
         {
@@ -1508,10 +1513,18 @@ internal sealed class NinaDirectDataProvider :
                 && eventDelivery.Current.Autofocus
                 && completion.ChatEnabled)
             {
-                lastAutofocusReport = report.Clone();
+                var merged = lastAutofocusReport is JsonElement current
+                    ? MergeProjectedAutofocusReports(
+                        current,
+                        report,
+                        preferIncomingConflicts: true)
+                    : report.Clone();
+                lastAutofocusReport = merged;
+                cachedReport = merged.Clone();
                 return true;
             }
         }
+        cachedReport = default;
         return false;
     }
 
@@ -1555,7 +1568,10 @@ internal sealed class NinaDirectDataProvider :
             // switch is turned on again.
             lastAutofocusReport = lastAutofocusReport is JsonElement current
                 && pendingAutofocusCompletion is not null
-                ? MergeProjectedAutofocusReports(current, projected)
+                ? MergeProjectedAutofocusReports(
+                    current,
+                    projected,
+                    preferIncomingConflicts: false)
                 : projected;
             pendingAutofocusGeneration = generation;
             return true;
@@ -1564,12 +1580,15 @@ internal sealed class NinaDirectDataProvider :
 
     private static JsonElement MergeProjectedAutofocusReports(
         JsonElement current,
-        JsonElement incoming)
+        JsonElement incoming,
+        bool preferIncomingConflicts)
     {
-        var currentScore = AutofocusReportRichness(current);
-        var incomingScore = AutofocusReportRichness(incoming);
-        var primary = incomingScore >= currentScore ? incoming : current;
-        var secondary = incomingScore >= currentScore ? current : incoming;
+        // The caller knows which side came from Hocus/N.I.N.A.'s persisted
+        // report. Keep that disk snapshot authoritative for conflicting
+        // values regardless of whether it arrived before or after the
+        // reflected command result. Missing enrichment is still backfilled.
+        var primary = preferIncomingConflicts ? incoming : current;
+        var secondary = preferIncomingConflicts ? current : incoming;
         var merged = JsonNode.Parse(primary.GetRawText())?.AsObject()
             ?? throw new JsonException("The projected autofocus report was not an object.");
 
@@ -1596,37 +1615,60 @@ internal sealed class NinaDirectDataProvider :
             }
         }
 
+        // Top-level presence is not enough to rank structured enrichment.
+        // Merge these reviewed objects recursively so complementary disk and
+        // reflection projections cannot erase one another based on callback
+        // ordering. The disk-backed object supplies conflicting values while
+        // every missing leaf is backfilled from the reflected result.
+        foreach (var name in new[] { "Region", "HocusFocusAlgorithm" })
+        {
+            if (current.TryGetProperty(name, out var currentObject)
+                && currentObject.ValueKind == JsonValueKind.Object
+                && incoming.TryGetProperty(name, out var incomingObject)
+                && incomingObject.ValueKind == JsonValueKind.Object)
+            {
+                merged[name] = MergeProjectedAutofocusObject(
+                    currentObject,
+                    incomingObject,
+                    preferIncomingConflicts);
+            }
+        }
+
         return JsonSerializer.SerializeToElement(merged, DirectProtocol.JsonOptions);
     }
 
-    private static int AutofocusReportRichness(JsonElement report)
+    private static JsonObject MergeProjectedAutofocusObject(
+        JsonElement current,
+        JsonElement incoming,
+        bool preferIncomingConflicts)
     {
-        var score = report.TryGetProperty("MeasurePoints", out var points)
-            && points.ValueKind == JsonValueKind.Array
-                ? points.GetArrayLength()
-                : 0;
-        foreach (var name in new[]
+        var primary = preferIncomingConflicts ? incoming : current;
+        var secondary = preferIncomingConflicts ? current : incoming;
+        var merged = JsonNode.Parse(primary.GetRawText())?.AsObject()
+            ?? throw new JsonException("The projected autofocus enrichment was not an object.");
+        var fallback = JsonNode.Parse(secondary.GetRawText())?.AsObject()
+            ?? throw new JsonException("The projected autofocus enrichment was not an object.");
+        BackfillMissingJsonProperties(merged, fallback);
+        return merged;
+    }
+
+    private static void BackfillMissingJsonProperties(
+        JsonObject primary,
+        JsonObject fallback)
+    {
+        foreach (var property in fallback)
         {
-            "FinalHFR",
-            "FinalHFRSource",
-            "InitialHFRMeasured",
-            "HyperbolicMinimumStdError",
-            "HyperbolicReducedChiSquared",
-            "HyperbolicLeaveOneOutStdError",
-            "AcceptedStarCountMin",
-            "AcceptedStarCountMax",
-            "HyperbolicFitModelChosen",
-            "Region",
-            "HocusFocusAlgorithm",
-        })
-        {
-            if (report.TryGetProperty(name, out var value)
-                && value.ValueKind != JsonValueKind.Null)
+            if (!primary.TryGetPropertyValue(property.Key, out var current)
+                || current is null)
             {
-                score += 8;
+                primary[property.Key] = property.Value?.DeepClone();
+            }
+            else if (current is JsonObject currentObject
+                && property.Value is JsonObject fallbackObject)
+            {
+                BackfillMissingJsonProperties(currentObject, fallbackObject);
             }
         }
-        return score;
     }
 
     internal static JsonElement SerializeObservedAutofocusReport(AutoFocusReport report)
