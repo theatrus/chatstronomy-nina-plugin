@@ -525,6 +525,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         set => SetEventDeliveryOption(() => settings.SendMountEvents = value);
     }
 
+    public bool SendSlewMotionEvents
+    {
+        get => settings.SendSlewMotionEvents;
+        set => SetEventDeliveryOption(() => settings.SendSlewMotionEvents = value);
+    }
+
     public bool SendSequenceEvents
     {
         get => settings.SendSequenceEvents;
@@ -565,6 +571,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         get => settings.SendFilterFocuserRotatorEvents;
         set => SetEventDeliveryOption(() => settings.SendFilterFocuserRotatorEvents = value);
+    }
+
+    public bool SendRotatorMoveEvents
+    {
+        get => settings.SendRotatorMoveEvents;
+        set => SetEventDeliveryOption(() => settings.SendRotatorMoveEvents = value);
     }
 
     public bool SendObservatoryAndFlatPanelEvents
@@ -1326,6 +1338,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(SendAutofocusEvents),
             nameof(SendGuidingEvents),
             nameof(SendMountEvents),
+            nameof(SendSlewMotionEvents),
             nameof(SendSequenceEvents),
             nameof(SendSafetyEvents),
             nameof(SendWeatherChangeEvents),
@@ -1333,6 +1346,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(HighWindThresholdMetersPerSecond),
             nameof(SendTargetSchedulerEvents),
             nameof(SendFilterFocuserRotatorEvents),
+            nameof(SendRotatorMoveEvents),
             nameof(SendObservatoryAndFlatPanelEvents),
             nameof(SendEquipmentConnectionEvents),
             nameof(SendOtherEvents),

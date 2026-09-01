@@ -66,9 +66,10 @@ operational error text; local path-shaped strings are redacted before
 transmission. Review these choices before enabling forwarding.
 
 Most event categories, image sharing, and popup notifications start enabled.
-Weather-change reports and high-wind alerts are separate opt-ins and start
-disabled. Review those settings before pairing with the Hub or starting a local
-runtime, and turn off anything you do not want to leave N.I.N.A. Turning a
+Slew diagnostics, rotator-motion diagnostics, weather-change reports, and
+high-wind alerts are separate opt-ins and start disabled. Review those settings
+before pairing with the Hub or starting a local runtime, and turn off anything
+you do not want to leave N.I.N.A. Turning a
 category off prevents its underlying events from reaching the Hub or local bot,
 including events already buffered before the setting changed. Turning off
 images also blocks image history and thumbnails.
@@ -98,8 +99,10 @@ The plugin provides bounded native histories and typed command handling for:
 - sequence lifecycle, item failures, and explicit completion outcomes;
 - built-in timed, altitude, Moon-altitude, Sun-altitude, horizon, and safety
   waits, plus supported long-running Sequencer+ condition and manual waits;
-- camera cooling and warming, mount-slew completion, center, and plate-solve
-  results;
+- camera cooling and warming, optional mount-slew start/end diagnostics,
+  center, and plate-solve results;
+- optional rotator move start/end diagnostics with sky and mechanical angles
+  when N.I.N.A. exposes them;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
@@ -117,12 +120,37 @@ the whole run. Full optimizer or Inspector feedback requires a future Hocus
 Focus event or adapter contract.
 
 Event families, images, and popup notifications can be controlled independently
-for each N.I.N.A. profile. Weather changes and high-wind alerts are separate and
-start disabled; most other event families start enabled. Disabled categories
-never leave N.I.N.A. over either the hosted WebSocket or the local bot's named
-pipe; turning a category off immediately removes its buffered events from
-subsequent queries. Images and thumbnails are also withheld when their category
-is off.
+for each N.I.N.A. profile. Slew diagnostics, rotator-motion diagnostics, weather
+changes, and high-wind alerts are separate and start disabled; most other event
+families start enabled. Disabled categories never leave N.I.N.A. over either the
+hosted WebSocket or the local bot's named pipe; turning a category off
+immediately removes its buffered events from subsequent queries. Images and
+thumbnails are also withheld when their category is off.
+
+N.I.N.A. exposes public completion callbacks for slews and rotator moves, but no
+public start callback. When its separate motion switches are enabled,
+Chatstronomy detects moving and idle edges from N.I.N.A.'s live
+`Slewing` and `IsMoving` state. When both edges are observed, a motion ID pairs
+the start and end and the interval spans those observations. Slew events record
+a requested target when N.I.N.A. provides one, plus observed moving and idle
+RA/Dec positions. State-observed starts and ends also include altitude and
+azimuth only while **Share exact observatory coordinates and location-derived
+mount position** is enabled.
+N.I.N.A. does not expose the requested rotator target at its public start-state
+boundary. State-observed rotator starts report available sky and mechanical
+angles; a recovered start carries the callback's available logical or mechanical
+`From` angle. An
+ordinary “ended” event means N.I.N.A. first reported the device idle; it does
+not by itself claim that settling or the overall operation succeeded. Delayed native
+completion callbacks enrich or deduplicate the same motion without blocking
+N.I.N.A.'s equipment callbacks. If a short movement completes between live
+state observations, Chatstronomy recovers a paired start and end from N.I.N.A.'s
+completion callback, labels it **Recovered after motion began**, and omits a
+duration it could not observe. Because that callback has no start timestamp, a
+recovered mount start contains callback RA/Dec but no historical altitude or
+azimuth; its end is timestamped by the completion callback and uses the
+available live idle snapshot. Neither recovery record implies success.
+
 Once N.I.N.A. accepts a locally permitted command, its terminal failure is
 always delivered as part of that command exchange; optional event switches do
 not hide the outcome. Safety-monitor transitions have their own event switch; a
@@ -147,10 +175,10 @@ Switch values and LiveStack data are not captured. Enabled popup notifications
 and opt-in raw N.I.N.A. logs remain unstructured text and may contain
 operational details. Sequencer+
 condition expressions and free-form pause reasons remain inside N.I.N.A.
-Changing mount, sequence, or safety delivery first closes the current Direct
-session, then applies the new selection and reconnects. This prevents an older
-Hub or local runtime from turning cached operation state into a final message
-after sharing is disabled.
+Changing any event-delivery selection first closes the current Direct session,
+then applies the new selection and reconnects. This prevents an older Hub or
+local runtime from turning cached operation state into a final message after
+sharing is disabled.
 Every raw log level starts off because logs can be frequent and may include
 device or filesystem details; logs are not read or sent until a level is
 enabled.
