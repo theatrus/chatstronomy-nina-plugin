@@ -223,6 +223,63 @@ internal static class Program
         Run(
             "Sequencer+ coordinate proxies are never mistaken for targets",
             SequencerPlusProxyContainersAreNotTargets);
+        Run(
+            "Motion diagnostics default off and remain independently routed",
+            MotionDiagnosticsDefaultOffAndRemainIndependent);
+        await RunAsync(
+            "Telescope motion edges preserve intent, measured endpoints, and live privacy",
+            TelescopeMotionEdgesPreserveIntentAndPrivacy);
+        await RunAsync(
+            "Rotator motion edges preserve measured start and end positions",
+            RotatorMotionEdgesPreserveMeasuredPositions);
+        await RunAsync(
+            "Motion policy publication gaps cannot capture or replay events",
+            MotionPolicyPublicationGapsCannotCaptureOrReplay);
+        await RunAsync(
+            "Idle profile resets preserve callback-only motion capture",
+            IdleProfileResetsPreserveCallbackOnlyMotionCapture);
+        await RunAsync(
+            "Canceled mount motions do not swallow different callback-only motions",
+            CanceledMountMotionDoesNotSwallowDifferentCallbackOnlyMotion);
+        await RunAsync(
+            "State-derived mount completions retain their native fingerprint",
+            StateDerivedMountCompletionsRetainNativeFingerprint);
+        await RunAsync(
+            "Canceled rotator motions do not swallow different callback-only motions",
+            CanceledRotatorMotionDoesNotSwallowDifferentCallbackOnlyMotion);
+        await RunAsync(
+            "Rotator completion tombstones do not expire",
+            RotatorCompletionTombstonesDoNotExpire);
+        await RunAsync(
+            "Rotator completion waits for the final device-info broadcast",
+            RotatorCompletionWaitsForFinalDeviceInfoBroadcast);
+        await RunAsync(
+            "Motion-boundary tombstones begin when long-running motion stops",
+            MotionBoundaryTombstonesBeginWhenLongRunningMotionStops);
+        await RunAsync(
+            "Callbacks cannot retire a boundary while motion remains active",
+            BoundaryCallbacksRemainSuppressedUntilIdle);
+        await RunAsync(
+            "An idle boundary callback permits a same-signature successor",
+            IdleBoundaryCallbacksPermitSameSignatureSuccessors);
+        await RunAsync(
+            "Nonmatching callbacks cannot terminate active motions",
+            NonmatchingCallbacksCannotTerminateActiveMotions);
+        await RunAsync(
+            "Nonmatching callbacks cannot clear pending motion ends",
+            NonmatchingCallbacksCannotClearPendingMotionEnds);
+        await RunAsync(
+            "Stopped providers cannot reattach motion observers",
+            StoppedProvidersCannotReattachMotionObservers);
+        await RunAsync(
+            "Reconnect-to-idle boundaries preserve the next distinct motion",
+            ReconnectToIdleBoundariesPreserveNextDistinctMotion);
+        await RunAsync(
+            "Motion completions cannot cross consent, profile, or disconnect boundaries",
+            MotionCompletionsCannotCrossBoundaries);
+        await RunAsync(
+            "Mount and rotator motion policies do not reset each other",
+            MotionPoliciesDoNotResetEachOther);
         await RunAsync(
             "Native slew, dome, flat, and connection events use stable consented payloads",
             NativeLifecycleEventsUseStableConsentedPayloads);
@@ -849,13 +906,15 @@ internal static class Program
             ["{Binding SendImageEvents}"] = "Images and thumbnails",
             ["{Binding SendAutofocusEvents}"] = "Autofocus results",
             ["{Binding SendGuidingEvents}"] = "Guiding and dithering",
-            ["{Binding SendMountEvents}"] = "Mount, slew, and center",
+            ["{Binding SendMountEvents}"] = "Mount status, flips, and centering",
+            ["{Binding SendSlewMotionEvents}"] = "Slew start/end diagnostics",
             ["{Binding SendSequenceEvents}"] = "Sequence, timed waits, and cooling",
             ["{Binding SendSafetyEvents}"] = "Safety monitor and safety waits",
             ["{Binding SendWeatherChangeEvents}"] = "Meaningful weather changes",
             ["{Binding SendHighWindAlerts}"] = "High-wind alerts",
             ["{Binding SendTargetSchedulerEvents}"] = "Targets and Target Scheduler",
-            ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator",
+            ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator sync",
+            ["{Binding SendRotatorMoveEvents}"] = "Rotator move start/end diagnostics",
             ["{Binding SendObservatoryAndFlatPanelEvents}"] = "Observatory and flat panel",
             ["{Binding SendEquipmentConnectionEvents}"] = "Equipment connections",
             ["{Binding SendOtherEvents}"] = "Other N.I.N.A. events",
@@ -885,6 +944,42 @@ internal static class Program
                     .Single()
                     .Attribute("Text"));
         }
+
+        var eventGrid = document
+            .Descendants(presentation + "UniformGrid")
+            .Single(element => element
+                .Descendants(presentation + "CheckBox")
+                .Any(checkbox =>
+                    (string?)checkbox.Attribute("IsChecked") == "{Binding SendImageEvents}"));
+        var eventBindings = eventGrid
+            .Elements(presentation + "Grid")
+            .Select((element, index) => new
+            {
+                Binding = (string?)element
+                    .Descendants(presentation + "CheckBox")
+                    .SingleOrDefault()?
+                    .Attribute("IsChecked"),
+                Index = index,
+            })
+            .Where(item => item.Binding is not null)
+            .ToDictionary(item => item.Binding!, item => item.Index);
+        AssertEqual(
+            eventBindings["{Binding SendMountEvents}"] / 2,
+            eventBindings["{Binding SendSlewMotionEvents}"] / 2);
+        AssertEqual(
+            eventBindings["{Binding SendFilterFocuserRotatorEvents}"] / 2,
+            eventBindings["{Binding SendRotatorMoveEvents}"] / 2);
+        AssertTrue(document
+            .Descendants(presentation + "TextBlock")
+            .Select(element => (string?)element.Attribute("Text") ?? string.Empty)
+            .Any(value =>
+                value.Contains("Slews include observed RA/Dec", StringComparison.Ordinal)
+                && value.Contains("only when location sharing is enabled", StringComparison.Ordinal)
+                && value.Contains("start/end altitude and azimuth", StringComparison.Ordinal)
+                && value.Contains("If a short move completes between updates", StringComparison.Ordinal)
+                && value.Contains(
+                    "its start has callback RA/Dec but no historical Alt/Az or estimated duration",
+                    StringComparison.Ordinal)));
 
         var threshold = document
             .Descendants(presentation + "TextBox")
@@ -2085,6 +2180,8 @@ internal static class Program
                 options => options with { Guiding = false }),
             ("mount", new[] { "MOUNT-PARKED", "MOUNT-CENTER", "ERROR-PLATESOLVE" },
                 options => options with { Mount = false }),
+            ("slew motion", new[] { "MOUNT-SLEW-STARTED", "MOUNT-SLEWED" },
+                options => options with { SlewMotion = false }),
             ("sequence", new[] { "SEQUENCE-STARTING", "SEQUENCE-FINISHED" },
                 options => options with { Sequence = false }),
             ("safety", new[] { "SAFETY-CONNECTED", "SAFETY-CHANGED", "SAFETY-DISCONNECTED" },
@@ -2096,8 +2193,11 @@ internal static class Program
             ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
                 options => options with { TargetScheduler = false }),
             ("filter, focuser, and rotator", new[]
-                { "FILTERWHEEL-CHANGED", "FOCUSER-MOVED", "FOCUSER-USER-FOCUSED", "ROTATOR-MOVED" },
+                { "FILTERWHEEL-CHANGED", "FOCUSER-MOVED", "FOCUSER-USER-FOCUSED" },
                 options => options with { FilterFocuserRotator = false }),
+            ("rotator motion", new[]
+                { "ROTATOR-MOVE-STARTED", "ROTATOR-MOVED", "ROTATOR-MOVED-MECHANICAL" },
+                options => options with { RotatorMotion = false }),
             ("observatory and flat panel", new[]
                 { "DOME-SHUTTER-OPENED", "DOME-SLEWED", "FLAT-COVER-CLOSED", "FLAT-LIGHT-TOGGLED" },
                 options => options with { ObservatoryAndFlatPanel = false }),
@@ -2118,6 +2218,10 @@ internal static class Program
                     { WeatherChanges = true },
                 "high-wind alerts" => DirectEventDeliveryOptions.Default with
                     { HighWindAlerts = true },
+                "slew motion" => DirectEventDeliveryOptions.Default with
+                    { SlewMotion = true },
+                "rotator motion" => DirectEventDeliveryOptions.Default with
+                    { RotatorMotion = true },
                 _ => DirectEventDeliveryOptions.Default,
             };
             var delivery = new DirectEventDeliveryPolicy(initial);
@@ -2290,6 +2394,55 @@ internal static class Program
             .EnumerateArray()
             .Select(item => item.Clone())
             .ToArray();
+    }
+
+    private static async Task<JsonElement[]> WaitForNamedEventCountAsync(
+        NinaDirectDataProvider provider,
+        string eventName,
+        int expectedCount,
+        TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (true)
+        {
+            var events = await SnapshotEvents(provider);
+            if (events.Count(item =>
+                    item.GetProperty("Event").GetString() == eventName) >= expectedCount)
+            {
+                return events;
+            }
+            if (elapsed.Elapsed >= timeout)
+            {
+                throw new TimeoutException(
+                    $"Timed out waiting for {expectedCount} '{eventName}' event(s).");
+            }
+            await Task.Delay(10);
+        }
+    }
+
+    private static async Task<JsonElement[]> AssertNamedEventCountsRemainAsync(
+        NinaDirectDataProvider provider,
+        TimeSpan quietPeriod,
+        params (string EventName, int ExpectedCount)[] expectedCounts)
+    {
+        var elapsed = Stopwatch.StartNew();
+        JsonElement[] events;
+        while (true)
+        {
+            events = await SnapshotEvents(provider);
+            foreach (var (eventName, expectedCount) in expectedCounts)
+            {
+                AssertEqual(
+                    expectedCount,
+                    events.Count(item =>
+                        item.GetProperty("Event").GetString() == eventName));
+            }
+            if (elapsed.Elapsed >= quietPeriod)
+            {
+                return events;
+            }
+            await Task.Delay(10);
+        }
     }
 
     private static void AsyncCommandsUseAcceptedEnvelopes()
@@ -3873,13 +4026,2431 @@ internal static class Program
         AssertEqual("condition_wait", children[0]["OperationKind"] as string);
     }
 
-    private static async Task NativeLifecycleEventsUseStableConsentedPayloads()
+    private static void MotionDiagnosticsDefaultOffAndRemainIndependent()
     {
-        var access = new DirectAccessPolicy(DirectAccessOptions.Default);
-        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        var defaults = DirectEventDeliveryOptions.Default;
+        AssertFalse(defaults.SlewMotion);
+        AssertFalse(defaults.RotatorMotion);
+        AssertFalse(defaults.ShouldSendEvent("MOUNT-SLEW-STARTED"));
+        AssertFalse(defaults.ShouldSendEvent("MOUNT-SLEWED"));
+        AssertFalse(defaults.ShouldSendEvent("ROTATOR-MOVE-STARTED"));
+        AssertFalse(defaults.ShouldSendEvent("ROTATOR-MOVED"));
+        AssertFalse(defaults.ShouldSendEvent("ROTATOR-MOVED-MECHANICAL"));
+
+        var slewOnly = defaults with
+        {
+            Mount = false,
+            SlewMotion = true,
+        };
+        AssertTrue(slewOnly.ShouldSendEvent("MOUNT-SLEW-STARTED"));
+        AssertTrue(slewOnly.ShouldSendEvent("MOUNT-SLEWED"));
+        AssertFalse(slewOnly.ShouldSendEvent("MOUNT-PARKED"));
+
+        var rotatorMotionOnly = defaults with
+        {
+            FilterFocuserRotator = false,
+            RotatorMotion = true,
+        };
+        AssertTrue(rotatorMotionOnly.ShouldSendEvent("ROTATOR-MOVE-STARTED"));
+        AssertTrue(rotatorMotionOnly.ShouldSendEvent("ROTATOR-MOVED"));
+        AssertFalse(rotatorMotionOnly.ShouldSendEvent("ROTATOR-SYNCED"));
+
+        var activeProfile = DispatchProxy.Create<
+            global::NINA.Profile.Interfaces.IProfile,
+            ActiveProfileProxy>();
+        var activeProfileProxy = (ActiveProfileProxy)(object)activeProfile;
+        activeProfileProxy.Id = Guid.NewGuid();
+        activeProfileProxy.PluginSettings = new global::NINA.Profile.PluginSettings();
+        var profileService = DispatchProxy.Create<
+            global::NINA.Profile.Interfaces.IProfileService,
+            ActiveProfileServiceProxy>();
+        ((ActiveProfileServiceProxy)(object)profileService).ActiveProfile = activeProfile;
+        var settings = new ChatstronomySettings(profileService);
+        AssertFalse(settings.SendSlewMotionEvents);
+        AssertFalse(settings.SendRotatorMoveEvents);
+        AssertFalse(settings.EventDeliveryOptions.SlewMotion);
+        AssertFalse(settings.EventDeliveryOptions.RotatorMotion);
+    }
+
+    private static async Task TelescopeMotionEdgesPreserveIntentAndPrivacy()
+    {
+        var access = new DirectAccessPolicy(
+            DirectAccessOptions.Default with { ShareObservatoryLocation = true });
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { SlewMotion = true });
         using var provider = CreateSecurityTestProvider(
             access,
             deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var from = new global::NINA.Astrometry.Coordinates(
+                4.5,
+                -12.25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var target = new global::NINA.Astrometry.Coordinates(
+                6.25,
+                -8.75,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var measuredEnd = new global::NINA.Astrometry.Coordinates(
+                6.2,
+                -8.8,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = from,
+                Altitude = 31.25,
+                Azimuth = 141.75,
+                TargetCoordinates = target,
+                Slewing = false,
+            };
+            provider.UpdateDeviceInfo(info);
+
+            info.Slewing = true;
+            var initial = await SnapshotEvents(provider);
+            var start = initial.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            AssertEqual(4.5d, start.GetProperty("From").GetProperty("RA").GetDouble());
+            AssertEqual(-12.25d, start.GetProperty("From").GetProperty("Dec").GetDouble());
+            AssertEqual(31.25d, start.GetProperty("From").GetProperty("Altitude").GetDouble());
+            AssertEqual(141.75d, start.GetProperty("From").GetProperty("Azimuth").GetDouble());
+            AssertEqual(6.25d, start.GetProperty("Target").GetProperty("RA").GetDouble());
+            AssertEqual(-8.75d, start.GetProperty("Target").GetProperty("Dec").GetDouble());
+            AssertFalse(start.TryGetProperty("ObservedInProgress", out _));
+
+            info.Coordinates = measuredEnd;
+            info.Altitude = 47.5;
+            info.Azimuth = 212.25;
+            info.Slewing = false;
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            start = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var end = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                start.GetProperty("MotionId").GetInt64(),
+                end.GetProperty("MotionId").GetInt64());
+            AssertEqual(4.5d, end.GetProperty("From").GetProperty("RA").GetDouble());
+            AssertEqual(6.2d, end.GetProperty("To").GetProperty("RA").GetDouble());
+            AssertEqual(-8.8d, end.GetProperty("To").GetProperty("Dec").GetDouble());
+            AssertEqual(47.5d, end.GetProperty("To").GetProperty("Altitude").GetDouble());
+            AssertEqual(212.25d, end.GetProperty("To").GetProperty("Azimuth").GetDouble());
+            AssertEqual(6.25d, end.GetProperty("Target").GetProperty("RA").GetDouble());
+            AssertEqual(-8.75d, end.GetProperty("Target").GetProperty("Dec").GetDouble());
+            AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+
+            access.Update(access.Current with { ShareObservatoryLocation = false });
+            var redacted = await SnapshotEvents(provider);
+            var redactedStart = redacted.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var redactedEnd = redacted.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertFalse(redactedStart.GetProperty("From").TryGetProperty("Altitude", out _));
+            AssertFalse(redactedStart.GetProperty("From").TryGetProperty("Azimuth", out _));
+            AssertFalse(redactedEnd.GetProperty("To").TryGetProperty("Altitude", out _));
+            AssertFalse(redactedEnd.GetProperty("To").TryGetProperty("Azimuth", out _));
+            AssertEqual(4.5d, redactedStart.GetProperty("From").GetProperty("RA").GetDouble());
+            AssertEqual(6.25d, redactedStart.GetProperty("Target").GetProperty("RA").GetDouble());
+
+            access.Update(access.Current with { ShareObservatoryLocation = true });
+            var sharedAgain = await SnapshotEvents(provider);
+            AssertEqual(
+                31.25d,
+                sharedAgain.Single(item =>
+                        item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED")
+                    .GetProperty("From")
+                    .GetProperty("Altitude")
+                    .GetDouble());
+            AssertEqual(
+                212.25d,
+                sharedAgain.Single(item =>
+                        item.GetProperty("Event").GetString() == "MOUNT-SLEWED")
+                    .GetProperty("To")
+                    .GetProperty("Azimuth")
+                    .GetDouble());
+
+            var secondTarget = new global::NINA.Astrometry.Coordinates(
+                7.5,
+                -6.5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var secondEnd = new global::NINA.Astrometry.Coordinates(
+                7.45,
+                -6.55,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            info.TargetCoordinates = secondTarget;
+            info.Slewing = true;
+
+            // N.I.N.A.'s callback for the previous slew can arrive after a
+            // new slew has begun. It must consume the already-published state
+            // completion without terminating the active second session.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    from,
+                    target));
+            var duringSecondMotion = await SnapshotEvents(provider);
+            AssertEqual(2, duringSecondMotion.Count(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"));
+            AssertEqual(1, duringSecondMotion.Count(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED"));
+
+            info.Coordinates = secondEnd;
+            info.Altitude = 52.5;
+            info.Azimuth = 225.5;
+            info.Slewing = false;
+            // This callback arrives inside the state edge's grace period. It
+            // must publish that pending end once and cancel the fallback.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    measuredEnd,
+                    secondTarget));
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 2,
+                TimeSpan.FromSeconds(2));
+            var afterNativeCallback = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 2),
+                ("MOUNT-SLEWED", 2));
+            var startIds = afterNativeCallback
+                .Where(item =>
+                    item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED")
+                .Select(item => item.GetProperty("MotionId").GetInt64())
+                .OrderBy(id => id)
+                .ToArray();
+            var endIds = afterNativeCallback
+                .Where(item => item.GetProperty("Event").GetString() == "MOUNT-SLEWED")
+                .Select(item => item.GetProperty("MotionId").GetInt64())
+                .OrderBy(id => id)
+                .ToArray();
+            AssertTrue(startIds.SequenceEqual(endIds));
+            var reorderedEnd = afterNativeCallback.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED"
+                && item.GetProperty("MotionId").GetInt64() == startIds[^1]);
+            AssertEqual("nina_slewed", reorderedEnd.GetProperty("EndDetection").GetString());
+            AssertEqual(6.2d, reorderedEnd.GetProperty("From").GetProperty("RA").GetDouble());
+            AssertEqual(7.45d, reorderedEnd.GetProperty("To").GetProperty("RA").GetDouble());
+            AssertEqual(7.5d, reorderedEnd.GetProperty("Target").GetProperty("RA").GetDouble());
+
+            var callbackOnlyTarget = new global::NINA.Astrometry.Coordinates(
+                8.25,
+                -5.75,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var callbackOnlyEnd = new global::NINA.Astrometry.Coordinates(
+                8.2,
+                -5.8,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            info.Coordinates = callbackOnlyEnd;
+            info.TargetCoordinates = callbackOnlyTarget;
+            info.Altitude = 56.5;
+            info.Azimuth = 231.5;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    secondEnd,
+                    callbackOnlyTarget));
+            var afterCallbackOnlyMotion = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 3),
+                ("MOUNT-SLEWED", 3));
+            var recoveredStart = afterCallbackOnlyMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredEnd = afterCallbackOnlyMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED"
+                && item.GetProperty("MotionId").GetInt64()
+                    == recoveredStart.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_slewed", recoveredEnd.GetProperty("EndDetection").GetString());
+            AssertTrue(recoveredEnd.GetProperty("ObservedInProgress").GetBoolean());
+            AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
+            AssertEqual(
+                8.25d,
+                recoveredEnd.GetProperty("Target").GetProperty("RA").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task RotatorMotionEdgesPreserveMeasuredPositions()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 12.5f,
+                MechanicalPosition = 22.5f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(info);
+
+            info.IsMoving = true;
+            info.Position = 48.25f;
+            // N.I.N.A. broadcasts the physical stop before its polling loop
+            // writes the final mechanical position. The completion grace
+            // period must resnapshot that later value.
+            info.IsMoving = false;
+            info.MechanicalPosition = 58.75f;
+            provider.UpdateDeviceInfo(info);
+
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var start = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var end = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                start.GetProperty("MotionId").GetInt64(),
+                end.GetProperty("MotionId").GetInt64());
+            AssertEqual(12.5d, start.GetProperty("Position").GetDouble());
+            AssertEqual(22.5d, start.GetProperty("MechanicalPosition").GetDouble());
+            AssertEqual(12.5d, end.GetProperty("From").GetDouble());
+            AssertEqual(48.25d, end.GetProperty("To").GetDouble());
+            AssertEqual(48.25d, end.GetProperty("Position").GetDouble());
+            AssertEqual(22.5d, end.GetProperty("MechanicalFrom").GetDouble());
+            AssertEqual(58.75d, end.GetProperty("MechanicalTo").GetDouble());
+            AssertEqual(58.75d, end.GetProperty("MechanicalPosition").GetDouble());
+            AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+            AssertFalse(start.TryGetProperty("ObservedInProgress", out _));
+
+            info.IsMoving = true;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(
+                    12.5f,
+                    48.25f));
+            var duringSecondMotion = await SnapshotEvents(provider);
+            AssertEqual(2, duringSecondMotion.Count(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"));
+            AssertEqual(1, duringSecondMotion.Count(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED"));
+
+            info.Position = 72.5f;
+            info.MechanicalPosition = 82.5f;
+            info.IsMoving = false;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(
+                    48.25f,
+                    72.5f));
+            await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 2,
+                TimeSpan.FromSeconds(2));
+            var afterNativeCallback = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("ROTATOR-MOVE-STARTED", 2),
+                ("ROTATOR-MOVED", 2));
+            var startIds = afterNativeCallback
+                .Where(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED")
+                .Select(item => item.GetProperty("MotionId").GetInt64())
+                .OrderBy(id => id)
+                .ToArray();
+            var endIds = afterNativeCallback
+                .Where(item => item.GetProperty("Event").GetString() == "ROTATOR-MOVED")
+                .Select(item => item.GetProperty("MotionId").GetInt64())
+                .OrderBy(id => id)
+                .ToArray();
+            AssertTrue(startIds.SequenceEqual(endIds));
+            var reorderedEnd = afterNativeCallback.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED"
+                && item.GetProperty("MotionId").GetInt64() == startIds[^1]);
+            AssertEqual("nina_moved", reorderedEnd.GetProperty("EndDetection").GetString());
+            AssertEqual(48.25d, reorderedEnd.GetProperty("From").GetDouble());
+            AssertEqual(72.5d, reorderedEnd.GetProperty("To").GetDouble());
+
+            info.Position = 96.5f;
+            info.MechanicalPosition = 106.5f;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(
+                    72.5f,
+                    96.5f));
+            var afterCallbackOnlyMotion = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("ROTATOR-MOVE-STARTED", 3),
+                ("ROTATOR-MOVED", 3));
+            var recoveredStart = afterCallbackOnlyMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredEnd = afterCallbackOnlyMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED"
+                && item.GetProperty("MotionId").GetInt64()
+                    == recoveredStart.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_moved", recoveredEnd.GetProperty("EndDetection").GetString());
+            AssertTrue(recoveredEnd.GetProperty("ObservedInProgress").GetBoolean());
+            AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
+            AssertEqual(72.5d, recoveredEnd.GetProperty("From").GetDouble());
+            AssertEqual(96.5d, recoveredEnd.GetProperty("To").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task MotionPolicyPublicationGapsCannotCaptureOrReplay()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                2,
+                3,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTo = new global::NINA.Astrometry.Coordinates(
+                4,
+                5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTo,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 10f,
+                MechanicalPosition = 20f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            var enabled = delivery.Current;
+            var disabled = enabled with
+            {
+                SlewMotion = false,
+                RotatorMotion = false,
+            };
+            provider.EventDeliveryPolicyChanging(enabled, disabled);
+            // Exercise the exact pre-publication gap: the old policy object
+            // still says enabled, but capture must already be closed.
+            AssertTrue(delivery.Current.SlewMotion);
+            AssertTrue(delivery.Current.RotatorMotion);
+            telescopeInfo.Slewing = true;
+            telescopeInfo.Coordinates = mountTo;
+            telescopeInfo.Slewing = false;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTo));
+            rotatorInfo.IsMoving = true;
+            rotatorInfo.Position = 30f;
+            rotatorInfo.MechanicalPosition = 40f;
+            rotatorInfo.IsMoving = false;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(10f, 30f));
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 0),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 0),
+                ("ROTATOR-MOVED", 0));
+
+            delivery.Update(disabled);
+            provider.EventDeliveryPolicyChanged(enabled, disabled);
+            provider.EventDeliveryPolicyChanging(disabled, enabled);
+            delivery.Update(enabled);
+            provider.EventDeliveryPolicyChanged(disabled, enabled);
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 0),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 0),
+                ("ROTATOR-MOVED", 0));
+
+            // Closing the transition barrier must not leave either family
+            // stuck. A fully post-publication motion is captured normally.
+            telescopeInfo.Slewing = true;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.IsMoving = true;
+            rotatorInfo.IsMoving = false;
+            provider.UpdateDeviceInfo(rotatorInfo);
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            AssertEqual(1, events.Count(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"));
+            AssertEqual(1, events.Count(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"));
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task IdleProfileResetsPreserveCallbackOnlyMotionCapture()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                8,
+                -9,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTo = new global::NINA.Astrometry.Coordinates(
+                9,
+                -8,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTo,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 16f,
+                MechanicalPosition = 26f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            provider.RevokeProfileAccess();
+            provider.Reset();
+            provider.ResumeEventCapture();
+
+            telescopeInfo.Coordinates = mountTo;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTo));
+            rotatorInfo.Position = 36f;
+            rotatorInfo.MechanicalPosition = 46f;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(16f, 36f));
+
+            var events = await SnapshotEvents(provider);
+            var mountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var mountEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertTrue(mountStart.GetProperty("ObservedInProgress").GetBoolean());
+            AssertEqual(
+                mountStart.GetProperty("MotionId").GetInt64(),
+                mountEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_slewed", mountEnd.GetProperty("EndDetection").GetString());
+
+            var rotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var rotatorEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertTrue(rotatorStart.GetProperty("ObservedInProgress").GetBoolean());
+            AssertEqual(
+                rotatorStart.GetProperty("MotionId").GetInt64(),
+                rotatorEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_moved", rotatorEnd.GetProperty("EndDetection").GetString());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task CanceledMountMotionDoesNotSwallowDifferentCallbackOnlyMotion()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { SlewMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var firstFrom = new global::NINA.Astrometry.Coordinates(
+                1.25,
+                -12.5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var firstTarget = new global::NINA.Astrometry.Coordinates(
+                2.5,
+                -7.5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var firstMeasuredEnd = new global::NINA.Astrometry.Coordinates(
+                2.45,
+                -7.55,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = firstFrom,
+                TargetCoordinates = firstTarget,
+                Slewing = false,
+            };
+            provider.UpdateDeviceInfo(info);
+
+            // Motion A stops without a native completion. Its state fallback
+            // must quarantine only A's callback signature.
+            info.Slewing = true;
+            info.Coordinates = firstMeasuredEnd;
+            info.Slewing = false;
+            var afterFirstMotion = await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var firstStart = afterFirstMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var firstEnd = afterFirstMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                firstStart.GetProperty("MotionId").GetInt64(),
+                firstEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", firstEnd.GetProperty("EndDetection").GetString());
+
+            // Motion B was too fast for a state edge and has a deliberately
+            // different target. A's quarantine must not consume B's callback.
+            var secondFrom = new global::NINA.Astrometry.Coordinates(
+                8.5,
+                31.25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var secondTarget = new global::NINA.Astrometry.Coordinates(
+                10.75,
+                44.5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var secondMeasuredEnd = new global::NINA.Astrometry.Coordinates(
+                10.7,
+                44.45,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            info.Coordinates = secondMeasuredEnd;
+            info.TargetCoordinates = secondTarget;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    secondFrom,
+                    secondTarget));
+
+            var events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 2),
+                ("MOUNT-SLEWED", 2));
+            var recoveredStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED"
+                && item.GetProperty("MotionId").GetInt64()
+                    == recoveredStart.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_slewed", recoveredEnd.GetProperty("EndDetection").GetString());
+            AssertTrue(recoveredEnd.GetProperty("ObservedInProgress").GetBoolean());
+            AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
+            AssertEqual(
+                10.75d,
+                recoveredEnd.GetProperty("Target").GetProperty("RA").GetDouble());
+            AssertEqual(
+                10.7d,
+                recoveredEnd.GetProperty("To").GetProperty("RA").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task StateDerivedMountCompletionsRetainNativeFingerprint()
+    {
+        var now = new DateTimeOffset(2026, 8, 31, 0, 0, 0, TimeSpan.Zero);
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { SlewMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery,
+            utcNow: () => now);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var from = new global::NINA.Astrometry.Coordinates(
+                2.25,
+                -18,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var target = new global::NINA.Astrometry.Coordinates(
+                4.75,
+                -6,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var measuredEnd = new global::NINA.Astrometry.Coordinates(
+                4.7,
+                -6.05,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = from,
+                TargetCoordinates = target,
+                Slewing = false,
+            };
+            provider.UpdateDeviceInfo(info);
+            info.Slewing = true;
+            info.Coordinates = measuredEnd;
+            info.Slewing = false;
+
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+
+            // Dome synchronization can delay N.I.N.A.'s native Slewed callback
+            // by minutes. The state-derived pair must retain its fingerprint
+            // well beyond the short generic quarantine window.
+            now = now.AddMinutes(2);
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    from,
+                    target));
+
+            var events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 1));
+            var start = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var end = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                start.GetProperty("MotionId").GetInt64(),
+                end.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task CanceledRotatorMotionDoesNotSwallowDifferentCallbackOnlyMotion()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 10f,
+                MechanicalPosition = 20f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(info);
+
+            // Motion A stops without a native completion. Its state fallback
+            // must quarantine only A's From/To signature.
+            info.IsMoving = true;
+            info.Position = 30f;
+            info.IsMoving = false;
+            info.MechanicalPosition = 40f;
+            provider.UpdateDeviceInfo(info);
+            var afterFirstMotion = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var firstStart = afterFirstMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var firstEnd = afterFirstMotion.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                firstStart.GetProperty("MotionId").GetInt64(),
+                firstEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", firstEnd.GetProperty("EndDetection").GetString());
+
+            // Motion B is callback-only and intentionally differs from A.
+            info.Position = 90f;
+            info.MechanicalPosition = 100f;
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(70f, 90f));
+
+            var events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("ROTATOR-MOVE-STARTED", 2),
+                ("ROTATOR-MOVED", 2));
+            var recoveredStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED"
+                && item.GetProperty("MotionId").GetInt64()
+                    == recoveredStart.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_moved", recoveredEnd.GetProperty("EndDetection").GetString());
+            AssertTrue(recoveredEnd.GetProperty("ObservedInProgress").GetBoolean());
+            AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
+            AssertEqual(70d, recoveredEnd.GetProperty("From").GetDouble());
+            AssertEqual(90d, recoveredEnd.GetProperty("To").GetDouble());
+            AssertEqual(100d, recoveredEnd.GetProperty("MechanicalTo").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task RotatorCompletionTombstonesDoNotExpire()
+    {
+        // A normal state-derived end leaves a scoped From/To fingerprint for
+        // N.I.N.A.'s native callback, whose driver-controlled delay is unbounded.
+        {
+            var now = new DateTimeOffset(2026, 8, 31, 3, 0, 0, TimeSpan.Zero);
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                utcNow: () => now);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 10f,
+                    MechanicalPosition = 20f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                info.Position = 40f;
+                info.IsMoving = false;
+                info.MechanicalPosition = 50f;
+                provider.UpdateDeviceInfo(info);
+
+                await WaitForNamedEventCountAsync(
+                    provider,
+                    "ROTATOR-MOVED",
+                    expectedCount: 1,
+                    TimeSpan.FromSeconds(2));
+
+                now = now.AddDays(1);
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(10f, 40f));
+
+                var events = await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 1),
+                    ("ROTATOR-MOVED", 1));
+                var start = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+                var end = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+                AssertEqual(
+                    start.GetProperty("MotionId").GetInt64(),
+                    end.GetProperty("MotionId").GetInt64());
+                AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        // If the plugin first observes a rotator already moving, there is no
+        // trustworthy origin for a scoped fingerprint. The off/on boundary's
+        // unscoped privacy tombstone must likewise survive until consumed.
+        {
+            var now = new DateTimeOffset(2026, 8, 31, 4, 0, 0, TimeSpan.Zero);
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                utcNow: () => now);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 15f,
+                    MechanicalPosition = 25f,
+                    IsMoving = true,
+                };
+                provider.UpdateDeviceInfo(info);
+
+                var enabled = delivery.Current;
+                ApplyEventDeliveryChange(
+                    provider,
+                    delivery,
+                    enabled with { RotatorMotion = false });
+                ApplyEventDeliveryChange(provider, delivery, enabled);
+
+                info.Position = 45f;
+                info.MechanicalPosition = 55f;
+                info.IsMoving = false;
+                provider.UpdateDeviceInfo(info);
+
+                now = now.AddDays(1);
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(15f, 45f));
+
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 0),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+    }
+
+    private static async Task RotatorCompletionWaitsForFinalDeviceInfoBroadcast()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 11f,
+                MechanicalPosition = 21f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(info);
+
+            info.IsMoving = true;
+            info.Position = 31f;
+            info.IsMoving = false;
+
+            // The 250 ms completion grace is not itself enough: N.I.N.A.'s
+            // polling loop has not yet published all of the final fields.
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            info.MechanicalPosition = 41f;
+            provider.UpdateDeviceInfo(info);
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var start = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var end = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                start.GetProperty("MotionId").GetInt64(),
+                end.GetProperty("MotionId").GetInt64());
+            AssertEqual(31d, end.GetProperty("To").GetDouble());
+            AssertEqual(41d, end.GetProperty("MechanicalTo").GetDouble());
+            AssertEqual(41d, end.GetProperty("MechanicalPosition").GetDouble());
+            AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task MotionBoundaryTombstonesBeginWhenLongRunningMotionStops()
+    {
+        // A local transmission-policy boundary must retain the fact that the
+        // physical movement is still running. The callback quarantine begins
+        // at the later stop edge, not when consent changed.
+        {
+            var now = new DateTimeOffset(2026, 8, 31, 1, 0, 0, TimeSpan.Zero);
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with
+                {
+                    SlewMotion = true,
+                    RotatorMotion = true,
+                });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                utcNow: () => now);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var mountFrom = new global::NINA.Astrometry.Coordinates(
+                    1.5,
+                    -12,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var mountTarget = new global::NINA.Astrometry.Coordinates(
+                    3.5,
+                    -4,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = mountFrom,
+                    TargetCoordinates = mountTarget,
+                    Slewing = false,
+                };
+                var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 12f,
+                    MechanicalPosition = 22f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(telescopeInfo);
+                provider.UpdateDeviceInfo(rotatorInfo);
+                telescopeInfo.Slewing = true;
+                rotatorInfo.IsMoving = true;
+
+                var beforeBoundary = await SnapshotEvents(provider);
+                AssertEqual(1, beforeBoundary.Count(item =>
+                    item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"));
+                AssertEqual(1, beforeBoundary.Count(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"));
+
+                var enabled = delivery.Current;
+                var disabled = enabled with
+                {
+                    SlewMotion = false,
+                    RotatorMotion = false,
+                };
+                ApplyEventDeliveryChange(provider, delivery, disabled);
+
+                // Exceed every completion-quarantine lifetime while both
+                // devices remain physically in motion, then re-enable before
+                // N.I.N.A. reports the stop.
+                now = now.AddMinutes(12);
+                ApplyEventDeliveryChange(provider, delivery, enabled);
+
+                telescopeInfo.Coordinates = mountTarget;
+                telescopeInfo.Slewing = false;
+                rotatorInfo.Position = 42f;
+                rotatorInfo.MechanicalPosition = 52f;
+                rotatorInfo.IsMoving = false;
+                provider.UpdateDeviceInfo(rotatorInfo);
+
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "TelescopeSlewed",
+                    new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                        mountFrom,
+                        mountTarget));
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(12f, 42f));
+
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("MOUNT-SLEW-STARTED", 1),
+                    ("MOUNT-SLEWED", 0),
+                    ("ROTATOR-MOVE-STARTED", 1),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        // A profile boundary has the same requirement, but Reset clears the
+        // predecessor history. No event from that predecessor may appear in
+        // the successor profile after its eventual stop and native callback.
+        {
+            var now = new DateTimeOffset(2026, 8, 31, 2, 0, 0, TimeSpan.Zero);
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with
+                {
+                    SlewMotion = true,
+                    RotatorMotion = true,
+                });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery,
+                utcNow: () => now);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var mountFrom = new global::NINA.Astrometry.Coordinates(
+                    5.5,
+                    16,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var mountTarget = new global::NINA.Astrometry.Coordinates(
+                    7.5,
+                    24,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = mountFrom,
+                    TargetCoordinates = mountTarget,
+                    Slewing = false,
+                };
+                var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 18f,
+                    MechanicalPosition = 28f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(telescopeInfo);
+                provider.UpdateDeviceInfo(rotatorInfo);
+                telescopeInfo.Slewing = true;
+                rotatorInfo.IsMoving = true;
+
+                provider.RevokeProfileAccess();
+                provider.Reset();
+                provider.ResumeEventCapture();
+
+                now = now.AddMinutes(12);
+                telescopeInfo.Coordinates = mountTarget;
+                telescopeInfo.Slewing = false;
+                rotatorInfo.Position = 48f;
+                rotatorInfo.MechanicalPosition = 58f;
+                rotatorInfo.IsMoving = false;
+                provider.UpdateDeviceInfo(rotatorInfo);
+
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "TelescopeSlewed",
+                    new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                        mountFrom,
+                        mountTarget));
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(18f, 48f));
+
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("MOUNT-SLEW-STARTED", 0),
+                    ("MOUNT-SLEWED", 0),
+                    ("ROTATOR-MOVE-STARTED", 0),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+    }
+
+    private static async Task BoundaryCallbacksRemainSuppressedUntilIdle()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                1,
+                -10,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTarget = new global::NINA.Astrometry.Coordinates(
+                3,
+                -5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTarget,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 14f,
+                MechanicalPosition = 24f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+
+            var enabled = delivery.Current;
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                enabled with { SlewMotion = false, RotatorMotion = false });
+            ApplyEventDeliveryChange(provider, delivery, enabled);
+
+            // This predecessor callback arrives while N.I.N.A. still reports
+            // both devices moving. It must be suppressed without retiring the
+            // cross-boundary marker.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(14f, 44f));
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromMilliseconds(500),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            telescopeInfo.Coordinates = mountTarget;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.Position = 44f;
+            rotatorInfo.MechanicalPosition = 54f;
+            rotatorInfo.IsMoving = false;
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            // The observed idle edge now creates a scoped tombstone. A second
+            // callback from the same predecessor must also be suppressed.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(14f, 44f));
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            // Completing the boundary must also rebaseline the idle state so
+            // the next real movement gets a fresh, paired lifecycle.
+            var nextMountTarget = new global::NINA.Astrometry.Coordinates(
+                9,
+                30,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var nextMountEnd = new global::NINA.Astrometry.Coordinates(
+                8.95,
+                29.95,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            telescopeInfo.TargetCoordinates = nextMountTarget;
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+            telescopeInfo.Coordinates = nextMountEnd;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.Position = 74f;
+            rotatorInfo.MechanicalPosition = 84f;
+            rotatorInfo.IsMoving = false;
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 2),
+                ("MOUNT-SLEWED", 1),
+                ("ROTATOR-MOVE-STARTED", 2),
+                ("ROTATOR-MOVED", 1));
+            var nextMountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"
+                && item.GetProperty("Target").GetProperty("RA").GetDouble() == 9d);
+            var nextMountFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                nextMountStart.GetProperty("MotionId").GetInt64(),
+                nextMountFinished.GetProperty("MotionId").GetInt64());
+            var nextRotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                && item.GetProperty("Position").GetDouble() == 44d);
+            var nextRotatorFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                nextRotatorStart.GetProperty("MotionId").GetInt64(),
+                nextRotatorFinished.GetProperty("MotionId").GetInt64());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task IdleBoundaryCallbacksPermitSameSignatureSuccessors()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                5,
+                10,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTarget = new global::NINA.Astrometry.Coordinates(
+                7,
+                20,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTarget,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 16f,
+                MechanicalPosition = 26f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+
+            var enabled = delivery.Current;
+            ApplyEventDeliveryChange(
+                provider,
+                delivery,
+                enabled with { SlewMotion = false, RotatorMotion = false });
+            ApplyEventDeliveryChange(provider, delivery, enabled);
+
+            var telescopeObserverMethod = typeof(NinaDirectDataProvider).GetMethod(
+                "TelescopeInfoPropertyChanged",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Telescope motion observer was not found.");
+            var telescopeObserver = (System.ComponentModel.PropertyChangedEventHandler)
+                telescopeObserverMethod.CreateDelegate(
+                    typeof(System.ComponentModel.PropertyChangedEventHandler),
+                    provider);
+            var rotatorObserverMethod = typeof(NinaDirectDataProvider).GetMethod(
+                "RotatorInfoPropertyChanged",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Rotator motion observer was not found.");
+            var rotatorObserver = (System.ComponentModel.PropertyChangedEventHandler)
+                rotatorObserverMethod.CreateDelegate(
+                    typeof(System.ComponentModel.PropertyChangedEventHandler),
+                    provider);
+
+            // Simulate the one missed PropertyChanged edge that a mediator
+            // callback must repair: the shared info objects are already idle,
+            // but the provider's cross-boundary marker is still active.
+            telescopeInfo.PropertyChanged -= telescopeObserver;
+            rotatorInfo.PropertyChanged -= rotatorObserver;
+            try
+            {
+                telescopeInfo.Coordinates = mountTarget;
+                telescopeInfo.Slewing = false;
+                rotatorInfo.Position = 46f;
+                rotatorInfo.MechanicalPosition = 56f;
+                rotatorInfo.IsMoving = false;
+            }
+            finally
+            {
+                telescopeInfo.PropertyChanged += telescopeObserver;
+                rotatorInfo.PropertyChanged += rotatorObserver;
+            }
+
+            // The first callback belongs to the boundary-spanning predecessor.
+            // Seeing idle retires the marker and its just-created tombstone.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(16f, 46f));
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromMilliseconds(500),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            // A later fast motion may legitimately reuse the same signature.
+            // With no observable state edge, its callback must be recovered.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    mountFrom,
+                    mountTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(16f, 46f));
+            var events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 2),
+                ("MOUNT-SLEWED", 1),
+                ("ROTATOR-MOVE-STARTED", 2),
+                ("ROTATOR-MOVED", 1));
+
+            var recoveredMountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredMountEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                recoveredMountStart.GetProperty("MotionId").GetInt64(),
+                recoveredMountEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_slewed", recoveredMountEnd.GetProperty("EndDetection").GetString());
+            AssertFalse(recoveredMountEnd.TryGetProperty("DurationSeconds", out _));
+
+            var recoveredRotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                && item.TryGetProperty("ObservedInProgress", out var observed)
+                && observed.GetBoolean());
+            var recoveredRotatorEnd = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                recoveredRotatorStart.GetProperty("MotionId").GetInt64(),
+                recoveredRotatorEnd.GetProperty("MotionId").GetInt64());
+            AssertEqual("nina_moved", recoveredRotatorEnd.GetProperty("EndDetection").GetString());
+            AssertFalse(recoveredRotatorEnd.TryGetProperty("DurationSeconds", out _));
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task NonmatchingCallbacksCannotTerminateActiveMotions()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                2,
+                -20,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTarget = new global::NINA.Astrometry.Coordinates(
+                4,
+                -10,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountEnd = new global::NINA.Astrometry.Coordinates(
+                3.95,
+                -10.05,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var unrelatedFrom = new global::NINA.Astrometry.Coordinates(
+                11,
+                35,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var unrelatedTarget = new global::NINA.Astrometry.Coordinates(
+                13,
+                45,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTarget,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 15f,
+                MechanicalPosition = 25f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    unrelatedFrom,
+                    unrelatedTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(215f, 235f));
+
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromMilliseconds(500),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            telescopeInfo.Coordinates = mountEnd;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.Position = 55f;
+            rotatorInfo.MechanicalPosition = 65f;
+            rotatorInfo.IsMoving = false;
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 1),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 1));
+
+            var mountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var mountFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                mountStart.GetProperty("MotionId").GetInt64(),
+                mountFinished.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", mountFinished.GetProperty("EndDetection").GetString());
+            AssertEqual(
+                4d,
+                mountFinished.GetProperty("Target").GetProperty("RA").GetDouble());
+            AssertEqual(
+                3.95d,
+                mountFinished.GetProperty("To").GetProperty("RA").GetDouble());
+
+            var rotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var rotatorFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                rotatorStart.GetProperty("MotionId").GetInt64(),
+                rotatorFinished.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", rotatorFinished.GetProperty("EndDetection").GetString());
+            AssertEqual(15d, rotatorFinished.GetProperty("From").GetDouble());
+            AssertEqual(55d, rotatorFinished.GetProperty("To").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task NonmatchingCallbacksCannotClearPendingMotionEnds()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var mountFrom = new global::NINA.Astrometry.Coordinates(
+                6,
+                5,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountTarget = new global::NINA.Astrometry.Coordinates(
+                8,
+                15,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var mountEnd = new global::NINA.Astrometry.Coordinates(
+                7.95,
+                14.95,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var unrelatedFrom = new global::NINA.Astrometry.Coordinates(
+                14,
+                -35,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var unrelatedTarget = new global::NINA.Astrometry.Coordinates(
+                16,
+                -25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = mountFrom,
+                TargetCoordinates = mountTarget,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 20f,
+                MechanicalPosition = 30f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            telescopeInfo.Slewing = true;
+            telescopeInfo.Coordinates = mountEnd;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.IsMoving = true;
+            rotatorInfo.Position = 60f;
+            rotatorInfo.IsMoving = false;
+
+            // Both state ends are still in their grace periods. An unrelated
+            // callback must leave each pending end intact for its fallback.
+            await InvokeProviderCallbackAsync(
+                provider,
+                "TelescopeSlewed",
+                new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                    unrelatedFrom,
+                    unrelatedTarget));
+            await InvokeProviderCallbackAsync(
+                provider,
+                "RotatorMoved",
+                new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(20f, 260f));
+
+            rotatorInfo.MechanicalPosition = 70f;
+            provider.UpdateDeviceInfo(rotatorInfo);
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 1),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 1));
+
+            var mountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+            var mountFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                mountStart.GetProperty("MotionId").GetInt64(),
+                mountFinished.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", mountFinished.GetProperty("EndDetection").GetString());
+            AssertEqual(
+                8d,
+                mountFinished.GetProperty("Target").GetProperty("RA").GetDouble());
+            AssertEqual(
+                7.95d,
+                mountFinished.GetProperty("To").GetProperty("RA").GetDouble());
+
+            var rotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+            var rotatorFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                rotatorStart.GetProperty("MotionId").GetInt64(),
+                rotatorFinished.GetProperty("MotionId").GetInt64());
+            AssertEqual("motion_state", rotatorFinished.GetProperty("EndDetection").GetString());
+            AssertEqual(20d, rotatorFinished.GetProperty("From").GetDouble());
+            AssertEqual(60d, rotatorFinished.GetProperty("To").GetDouble());
+            AssertEqual(70d, rotatorFinished.GetProperty("MechanicalTo").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task StoppedProvidersCannotReattachMotionObservers()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+
+        var originalTelescope = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+        {
+            Connected = true,
+            Coordinates = new global::NINA.Astrometry.Coordinates(
+                1,
+                1,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours),
+            TargetCoordinates = new global::NINA.Astrometry.Coordinates(
+                2,
+                2,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours),
+            Slewing = false,
+        };
+        var originalRotator = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+        {
+            Connected = true,
+            Position = 10f,
+            MechanicalPosition = 20f,
+            IsMoving = false,
+        };
+        provider.UpdateDeviceInfo(originalTelescope);
+        provider.UpdateDeviceInfo(originalRotator);
+
+        SetProviderStarted(provider, false);
+        var detach = typeof(NinaDirectDataProvider).GetMethod(
+            "DetachMotionObservers",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Motion observer detach method was not found.");
+        detach.Invoke(provider, null);
+
+        var telescopeField = typeof(NinaDirectDataProvider).GetField(
+            "observedTelescopeInfo",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Observed telescope field was not found.");
+        var rotatorField = typeof(NinaDirectDataProvider).GetField(
+            "observedRotatorInfo",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Observed rotator field was not found.");
+        AssertTrue(telescopeField.GetValue(provider) is null);
+        AssertTrue(rotatorField.GetValue(provider) is null);
+
+        var successorTelescope = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+        {
+            Connected = true,
+            Coordinates = originalTelescope.Coordinates,
+            TargetCoordinates = originalTelescope.TargetCoordinates,
+            Slewing = false,
+        };
+        var successorRotator = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+        {
+            Connected = true,
+            Position = 30f,
+            MechanicalPosition = 40f,
+            IsMoving = false,
+        };
+
+        // These mediator broadcasts race after teardown. The stopped guard
+        // must reject them before changing observer identity or subscribing.
+        provider.UpdateDeviceInfo(successorTelescope);
+        provider.UpdateDeviceInfo(successorRotator);
+        AssertTrue(telescopeField.GetValue(provider) is null);
+        AssertTrue(rotatorField.GetValue(provider) is null);
+
+        originalTelescope.Slewing = true;
+        originalTelescope.Slewing = false;
+        originalRotator.IsMoving = true;
+        originalRotator.IsMoving = false;
+        successorTelescope.Slewing = true;
+        successorTelescope.Slewing = false;
+        successorRotator.IsMoving = true;
+        successorRotator.IsMoving = false;
+
+        await AssertNamedEventCountsRemainAsync(
+            provider,
+            TimeSpan.FromMilliseconds(500),
+            ("MOUNT-SLEW-STARTED", 0),
+            ("MOUNT-SLEWED", 0),
+            ("ROTATOR-MOVE-STARTED", 0),
+            ("ROTATOR-MOVED", 0));
+    }
+
+    private static async Task ReconnectToIdleBoundariesPreserveNextDistinctMotion()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with
+            {
+                SlewMotion = true,
+                RotatorMotion = true,
+            });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var firstMountFrom = new global::NINA.Astrometry.Coordinates(
+                1,
+                -30,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var firstMountTarget = new global::NINA.Astrometry.Coordinates(
+                3,
+                -20,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var telescopeInfo = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+            {
+                Connected = true,
+                Coordinates = firstMountFrom,
+                TargetCoordinates = firstMountTarget,
+                Slewing = false,
+            };
+            var rotatorInfo = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+            {
+                Connected = true,
+                Position = 10f,
+                MechanicalPosition = 20f,
+                IsMoving = false,
+            };
+            provider.UpdateDeviceInfo(telescopeInfo);
+            provider.UpdateDeviceInfo(rotatorInfo);
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+
+            // Disconnect while motion is active, then let the shared info
+            // objects become idle before their reconnect notifications.
+            telescopeInfo.Connected = false;
+            rotatorInfo.Connected = false;
+            telescopeInfo.Coordinates = firstMountTarget;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.Position = 40f;
+            rotatorInfo.MechanicalPosition = 50f;
+            rotatorInfo.IsMoving = false;
+            telescopeInfo.Connected = true;
+            rotatorInfo.Connected = true;
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromMilliseconds(500),
+                ("MOUNT-SLEW-STARTED", 1),
+                ("MOUNT-SLEWED", 0),
+                ("ROTATOR-MOVE-STARTED", 1),
+                ("ROTATOR-MOVED", 0));
+
+            var nextMountTarget = new global::NINA.Astrometry.Coordinates(
+                9,
+                25,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            var nextMountEnd = new global::NINA.Astrometry.Coordinates(
+                8.95,
+                24.95,
+                global::NINA.Astrometry.Epoch.J2000,
+                global::NINA.Astrometry.Coordinates.RAType.Hours);
+            telescopeInfo.TargetCoordinates = nextMountTarget;
+            telescopeInfo.Slewing = true;
+            rotatorInfo.IsMoving = true;
+            telescopeInfo.Coordinates = nextMountEnd;
+            telescopeInfo.Slewing = false;
+            rotatorInfo.Position = 80f;
+            rotatorInfo.MechanicalPosition = 90f;
+            rotatorInfo.IsMoving = false;
+            provider.UpdateDeviceInfo(rotatorInfo);
+
+            await WaitForNamedEventCountAsync(
+                provider,
+                "MOUNT-SLEWED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            var events = await WaitForNamedEventCountAsync(
+                provider,
+                "ROTATOR-MOVED",
+                expectedCount: 1,
+                TimeSpan.FromSeconds(2));
+            events = await AssertNamedEventCountsRemainAsync(
+                provider,
+                TimeSpan.FromSeconds(1),
+                ("MOUNT-SLEW-STARTED", 2),
+                ("MOUNT-SLEWED", 1),
+                ("ROTATOR-MOVE-STARTED", 2),
+                ("ROTATOR-MOVED", 1));
+
+            var nextMountStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"
+                && item.GetProperty("Target").GetProperty("RA").GetDouble() == 9d);
+            var nextMountFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+            AssertEqual(
+                nextMountStart.GetProperty("MotionId").GetInt64(),
+                nextMountFinished.GetProperty("MotionId").GetInt64());
+            var nextRotatorStart = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                && item.GetProperty("Position").GetDouble() == 40d);
+            var nextRotatorFinished = events.Single(item =>
+                item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+            AssertEqual(
+                nextRotatorStart.GetProperty("MotionId").GetInt64(),
+                nextRotatorFinished.GetProperty("MotionId").GetInt64());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task MotionCompletionsCannotCrossBoundaries()
+    {
+        // A movement first observed while sharing is disabled cannot acquire
+        // a synthetic completion merely because sharing is enabled later.
+        {
+            var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var from = new global::NINA.Astrometry.Coordinates(
+                    1,
+                    2,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var to = new global::NINA.Astrometry.Coordinates(
+                    3,
+                    4,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = from,
+                    TargetCoordinates = to,
+                    Slewing = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.Slewing = true;
+                ApplyEventDeliveryChange(
+                    provider,
+                    delivery,
+                    delivery.Current with { SlewMotion = true });
+                info.Coordinates = to;
+                info.Slewing = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "TelescopeSlewed",
+                    new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                        from,
+                        to));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("MOUNT-SLEW-STARTED", 0),
+                    ("MOUNT-SLEWED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        // Profile rotation clears the start and quarantines the predecessor's
+        // late native completion before the successor resumes capture.
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { SlewMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var from = new global::NINA.Astrometry.Coordinates(
+                    5,
+                    6,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var to = new global::NINA.Astrometry.Coordinates(
+                    7,
+                    8,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = from,
+                    TargetCoordinates = to,
+                    Slewing = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.Slewing = true;
+                AssertEqual(1, (await SnapshotEvents(provider)).Count(item =>
+                    item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED"));
+
+                provider.RevokeProfileAccess();
+                provider.Reset();
+                provider.ResumeEventCapture();
+                info.Coordinates = to;
+                info.Slewing = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "TelescopeSlewed",
+                    new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                        from,
+                        to));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("MOUNT-SLEW-STARTED", 0),
+                    ("MOUNT-SLEWED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        {
+            var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 12f,
+                    MechanicalPosition = 22f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                ApplyEventDeliveryChange(
+                    provider,
+                    delivery,
+                    delivery.Current with { RotatorMotion = true });
+                info.Position = 32f;
+                info.MechanicalPosition = 42f;
+                info.IsMoving = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(12f, 32f));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 0),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 14f,
+                    MechanicalPosition = 24f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                AssertEqual(1, (await SnapshotEvents(provider)).Count(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"));
+
+                provider.RevokeProfileAccess();
+                provider.Reset();
+                provider.ResumeEventCapture();
+                info.Position = 34f;
+                info.MechanicalPosition = 44f;
+                info.IsMoving = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(14f, 34f));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 0),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        // A hardware disconnect terminates correlation without inventing an
+        // end event when a delayed mediator callback arrives.
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { SlewMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var from = new global::NINA.Astrometry.Coordinates(
+                    9,
+                    10,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var to = new global::NINA.Astrometry.Coordinates(
+                    11,
+                    12,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = from,
+                    TargetCoordinates = to,
+                    Slewing = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.Slewing = true;
+                info.Connected = false;
+                info.Slewing = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "TelescopeSlewed",
+                    new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                        from,
+                        to));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("MOUNT-SLEW-STARTED", 1),
+                    ("MOUNT-SLEWED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 15,
+                    MechanicalPosition = 25,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                info.Connected = false;
+                info.Position = 35;
+                info.IsMoving = false;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(15f, 35f));
+                await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 1),
+                    ("ROTATOR-MOVED", 0));
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+    }
+
+    private static async Task MotionPoliciesDoNotResetEachOther()
+    {
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with
+                {
+                    SlewMotion = true,
+                    RotatorMotion = true,
+                });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var from = new global::NINA.Astrometry.Coordinates(
+                    1.5,
+                    -2.5,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var to = new global::NINA.Astrometry.Coordinates(
+                    2.5,
+                    -1.5,
+                    global::NINA.Astrometry.Epoch.J2000,
+                    global::NINA.Astrometry.Coordinates.RAType.Hours);
+                var info = new global::NINA.Equipment.Equipment.MyTelescope.TelescopeInfo
+                {
+                    Connected = true,
+                    Coordinates = from,
+                    TargetCoordinates = to,
+                    Slewing = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.Slewing = true;
+                ApplyEventDeliveryChange(
+                    provider,
+                    delivery,
+                    delivery.Current with { RotatorMotion = false });
+                info.Coordinates = to;
+                info.Slewing = false;
+
+                var events = await WaitForNamedEventCountAsync(
+                    provider,
+                    "MOUNT-SLEWED",
+                    expectedCount: 1,
+                    TimeSpan.FromSeconds(2));
+                var start = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+                var end = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
+                AssertEqual(
+                    start.GetProperty("MotionId").GetInt64(),
+                    end.GetProperty("MotionId").GetInt64());
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with
+                {
+                    SlewMotion = true,
+                    RotatorMotion = true,
+                });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 20,
+                    MechanicalPosition = 30,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                ApplyEventDeliveryChange(
+                    provider,
+                    delivery,
+                    delivery.Current with { SlewMotion = false });
+                info.Position = 40;
+                info.MechanicalPosition = 50;
+                info.IsMoving = false;
+                provider.UpdateDeviceInfo(info);
+
+                var events = await WaitForNamedEventCountAsync(
+                    provider,
+                    "ROTATOR-MOVED",
+                    expectedCount: 1,
+                    TimeSpan.FromSeconds(2));
+                var start = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED");
+                var end = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVED");
+                AssertEqual(
+                    start.GetProperty("MotionId").GetInt64(),
+                    end.GetProperty("MotionId").GetInt64());
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+    }
+
+    private static async Task NativeLifecycleEventsUseStableConsentedPayloads()
+    {
+        var access = new DirectAccessPolicy(DirectAccessOptions.Default);
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { SlewMotion = true });
+        using var provider = CreateSecurityTestProvider(
+            access,
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
 
         var from = new global::NINA.Astrometry.Coordinates(
             4.5,
@@ -3910,7 +6481,10 @@ internal static class Program
         await InvokeProviderCallbackAsync(provider, "WeatherConnected", EventArgs.Empty);
 
         var redacted = await SnapshotEvents(provider);
-        AssertEqual(6, redacted.Length);
+        AssertEqual(7, redacted.Length);
+        var mountStart = redacted.Single(item =>
+            item.GetProperty("Event").GetString() == "MOUNT-SLEW-STARTED");
+        AssertTrue(mountStart.GetProperty("ObservedInProgress").GetBoolean());
         var mount = redacted.Single(item =>
             item.GetProperty("Event").GetString() == "MOUNT-SLEWED");
         AssertEqual(4.5d, mount.GetProperty("From").GetProperty("RA").GetDouble());
@@ -3957,6 +6531,11 @@ internal static class Program
             item.GetProperty("Event").GetString()!.EndsWith("-CONNECTED", StringComparison.Ordinal)));
         AssertTrue(connectionsWithheld.Any(item =>
             item.GetProperty("Event").GetString() == "DOME-SHUTTER-OPENED"));
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
     }
 
     private static async Task SequenceFailuresAreSafeAndTruthful()
@@ -4476,7 +7055,19 @@ internal static class Program
             methodName,
             BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException($"Provider callback '{methodName}' was not found.");
-        if (method.Invoke(provider, new object[] { provider, args }) is Task task)
+        object? result;
+        try
+        {
+            result = method.Invoke(provider, new object[] { provider, args });
+        }
+        catch (TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                .Capture(exception.InnerException)
+                .Throw();
+            throw;
+        }
+        if (result is Task task)
         {
             await task;
         }
@@ -8082,7 +10673,7 @@ internal static class Program
         catch (Exception exception)
         {
             failures++;
-            Console.Error.WriteLine($"FAIL: {name}: {exception.Message}");
+            Console.Error.WriteLine($"FAIL: {name}: {exception}");
         }
     }
 
@@ -8096,7 +10687,7 @@ internal static class Program
         catch (Exception exception)
         {
             failures++;
-            Console.Error.WriteLine($"FAIL: {name}: {exception.Message}");
+            Console.Error.WriteLine($"FAIL: {name}: {exception}");
         }
     }
 
@@ -8196,12 +10787,18 @@ internal static class Program
     {
         internal Guid Id { get; set; }
 
+        internal global::NINA.Profile.Interfaces.IPluginSettings? PluginSettings { get; set; }
+
         protected override object? Invoke(MethodInfo? method, object?[]? arguments)
         {
             return method?.Name switch
             {
                 "get_Id" => Id,
                 "set_Id" => Id = (Guid)arguments![0]!,
+                "get_PluginSettings" => PluginSettings
+                    ?? throw new InvalidOperationException("Plugin settings were not configured."),
+                "set_PluginSettings" => PluginSettings =
+                    (global::NINA.Profile.Interfaces.IPluginSettings)arguments![0]!,
                 "Dispose" => null,
                 _ => throw new NotSupportedException(
                     $"Unexpected active-profile operation '{method?.Name}'."),

@@ -1,5 +1,6 @@
 using Chatstronomy.NINA.Protocol;
 using Chatstronomy.NINA.Settings;
+using System.ComponentModel;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -28,6 +29,8 @@ using NINA.WPF.Base.Interfaces.Mediator;
 using NINA.WPF.Base.Interfaces.ViewModel;
 using NINA.WPF.Base.Utility.AutoFocus;
 using OxyPlot;
+using NinaRotatorInfo = NINA.Equipment.Equipment.MyRotator.RotatorInfo;
+using NinaTelescopeInfo = NINA.Equipment.Equipment.MyTelescope.TelescopeInfo;
 
 namespace Chatstronomy.NINA.Direct;
 
@@ -38,6 +41,8 @@ namespace Chatstronomy.NINA.Direct;
 /// </summary>
 internal sealed class NinaDirectDataProvider :
     INinaDirectDataProvider,
+    ITelescopeConsumer,
+    IRotatorConsumer,
     IFocuserConsumer,
     ISafetyMonitorConsumer,
     IWeatherDataConsumer,
@@ -52,7 +57,17 @@ internal sealed class NinaDirectDataProvider :
     /// let an evening of INFO chatter evict every real event, leaving the
     /// consumer's state reconstruction with nothing to read.
     private const int LogHistoryCapacity = 500;
+    private const int MotionCompletionQuarantineCapacity = 32;
     private static readonly TimeSpan WeatherChangeMinimumInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MotionCompletionGracePeriod = TimeSpan.FromMilliseconds(250);
+    // TelescopeVM can defer its Slewed callback until dome synchronization and
+    // settling finish under N.I.N.A.'s ten-minute operation timeout. Retain a
+    // state-derived completion for that whole callback window plus slack.
+    private static readonly TimeSpan MountCompletionQuarantineLifetime = TimeSpan.FromMinutes(11);
+    private static readonly TimeSpan RotatorBroadcastWaitTimeout = TimeSpan.FromSeconds(30);
+    private const double MountCompletionMatchToleranceDegrees = 1d / 60d;
+    private const double MountCompletionFromToleranceDegrees = 30d;
+    private const double RotatorCompletionMatchToleranceDegrees = 0.1d;
     private static readonly Regex LocalPathPattern = new(
         "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/(?:Users|home|var|tmp|opt)/)[^\"'\\r\\n]*",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -123,6 +138,7 @@ internal sealed class NinaDirectDataProvider :
     private readonly object weatherStateGate = new();
     private readonly object directSessionGate = new();
     private readonly object thumbnailGate = new();
+    private readonly object motionGate = new();
     private readonly string autofocusReportDirectory;
     private CancellationTokenSource? guideCommandStop;
     private CancellationTokenSource? cameraCommandStop;
@@ -161,6 +177,33 @@ internal sealed class NinaDirectDataProvider :
     private bool highWindSharingBlocked;
     private long guideStepId;
     private long commandGeneration;
+    private long motionId;
+    private long motionQuarantineId;
+    private long mountMotionEpoch;
+    private long rotatorMotionEpoch;
+    private NinaTelescopeInfo? observedTelescopeInfo;
+    private NinaRotatorInfo? observedRotatorInfo;
+    private bool telescopeMotionInitialized;
+    private bool rotatorMotionInitialized;
+    private bool telescopeWasSlewing;
+    private bool rotatorWasMoving;
+    private MountMotionSession? activeMountMotion;
+    private RotatorMotionSession? activeRotatorMotion;
+    private PendingMountMotionEnd? pendingMountMotionEnd;
+    private PendingRotatorMotionEnd? pendingRotatorMotionEnd;
+    private readonly List<MountCompletionQuarantine> mountCompletionQuarantine = [];
+    private readonly List<RotatorCompletionQuarantine> rotatorCompletionQuarantine = [];
+    private DateTimeOffset? unscopedMountCompletionQuarantineUntil;
+    private DateTimeOffset? unscopedRotatorCompletionQuarantineUntil;
+    private bool mountBoundaryMotionInProgress;
+    private MountCoordinateKey? mountBoundaryMotionFrom;
+    private MountCoordinateKey? mountBoundaryMotionTarget;
+    private bool rotatorBoundaryMotionInProgress;
+    private double? rotatorBoundaryMotionFrom;
+    private double? rotatorBoundaryMotionMechanicalFrom;
+    private long rotatorInfoBroadcastVersion;
+    private bool mountMotionSharingBlocked;
+    private bool rotatorMotionSharingBlocked;
     private ThumbnailWork? pendingThumbnail;
     private bool thumbnailWorkerActive;
     private long thumbnailWorkEpoch;
@@ -219,6 +262,8 @@ internal sealed class NinaDirectDataProvider :
         safetySharingBlocked = !eventDelivery.Current.Safety;
         weatherChangesSharingBlocked = !eventDelivery.Current.WeatherChanges;
         highWindSharingBlocked = !eventDelivery.Current.HighWindAlerts;
+        mountMotionSharingBlocked = !eventDelivery.Current.SlewMotion;
+        rotatorMotionSharingBlocked = !eventDelivery.Current.RotatorMotion;
         sequenceFailureCoverageBlocked = !NinaDirectSequenceSnapshot
             .HasCompleteSequenceFailureCoverage(eventDelivery.Current);
         this.autofocusReportDirectory = autofocusReportDirectory
@@ -238,6 +283,55 @@ internal sealed class NinaDirectDataProvider :
         long ImageCaptureGeneration,
         CancellationToken ProviderCancellation,
         CancellationToken ProfileCancellation);
+
+    private sealed record MountMotionSession(
+        long Id,
+        DateTimeOffset StartedAt,
+        Dictionary<string, object?> From,
+        Dictionary<string, object?>? Target,
+        MountCoordinateKey? FromKey,
+        MountCoordinateKey? TargetKey,
+        bool NativeCompletionObserved,
+        bool ObservedInProgress,
+        long HistoryGeneration,
+        long Epoch);
+
+    private sealed record RotatorMotionSession(
+        long Id,
+        DateTimeOffset StartedAt,
+        double? From,
+        double? MechanicalFrom,
+        bool NativeCompletionObserved,
+        bool ObservedInProgress,
+        long HistoryGeneration,
+        long Epoch);
+
+    private sealed record PendingMountMotionEnd(
+        MountMotionSession Session,
+        Dictionary<string, object?> To,
+        DateTimeOffset EndedAt);
+
+    private sealed record PendingRotatorMotionEnd(
+        RotatorMotionSession Session,
+        double? To,
+        double? MechanicalTo,
+        DateTimeOffset EndedAt,
+        long BroadcastVersionAtStop);
+
+    private sealed record MountCoordinateKey(double RightAscensionDegrees, double DeclinationDegrees);
+
+    private sealed record MountCompletionQuarantine(
+        long MotionId,
+        MountCoordinateKey Target,
+        MountCoordinateKey? From,
+        DateTimeOffset ExpiresAt);
+
+    private sealed record RotatorCompletionQuarantine(
+        long MotionId,
+        string EventName,
+        double? From,
+        double? To,
+        DateTimeOffset ExpiresAt);
 
     public DirectCapabilities Capabilities => new(
         EventHistory: true,
@@ -272,6 +366,13 @@ internal sealed class NinaDirectDataProvider :
         started = true;
         sequenceSubscriptionsPaused = false;
         eventCaptureStop = new CancellationTokenSource();
+        lock (motionGate)
+        {
+            // Stop() closes both publishers. A provider restarted by N.I.N.A.
+            // must reopen only the categories still enabled in this profile.
+            mountMotionSharingBlocked = !eventDelivery.Current.SlewMotion;
+            rotatorMotionSharingBlocked = !eventDelivery.Current.RotatorMotion;
+        }
 
         telescope.Connected += TelescopeConnected;
         telescope.Disconnected += TelescopeDisconnected;
@@ -281,6 +382,7 @@ internal sealed class NinaDirectDataProvider :
         telescope.Parked += TelescopeParked;
         telescope.Unparked += TelescopeUnparked;
         telescope.Slewed += TelescopeSlewed;
+        telescope.RegisterConsumer(this);
 
         camera.Connected += CameraConnected;
         camera.Disconnected += CameraDisconnected;
@@ -302,6 +404,7 @@ internal sealed class NinaDirectDataProvider :
         rotator.Moved += RotatorMoved;
         rotator.MovedMechanical += RotatorMovedMechanical;
         rotator.Synced += RotatorSynced;
+        rotator.RegisterConsumer(this);
 
         focuser.Connected += FocuserConnected;
         focuser.Disconnected += FocuserDisconnected;
@@ -446,6 +549,17 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        if (previous.SlewMotion != current.SlewMotion)
+        {
+            // A movement spanning a local transmission-policy boundary has no
+            // continuously consented provenance. Rebaseline without emitting
+            // a synthetic edge when the new setting becomes visible.
+            ResetMountMotionCaptureAtPolicyBoundary();
+        }
+        if (previous.RotatorMotion != current.RotatorMotion)
+        {
+            ResetRotatorMotionCaptureAtPolicyBoundary();
+        }
         var imagePolicyChanged = previous.Images != current.Images;
         lock (historyGenerationGate)
         {
@@ -557,6 +671,26 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        if (previous.SlewMotion != current.SlewMotion)
+        {
+            lock (motionGate)
+            {
+                mountMotionSharingBlocked = !current.SlewMotion;
+                telescopeMotionInitialized = observedTelescopeInfo is not null;
+                telescopeWasSlewing = observedTelescopeInfo?.Connected == true
+                    && observedTelescopeInfo.Slewing;
+            }
+        }
+        if (previous.RotatorMotion != current.RotatorMotion)
+        {
+            lock (motionGate)
+            {
+                rotatorMotionSharingBlocked = !current.RotatorMotion;
+                rotatorMotionInitialized = observedRotatorInfo is not null;
+                rotatorWasMoving = observedRotatorInfo?.Connected == true
+                    && observedRotatorInfo.IsMoving;
+            }
+        }
         if (previous.Autofocus != current.Autofocus)
         {
             lock (autofocusReportGate)
@@ -619,6 +753,12 @@ internal sealed class NinaDirectDataProvider :
 
     public void RevokeProfileAccess()
     {
+        // Close motion publication and the predecessor Direct session before
+        // any watcher stop that may wait for filesystem activity. Equipment
+        // property changes can continue on N.I.N.A.'s update thread while
+        // those independent producers drain.
+        ResetMotionCapture(blockSharing: true);
+        RotateDirectSession();
         // Stop background producers before advancing/clearing history. The
         // log tail can parse a predecessor line before Reset and invoke its
         // callback afterwards; Stop is a completion barrier for that task.
@@ -639,7 +779,6 @@ internal sealed class NinaDirectDataProvider :
         // trust revocation below. Keeping it separate lets event-policy
         // changes reconnect without cancelling accepted hardware operations
         // or an exact-run autofocus report capture.
-        RotateDirectSession();
         var previous = Interlocked.Exchange(
             ref profileSession,
             new CancellationTokenSource());
@@ -678,6 +817,7 @@ internal sealed class NinaDirectDataProvider :
         telescope.Parked -= TelescopeParked;
         telescope.Unparked -= TelescopeUnparked;
         telescope.Slewed -= TelescopeSlewed;
+        telescope.RemoveConsumer(this);
 
         camera.Connected -= CameraConnected;
         camera.Disconnected -= CameraDisconnected;
@@ -699,6 +839,8 @@ internal sealed class NinaDirectDataProvider :
         rotator.Moved -= RotatorMoved;
         rotator.MovedMechanical -= RotatorMovedMechanical;
         rotator.Synced -= RotatorSynced;
+        rotator.RemoveConsumer(this);
+        DetachMotionObservers();
 
         focuser.Connected -= FocuserConnected;
         focuser.Disconnected -= FocuserDisconnected;
@@ -763,6 +905,9 @@ internal sealed class NinaDirectDataProvider :
     public void Reset()
     {
         CancelPendingThumbnailWork();
+        // Keep motion closed until the new profile's history generation,
+        // delivery policy, and state baselines have all been rebuilt.
+        ResetMotionCapture(blockSharing: true);
         PauseSequenceSubscriptions();
         lock (sequenceGate)
         {
@@ -819,6 +964,17 @@ internal sealed class NinaDirectDataProvider :
             PublishCurrentWeatherBaseline();
         }
         ResumeSequenceSubscriptions();
+        lock (motionGate)
+        {
+            mountMotionSharingBlocked = !eventDelivery.Current.SlewMotion;
+            rotatorMotionSharingBlocked = !eventDelivery.Current.RotatorMotion;
+            telescopeMotionInitialized = observedTelescopeInfo is not null;
+            telescopeWasSlewing = observedTelescopeInfo?.Connected == true
+                && observedTelescopeInfo.Slewing;
+            rotatorMotionInitialized = observedRotatorInfo is not null;
+            rotatorWasMoving = observedRotatorInfo?.Connected == true
+                && observedRotatorInfo.IsMoving;
+        }
     }
 
     private long CaptureHistoryGeneration() => Volatile.Read(ref historyGeneration);
@@ -1140,6 +1296,1161 @@ internal sealed class NinaDirectDataProvider :
     }
 
     public void Dispose() => Stop();
+
+    public void UpdateDeviceInfo(NinaTelescopeInfo deviceInfo)
+    {
+        if (deviceInfo is null)
+        {
+            return;
+        }
+
+        try
+        {
+            lock (motionGate)
+            {
+                if (!started)
+                {
+                    return;
+                }
+                if (!ReferenceEquals(observedTelescopeInfo, deviceInfo))
+                {
+                    QuarantineCurrentMountMotionLocked(
+                        includeUnscoped: telescopeWasSlewing);
+                    if (observedTelescopeInfo is not null)
+                    {
+                        observedTelescopeInfo.PropertyChanged -= TelescopeInfoPropertyChanged;
+                    }
+                    observedTelescopeInfo = deviceInfo;
+                    observedTelescopeInfo.PropertyChanged += TelescopeInfoPropertyChanged;
+                    telescopeMotionInitialized = false;
+                    activeMountMotion = null;
+                    pendingMountMotionEnd = null;
+                    mountMotionEpoch++;
+                }
+            }
+            ObserveTelescopeMotion(deviceInfo);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("mount");
+        }
+    }
+
+    public void UpdateDeviceInfo(NinaRotatorInfo deviceInfo)
+    {
+        if (deviceInfo is null)
+        {
+            return;
+        }
+
+        try
+        {
+            lock (motionGate)
+            {
+                if (!started)
+                {
+                    return;
+                }
+                rotatorInfoBroadcastVersion++;
+                if (!ReferenceEquals(observedRotatorInfo, deviceInfo))
+                {
+                    QuarantineCurrentRotatorMotionLocked(
+                        includeUnscoped: rotatorWasMoving);
+                    if (observedRotatorInfo is not null)
+                    {
+                        observedRotatorInfo.PropertyChanged -= RotatorInfoPropertyChanged;
+                    }
+                    observedRotatorInfo = deviceInfo;
+                    observedRotatorInfo.PropertyChanged += RotatorInfoPropertyChanged;
+                    rotatorMotionInitialized = false;
+                    activeRotatorMotion = null;
+                    pendingRotatorMotionEnd = null;
+                    rotatorMotionEpoch++;
+                }
+            }
+            ObserveRotatorMotion(deviceInfo);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("rotator");
+        }
+    }
+
+    private void TelescopeInfoPropertyChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (sender is NinaTelescopeInfo info
+            && (string.IsNullOrEmpty(args.PropertyName)
+                || args.PropertyName == nameof(NinaTelescopeInfo.Slewing)
+                || args.PropertyName == nameof(NinaTelescopeInfo.Connected)))
+        {
+            TryObserveTelescopeMotion(info);
+        }
+    }
+
+    private void RotatorInfoPropertyChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (sender is not NinaRotatorInfo info)
+        {
+            return;
+        }
+        if (args.PropertyName == nameof(NinaRotatorInfo.MechanicalPosition)
+            && !info.IsMoving)
+        {
+            // N.I.N.A.'s polling loop assigns MechanicalPosition after
+            // IsMoving. Treat that property edge as a completed-field barrier;
+            // the following mediator broadcast supplies the same barrier when
+            // the mechanical value did not change.
+            lock (motionGate)
+            {
+                rotatorInfoBroadcastVersion++;
+            }
+        }
+        if (string.IsNullOrEmpty(args.PropertyName)
+            || args.PropertyName == nameof(NinaRotatorInfo.IsMoving)
+            || args.PropertyName == nameof(NinaRotatorInfo.Connected)
+            || args.PropertyName == nameof(NinaRotatorInfo.MechanicalPosition))
+        {
+            TryObserveRotatorMotion(info);
+        }
+    }
+
+    private void TryObserveTelescopeMotion(NinaTelescopeInfo info)
+    {
+        try
+        {
+            ObserveTelescopeMotion(info);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("mount");
+        }
+    }
+
+    private void TryObserveRotatorMotion(NinaRotatorInfo info)
+    {
+        try
+        {
+            ObserveRotatorMotion(info);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("rotator");
+        }
+    }
+
+    private static void LogMotionCaptureWarning(string device)
+    {
+        try
+        {
+            Logger.Warning($"Chatstronomy could not capture a {device} motion update.");
+        }
+        catch (Exception)
+        {
+            // Chatstronomy diagnostics must never interrupt N.I.N.A. motion.
+        }
+    }
+
+    private void ObserveTelescopeMotion(NinaTelescopeInfo info)
+    {
+        MountMotionSession? startedMotion = null;
+        PendingMountMotionEnd? interruptedMotion = null;
+        PendingMountMotionEnd? endedMotion = null;
+        lock (motionGate)
+        {
+            if (!started || !ReferenceEquals(observedTelescopeInfo, info))
+            {
+                return;
+            }
+
+            if (!info.Connected)
+            {
+                QuarantineCurrentMountMotionLocked(
+                    includeUnscoped: telescopeWasSlewing);
+                mountMotionEpoch++;
+                telescopeMotionInitialized = true;
+                telescopeWasSlewing = false;
+                activeMountMotion = null;
+                pendingMountMotionEnd = null;
+                return;
+            }
+            var isSlewing = info.Slewing;
+            if (!telescopeMotionInitialized)
+            {
+                // RegisterConsumer immediately supplies the current mutable
+                // info object. Seed from it without inventing a start edge for
+                // a slew which began before this plugin session.
+                telescopeMotionInitialized = true;
+                telescopeWasSlewing = isSlewing;
+                if (isSlewing)
+                {
+                    QuarantineCurrentMountMotionLocked(includeUnscoped: true);
+                }
+                else
+                {
+                    CompleteMountBoundaryMotionLocked();
+                }
+                return;
+            }
+            if (mountBoundaryMotionInProgress)
+            {
+                if (!isSlewing)
+                {
+                    CompleteMountBoundaryMotionLocked();
+                }
+                telescopeWasSlewing = isSlewing;
+                activeMountMotion = null;
+                pendingMountMotionEnd = null;
+                mountMotionEpoch++;
+                return;
+            }
+            if (isSlewing == telescopeWasSlewing)
+            {
+                return;
+            }
+            telescopeWasSlewing = isSlewing;
+
+            if (mountMotionSharingBlocked || !eventDelivery.Current.SlewMotion)
+            {
+                QuarantineCurrentMountMotionLocked(includeUnscoped: isSlewing);
+                activeMountMotion = null;
+                pendingMountMotionEnd = null;
+                mountMotionEpoch++;
+                return;
+            }
+
+            var now = utcNow();
+            if (isSlewing)
+            {
+                // A second edge before the completion debounce expires is a
+                // distinct movement. Flush the measured end of the previous
+                // one before publishing the new intent.
+                interruptedMotion = pendingMountMotionEnd;
+                pendingMountMotionEnd = null;
+                if (interruptedMotion is not null)
+                {
+                    QuarantineMountCompletionLocked(interruptedMotion.Session);
+                }
+                var session = new MountMotionSession(
+                    Interlocked.Increment(ref motionId),
+                    now,
+                    SnapshotMountPosition(info),
+                    SnapshotCoordinates(info.TargetCoordinates),
+                    CaptureMountCoordinateKey(info.Coordinates),
+                    CaptureMountCoordinateKey(info.TargetCoordinates),
+                    NativeCompletionObserved: false,
+                    ObservedInProgress: false,
+                    CaptureHistoryGeneration(),
+                    mountMotionEpoch);
+                activeMountMotion = session;
+                startedMotion = session;
+            }
+            else if (activeMountMotion is not null)
+            {
+                endedMotion = new PendingMountMotionEnd(
+                    activeMountMotion,
+                    SnapshotMountPosition(info),
+                    now);
+                activeMountMotion = null;
+                pendingMountMotionEnd = endedMotion;
+            }
+        }
+
+        if (interruptedMotion is not null)
+        {
+            PublishMountMotionEnd(interruptedMotion);
+        }
+        if (startedMotion is not null)
+        {
+            PublishMountMotionStart(startedMotion);
+        }
+        if (endedMotion is not null)
+        {
+            ScheduleMountMotionEnd(endedMotion);
+        }
+    }
+
+    private void ObserveRotatorMotion(NinaRotatorInfo info)
+    {
+        RotatorMotionSession? startedMotion = null;
+        PendingRotatorMotionEnd? interruptedMotion = null;
+        PendingRotatorMotionEnd? endedMotion = null;
+        lock (motionGate)
+        {
+            if (!started || !ReferenceEquals(observedRotatorInfo, info))
+            {
+                return;
+            }
+
+            if (!info.Connected)
+            {
+                QuarantineCurrentRotatorMotionLocked(
+                    includeUnscoped: rotatorWasMoving);
+                rotatorMotionEpoch++;
+                rotatorMotionInitialized = true;
+                rotatorWasMoving = false;
+                activeRotatorMotion = null;
+                pendingRotatorMotionEnd = null;
+                return;
+            }
+            var isMoving = info.IsMoving;
+            if (!rotatorMotionInitialized)
+            {
+                rotatorMotionInitialized = true;
+                rotatorWasMoving = isMoving;
+                if (isMoving)
+                {
+                    QuarantineCurrentRotatorMotionLocked(includeUnscoped: true);
+                }
+                else
+                {
+                    CompleteRotatorBoundaryMotionLocked();
+                }
+                return;
+            }
+            if (rotatorBoundaryMotionInProgress)
+            {
+                if (!isMoving)
+                {
+                    CompleteRotatorBoundaryMotionLocked();
+                }
+                rotatorWasMoving = isMoving;
+                activeRotatorMotion = null;
+                pendingRotatorMotionEnd = null;
+                rotatorMotionEpoch++;
+                return;
+            }
+            if (isMoving == rotatorWasMoving)
+            {
+                return;
+            }
+            rotatorWasMoving = isMoving;
+
+            if (rotatorMotionSharingBlocked || !eventDelivery.Current.RotatorMotion)
+            {
+                QuarantineCurrentRotatorMotionLocked(includeUnscoped: isMoving);
+                activeRotatorMotion = null;
+                pendingRotatorMotionEnd = null;
+                rotatorMotionEpoch++;
+                return;
+            }
+
+            var now = utcNow();
+            if (isMoving)
+            {
+                interruptedMotion = pendingRotatorMotionEnd;
+                pendingRotatorMotionEnd = null;
+                if (interruptedMotion is not null)
+                {
+                    interruptedMotion = RefreshRotatorMotionEndLocked(interruptedMotion, info);
+                    QuarantineRotatorCompletionLocked(interruptedMotion);
+                }
+                var session = new RotatorMotionSession(
+                    Interlocked.Increment(ref motionId),
+                    now,
+                    FiniteOrNull(info.Position),
+                    FiniteOrNull(info.MechanicalPosition),
+                    NativeCompletionObserved: false,
+                    ObservedInProgress: false,
+                    CaptureHistoryGeneration(),
+                    rotatorMotionEpoch);
+                activeRotatorMotion = session;
+                startedMotion = session;
+            }
+            else if (activeRotatorMotion is not null)
+            {
+                endedMotion = new PendingRotatorMotionEnd(
+                    activeRotatorMotion,
+                    FiniteOrNull(info.Position),
+                    FiniteOrNull(info.MechanicalPosition),
+                    now,
+                    rotatorInfoBroadcastVersion);
+                activeRotatorMotion = null;
+                pendingRotatorMotionEnd = endedMotion;
+            }
+        }
+
+        if (interruptedMotion is not null)
+        {
+            PublishRotatorMotionEnd(interruptedMotion, "ROTATOR-MOVED");
+        }
+        if (startedMotion is not null)
+        {
+            PublishRotatorMotionStart(startedMotion);
+        }
+        if (endedMotion is not null)
+        {
+            ScheduleRotatorMotionEnd(endedMotion);
+        }
+    }
+
+    private Dictionary<string, object?> SnapshotMountPosition(NinaTelescopeInfo info)
+    {
+        var result = SnapshotCoordinates(info.Coordinates)
+            ?? new Dictionary<string, object?>();
+        if (double.IsFinite(info.Altitude))
+        {
+            result["Altitude"] = info.Altitude;
+        }
+        if (double.IsFinite(info.Azimuth))
+        {
+            result["Azimuth"] = info.Azimuth;
+        }
+        return result;
+    }
+
+    private Dictionary<string, object?>? SnapshotCoordinates(object? coordinates) =>
+        NinaDirectSequenceSnapshot.ProjectCoordinates(
+            coordinates,
+            accessPolicy.Current with { ShareObservatoryLocation = true });
+
+    private void PublishMountMotionStart(MountMotionSession session)
+    {
+        lock (motionGate)
+        {
+            if (!IsMountMotionPublicationAllowedLocked(session.Epoch))
+            {
+                return;
+            }
+            AddEventAt(
+                session.HistoryGeneration,
+                session.StartedAt,
+                "MOUNT-SLEW-STARTED",
+                ("MotionId", session.Id),
+                ("From", session.From),
+                ("Target", session.Target),
+                ("ObservedInProgress", session.ObservedInProgress ? true : null));
+        }
+    }
+
+    private void PublishMountMotionEnd(
+        PendingMountMotionEnd ended,
+        Dictionary<string, object?>? targetOverride = null,
+        string endDetection = "motion_state")
+    {
+        var session = ended.Session;
+        lock (motionGate)
+        {
+            if (!IsMountMotionPublicationAllowedLocked(session.Epoch))
+            {
+                return;
+            }
+            AddEventAt(
+                session.HistoryGeneration,
+                ended.EndedAt,
+                "MOUNT-SLEWED",
+                ("MotionId", session.Id),
+                ("From", session.From),
+                ("Target", targetOverride ?? session.Target),
+                ("To", ended.To),
+                ("DurationSeconds", session.ObservedInProgress
+                    ? null
+                    : MotionDurationSeconds(session.StartedAt, ended.EndedAt)),
+                ("EndDetection", endDetection),
+                ("ObservedInProgress", session.ObservedInProgress ? true : null));
+        }
+    }
+
+    private void PublishRotatorMotionStart(RotatorMotionSession session)
+    {
+        lock (motionGate)
+        {
+            if (!IsRotatorMotionPublicationAllowedLocked(session.Epoch))
+            {
+                return;
+            }
+            AddEventAt(
+                session.HistoryGeneration,
+                session.StartedAt,
+                "ROTATOR-MOVE-STARTED",
+                ("MotionId", session.Id),
+                ("Position", session.From),
+                ("MechanicalPosition", session.MechanicalFrom),
+                ("ObservedInProgress", session.ObservedInProgress ? true : null));
+        }
+    }
+
+    private void PublishRotatorMotionEnd(
+        PendingRotatorMotionEnd ended,
+        string eventName,
+        double? callbackFrom = null,
+        double? callbackTo = null,
+        string endDetection = "motion_state")
+    {
+        var session = ended.Session;
+        lock (motionGate)
+        {
+            if (!IsRotatorMotionPublicationAllowedLocked(session.Epoch))
+            {
+                return;
+            }
+            AddEventAt(
+                session.HistoryGeneration,
+                ended.EndedAt,
+                eventName,
+                ("MotionId", session.Id),
+                ("From", callbackFrom ?? session.From),
+                ("To", callbackTo ?? ended.To),
+                ("Position", ended.To),
+                ("MechanicalFrom", session.MechanicalFrom),
+                ("MechanicalTo", ended.MechanicalTo),
+                ("MechanicalPosition", ended.MechanicalTo),
+                ("DurationSeconds", session.ObservedInProgress
+                    ? null
+                    : MotionDurationSeconds(session.StartedAt, ended.EndedAt)),
+                ("EndDetection", endDetection),
+                ("ObservedInProgress", session.ObservedInProgress ? true : null));
+        }
+    }
+
+    private void ScheduleMountMotionEnd(PendingMountMotionEnd ended)
+    {
+        var cancellationToken = eventCaptureStop?.Token ?? CancellationToken.None;
+        _ = PublishMountMotionEndAfterGracePeriodAsync(ended, cancellationToken);
+    }
+
+    private async Task PublishMountMotionEndAfterGracePeriodAsync(
+        PendingMountMotionEnd ended,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(MotionCompletionGracePeriod, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        try
+        {
+            PendingMountMotionEnd finalized;
+            lock (motionGate)
+            {
+                if (!ReferenceEquals(pendingMountMotionEnd, ended))
+                {
+                    return;
+                }
+                var info = observedTelescopeInfo;
+                finalized = info?.Connected == true && !info.Slewing
+                    ? ended with { To = SnapshotMountPosition(info) }
+                    : ended;
+                pendingMountMotionEnd = null;
+                QuarantineMountCompletionLocked(finalized.Session);
+            }
+            PublishMountMotionEnd(finalized);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("mount");
+        }
+    }
+
+    private void ScheduleRotatorMotionEnd(PendingRotatorMotionEnd ended)
+    {
+        var cancellationToken = eventCaptureStop?.Token ?? CancellationToken.None;
+        _ = PublishRotatorMotionEndAfterGracePeriodAsync(ended, cancellationToken);
+    }
+
+    private async Task PublishRotatorMotionEndAfterGracePeriodAsync(
+        PendingRotatorMotionEnd ended,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(MotionCompletionGracePeriod, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var broadcastWait = System.Diagnostics.Stopwatch.StartNew();
+        while (broadcastWait.Elapsed < RotatorBroadcastWaitTimeout)
+        {
+            lock (motionGate)
+            {
+                if (!ReferenceEquals(pendingRotatorMotionEnd, ended))
+                {
+                    return;
+                }
+                if (rotatorInfoBroadcastVersion > ended.BroadcastVersionAtStop)
+                {
+                    break;
+                }
+            }
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+
+        try
+        {
+            PendingRotatorMotionEnd finalized;
+            lock (motionGate)
+            {
+                if (!ReferenceEquals(pendingRotatorMotionEnd, ended))
+                {
+                    return;
+                }
+                var info = observedRotatorInfo;
+                finalized = info is null
+                    ? ended
+                    : RefreshRotatorMotionEndLocked(ended, info);
+                pendingRotatorMotionEnd = null;
+                QuarantineRotatorCompletionLocked(finalized);
+            }
+            PublishRotatorMotionEnd(finalized, "ROTATOR-MOVED");
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("rotator");
+        }
+    }
+
+    private bool IsMountMotionPublicationAllowedLocked(long epoch) =>
+        started
+        && !mountMotionSharingBlocked
+        && eventDelivery.Current.SlewMotion
+        && epoch == mountMotionEpoch;
+
+    private bool IsRotatorMotionPublicationAllowedLocked(long epoch) =>
+        started
+        && !rotatorMotionSharingBlocked
+        && eventDelivery.Current.RotatorMotion
+        && epoch == rotatorMotionEpoch;
+
+    private static double MotionDurationSeconds(DateTimeOffset startedAt, DateTimeOffset endedAt) =>
+        Math.Round(Math.Max(0, (endedAt - startedAt).TotalSeconds), 3);
+
+    private static double? FiniteOrNull(double value) => double.IsFinite(value) ? value : null;
+
+    private static MountCoordinateKey? CaptureMountCoordinateKey(object? coordinates)
+    {
+        if (coordinates is not global::NINA.Astrometry.Coordinates source)
+        {
+            return null;
+        }
+        try
+        {
+            var normalized = source.Transform(global::NINA.Astrometry.Epoch.J2000);
+            return double.IsFinite(normalized.RADegrees) && double.IsFinite(normalized.Dec)
+                ? new MountCoordinateKey(normalized.RADegrees, normalized.Dec)
+                : null;
+        }
+        catch (Exception)
+        {
+            // A correlation failure must not affect the diagnostic itself.
+            return null;
+        }
+    }
+
+    private static double MountCoordinateDistanceDegrees(
+        MountCoordinateKey left,
+        MountCoordinateKey right)
+    {
+        var leftRa = left.RightAscensionDegrees * Math.PI / 180d;
+        var rightRa = right.RightAscensionDegrees * Math.PI / 180d;
+        var leftDec = left.DeclinationDegrees * Math.PI / 180d;
+        var rightDec = right.DeclinationDegrees * Math.PI / 180d;
+        var cosine = Math.Sin(leftDec) * Math.Sin(rightDec)
+            + Math.Cos(leftDec) * Math.Cos(rightDec) * Math.Cos(leftRa - rightRa);
+        return Math.Acos(Math.Clamp(cosine, -1d, 1d)) * 180d / Math.PI;
+    }
+
+    private static bool MountCoordinatesMatch(
+        MountCoordinateKey left,
+        MountCoordinateKey right) =>
+        MountCoordinateDistanceDegrees(left, right) <= MountCompletionMatchToleranceDegrees;
+
+    private static bool RotatorPositionsMatch(double? expected, double actual)
+    {
+        if (!expected.HasValue)
+        {
+            return true;
+        }
+        if (!double.IsFinite(expected.Value) || !double.IsFinite(actual))
+        {
+            return false;
+        }
+        var delta = Math.Abs((actual - expected.Value) % 360d);
+        delta = Math.Min(delta, 360d - delta);
+        return delta <= RotatorCompletionMatchToleranceDegrees;
+    }
+
+    private static bool MountCallbackMatchesSession(
+        MountMotionSession session,
+        MountCoordinateKey? target,
+        MountCoordinateKey? from) =>
+        session.TargetKey is not null
+        && target is not null
+        && MountCoordinatesMatch(session.TargetKey, target)
+        && (session.FromKey is null
+            || from is null
+            || MountCoordinateDistanceDegrees(session.FromKey, from)
+                <= MountCompletionFromToleranceDegrees);
+
+    private static bool RotatorCallbackMatchesSession(
+        RotatorMotionSession session,
+        string eventName,
+        double from)
+    {
+        var expectedFrom = eventName.Equals(
+            "ROTATOR-MOVED-MECHANICAL",
+            StringComparison.Ordinal)
+                ? session.MechanicalFrom
+                : session.From;
+        return expectedFrom.HasValue && RotatorPositionsMatch(expectedFrom, from);
+    }
+
+    private static bool RotatorCallbackMatchesPending(
+        PendingRotatorMotionEnd ended,
+        string eventName,
+        double from,
+        double to)
+    {
+        if (!RotatorCallbackMatchesSession(ended.Session, eventName, from))
+        {
+            return false;
+        }
+        var expectedTo = eventName.Equals(
+            "ROTATOR-MOVED-MECHANICAL",
+            StringComparison.Ordinal)
+                ? ended.MechanicalTo
+                : ended.To;
+        return expectedTo.HasValue && RotatorPositionsMatch(expectedTo, to);
+    }
+
+    private void PruneMotionCompletionQuarantinesLocked(DateTimeOffset now)
+    {
+        mountCompletionQuarantine.RemoveAll(item => item.ExpiresAt <= now);
+        rotatorCompletionQuarantine.RemoveAll(item => item.ExpiresAt <= now);
+        if (unscopedMountCompletionQuarantineUntil <= now)
+        {
+            unscopedMountCompletionQuarantineUntil = null;
+        }
+        if (unscopedRotatorCompletionQuarantineUntil <= now)
+        {
+            unscopedRotatorCompletionQuarantineUntil = null;
+        }
+    }
+
+    private bool QuarantineMountCompletionLocked(MountMotionSession session)
+    {
+        if (session.NativeCompletionObserved || session.TargetKey is null)
+        {
+            return false;
+        }
+        return QuarantineMountCompletionLocked(
+            session.Id,
+            session.TargetKey,
+            session.FromKey);
+    }
+
+    private bool QuarantineMountCompletionLocked(
+        long motionCorrelationId,
+        MountCoordinateKey target,
+        MountCoordinateKey? from)
+    {
+        var now = utcNow();
+        PruneMotionCompletionQuarantinesLocked(now);
+        mountCompletionQuarantine.RemoveAll(item => item.MotionId == motionCorrelationId);
+        mountCompletionQuarantine.Add(new MountCompletionQuarantine(
+            motionCorrelationId,
+            target,
+            from,
+            now + MountCompletionQuarantineLifetime));
+        while (mountCompletionQuarantine.Count > MotionCompletionQuarantineCapacity)
+        {
+            mountCompletionQuarantine.RemoveAt(0);
+        }
+        return true;
+    }
+
+    private bool QuarantineRotatorCompletionLocked(PendingRotatorMotionEnd ended)
+    {
+        var session = ended.Session;
+        if (session.NativeCompletionObserved)
+        {
+            return false;
+        }
+        PruneMotionCompletionQuarantinesLocked(utcNow());
+        rotatorCompletionQuarantine.RemoveAll(item => item.MotionId == session.Id);
+        // N.I.N.A.'s rotator operation has no timeout between the observed
+        // idle edge and its native Moved callback. These fingerprints are
+        // match-consumed and capacity-bounded instead of time-expired.
+        if (session.From.HasValue)
+        {
+            rotatorCompletionQuarantine.Add(new RotatorCompletionQuarantine(
+                session.Id,
+                "ROTATOR-MOVED",
+                session.From,
+                ended.To,
+                DateTimeOffset.MaxValue));
+        }
+        if (session.MechanicalFrom.HasValue)
+        {
+            rotatorCompletionQuarantine.Add(new RotatorCompletionQuarantine(
+                session.Id,
+                "ROTATOR-MOVED-MECHANICAL",
+                session.MechanicalFrom,
+                ended.MechanicalTo,
+                DateTimeOffset.MaxValue));
+        }
+        while (rotatorCompletionQuarantine.Count > MotionCompletionQuarantineCapacity * 2)
+        {
+            var oldestMotionId = rotatorCompletionQuarantine[0].MotionId;
+            rotatorCompletionQuarantine.RemoveAll(item => item.MotionId == oldestMotionId);
+        }
+        return rotatorCompletionQuarantine.Any(item => item.MotionId == session.Id);
+    }
+
+    private bool QuarantineRotatorCompletionLocked(RotatorMotionSession session)
+    {
+        return QuarantineRotatorCompletionLocked(new PendingRotatorMotionEnd(
+            session,
+            To: null,
+            MechanicalTo: null,
+            utcNow(),
+            rotatorInfoBroadcastVersion));
+    }
+
+    private void QuarantineUnscopedMountCompletionLocked() =>
+        unscopedMountCompletionQuarantineUntil = utcNow() + MountCompletionQuarantineLifetime;
+
+    private void QuarantineUnscopedRotatorCompletionLocked() =>
+        // RotatorVM has no operation timeout: a driver may report idle before
+        // target convergence and delay Moved indefinitely. Keep this single
+        // privacy tombstone until a callback consumes it or teardown clears it.
+        unscopedRotatorCompletionQuarantineUntil = DateTimeOffset.MaxValue;
+
+    private void QuarantineCurrentMountMotionLocked(bool includeUnscoped)
+    {
+        var motionInProgress = includeUnscoped
+            || activeMountMotion is not null && pendingMountMotionEnd is null;
+        if (motionInProgress)
+        {
+            mountBoundaryMotionInProgress = true;
+            // A mid-flight equipment sample is not the callback's pre-command
+            // origin. Keep it unknown unless this profile observed the start.
+            mountBoundaryMotionFrom ??= activeMountMotion?.FromKey;
+            mountBoundaryMotionTarget ??= activeMountMotion?.TargetKey
+                ?? CaptureMountCoordinateKey(observedTelescopeInfo?.TargetCoordinates);
+        }
+
+        var scoped = false;
+        if (!motionInProgress && activeMountMotion is not null)
+        {
+            scoped |= QuarantineMountCompletionLocked(activeMountMotion);
+        }
+        if (pendingMountMotionEnd is not null)
+        {
+            scoped |= QuarantineMountCompletionLocked(pendingMountMotionEnd.Session);
+        }
+        if (includeUnscoped && !motionInProgress && !scoped)
+        {
+            var target = CaptureMountCoordinateKey(observedTelescopeInfo?.TargetCoordinates);
+            if (target is not null)
+            {
+                scoped = QuarantineMountCompletionLocked(
+                    Interlocked.Decrement(ref motionQuarantineId),
+                    target,
+                    CaptureMountCoordinateKey(observedTelescopeInfo?.Coordinates));
+            }
+            if (!scoped)
+            {
+                QuarantineUnscopedMountCompletionLocked();
+            }
+        }
+    }
+
+    private void QuarantineCurrentRotatorMotionLocked(bool includeUnscoped)
+    {
+        var motionInProgress = includeUnscoped
+            || activeRotatorMotion is not null && pendingRotatorMotionEnd is null;
+        if (motionInProgress)
+        {
+            rotatorBoundaryMotionInProgress = true;
+            rotatorBoundaryMotionFrom ??= activeRotatorMotion?.From;
+            rotatorBoundaryMotionMechanicalFrom ??= activeRotatorMotion?.MechanicalFrom;
+        }
+
+        var scoped = false;
+        if (!motionInProgress && activeRotatorMotion is not null)
+        {
+            scoped |= QuarantineRotatorCompletionLocked(activeRotatorMotion);
+        }
+        if (pendingRotatorMotionEnd is not null)
+        {
+            scoped |= QuarantineRotatorCompletionLocked(pendingRotatorMotionEnd);
+        }
+        if (includeUnscoped && !motionInProgress && !scoped)
+        {
+            QuarantineUnscopedRotatorCompletionLocked();
+        }
+    }
+
+    private bool CompleteMountBoundaryMotionLocked()
+    {
+        if (!mountBoundaryMotionInProgress)
+        {
+            return false;
+        }
+        mountBoundaryMotionInProgress = false;
+        if (mountBoundaryMotionTarget is not null)
+        {
+            QuarantineMountCompletionLocked(
+                Interlocked.Decrement(ref motionQuarantineId),
+                mountBoundaryMotionTarget,
+                mountBoundaryMotionFrom);
+        }
+        else
+        {
+            QuarantineUnscopedMountCompletionLocked();
+        }
+        mountBoundaryMotionFrom = null;
+        mountBoundaryMotionTarget = null;
+        return true;
+    }
+
+    private bool CompleteRotatorBoundaryMotionLocked()
+    {
+        if (!rotatorBoundaryMotionInProgress)
+        {
+            return false;
+        }
+        rotatorBoundaryMotionInProgress = false;
+        var session = new RotatorMotionSession(
+            Interlocked.Decrement(ref motionQuarantineId),
+            utcNow(),
+            rotatorBoundaryMotionFrom,
+            rotatorBoundaryMotionMechanicalFrom,
+            NativeCompletionObserved: false,
+            ObservedInProgress: true,
+            CaptureHistoryGeneration(),
+            rotatorMotionEpoch);
+        if (!QuarantineRotatorCompletionLocked(session))
+        {
+            QuarantineUnscopedRotatorCompletionLocked();
+        }
+        rotatorBoundaryMotionFrom = null;
+        rotatorBoundaryMotionMechanicalFrom = null;
+        return true;
+    }
+
+    private bool TryConsumeMountCompletionQuarantineLocked(
+        MountCoordinateKey? target,
+        MountCoordinateKey? from)
+    {
+        var now = utcNow();
+        PruneMotionCompletionQuarantinesLocked(now);
+        if (mountBoundaryMotionInProgress)
+        {
+            if (observedTelescopeInfo?.Connected == true
+                && !observedTelescopeInfo.Slewing)
+            {
+                var previousQuarantineId = motionQuarantineId;
+                CompleteMountBoundaryMotionLocked();
+                if (motionQuarantineId != previousQuarantineId)
+                {
+                    mountCompletionQuarantine.RemoveAll(
+                        item => item.MotionId == motionQuarantineId);
+                }
+                unscopedMountCompletionQuarantineUntil = null;
+            }
+            // A callback while motion is still reported active can belong to a
+            // predecessor command. Keep the cross-boundary marker until an
+            // observed idle barrier, and suppress every callback meanwhile.
+            return true;
+        }
+        if (target is not null)
+        {
+            var candidates = mountCompletionQuarantine
+                .Where(item => MountCoordinatesMatch(item.Target, target)
+                    && (from is null
+                        || item.From is null
+                        || MountCoordinateDistanceDegrees(item.From, from)
+                            <= MountCompletionFromToleranceDegrees))
+                .ToArray();
+            if (candidates.Length > 0)
+            {
+                var match = from is null
+                    ? candidates[0]
+                    : candidates.MinBy(item => item.From is null
+                        ? double.MaxValue
+                        : MountCoordinateDistanceDegrees(item.From, from));
+                mountCompletionQuarantine.RemoveAll(item => item.MotionId == match!.MotionId);
+                return true;
+            }
+        }
+        if (unscopedMountCompletionQuarantineUntil.HasValue)
+        {
+            unscopedMountCompletionQuarantineUntil = null;
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryConsumeRotatorCompletionQuarantineLocked(
+        string eventName,
+        double from,
+        double to)
+    {
+        var now = utcNow();
+        PruneMotionCompletionQuarantinesLocked(now);
+        if (rotatorBoundaryMotionInProgress)
+        {
+            if (observedRotatorInfo?.Connected == true
+                && !observedRotatorInfo.IsMoving)
+            {
+                CompleteRotatorBoundaryMotionLocked();
+                rotatorCompletionQuarantine.RemoveAll(
+                    item => item.MotionId == motionQuarantineId);
+                unscopedRotatorCompletionQuarantineUntil = null;
+            }
+            return true;
+        }
+        var match = rotatorCompletionQuarantine.FirstOrDefault(item =>
+            item.EventName.Equals(eventName, StringComparison.Ordinal)
+            && RotatorPositionsMatch(item.From, from)
+            && RotatorPositionsMatch(item.To, to));
+        if (match is not null)
+        {
+            rotatorCompletionQuarantine.RemoveAll(item => item.MotionId == match.MotionId);
+            return true;
+        }
+        if (unscopedRotatorCompletionQuarantineUntil.HasValue)
+        {
+            unscopedRotatorCompletionQuarantineUntil = null;
+            return true;
+        }
+        return false;
+    }
+
+    private static PendingRotatorMotionEnd RefreshRotatorMotionEndLocked(
+        PendingRotatorMotionEnd ended,
+        NinaRotatorInfo info) =>
+        info.Connected && !info.IsMoving
+            ? ended with
+            {
+                To = FiniteOrNull(info.Position),
+                MechanicalTo = FiniteOrNull(info.MechanicalPosition),
+            }
+            : ended;
+
+    private void ResetMotionCapture(bool blockSharing = false)
+    {
+        // Quarantine a late completion only when a motion was actually in
+        // flight or awaiting its native completion. An idle profile reset must
+        // not suppress the next callback-only fast movement.
+        lock (motionGate)
+        {
+            QuarantineCurrentMountMotionLocked(includeUnscoped: telescopeWasSlewing);
+            QuarantineCurrentRotatorMotionLocked(includeUnscoped: rotatorWasMoving);
+            if (blockSharing)
+            {
+                mountMotionSharingBlocked = true;
+                rotatorMotionSharingBlocked = true;
+            }
+        }
+        ResetMountMotionCapture();
+        ResetRotatorMotionCapture();
+    }
+
+    private void ResetMountMotionCaptureAtPolicyBoundary()
+    {
+        lock (motionGate)
+        {
+            mountMotionSharingBlocked = true;
+            QuarantineCurrentMountMotionLocked(
+                includeUnscoped: telescopeWasSlewing
+                    || observedTelescopeInfo?.Connected == true
+                        && observedTelescopeInfo.Slewing);
+        }
+        ResetMountMotionCapture();
+    }
+
+    private void ResetRotatorMotionCaptureAtPolicyBoundary()
+    {
+        lock (motionGate)
+        {
+            rotatorMotionSharingBlocked = true;
+            QuarantineCurrentRotatorMotionLocked(
+                includeUnscoped: rotatorWasMoving
+                    || observedRotatorInfo?.Connected == true
+                        && observedRotatorInfo.IsMoving);
+        }
+        ResetRotatorMotionCapture();
+    }
+
+    private void ResetMountMotionCapture()
+    {
+        lock (motionGate)
+        {
+            mountMotionEpoch++;
+            activeMountMotion = null;
+            pendingMountMotionEnd = null;
+            telescopeMotionInitialized = observedTelescopeInfo is not null;
+            telescopeWasSlewing = observedTelescopeInfo?.Connected == true
+                && observedTelescopeInfo.Slewing;
+        }
+    }
+
+    private void ResetRotatorMotionCapture()
+    {
+        lock (motionGate)
+        {
+            rotatorMotionEpoch++;
+            activeRotatorMotion = null;
+            pendingRotatorMotionEnd = null;
+            rotatorMotionInitialized = observedRotatorInfo is not null;
+            rotatorWasMoving = observedRotatorInfo?.Connected == true
+                && observedRotatorInfo.IsMoving;
+        }
+    }
+
+    private void DetachMotionObservers()
+    {
+        lock (motionGate)
+        {
+            mountMotionEpoch++;
+            rotatorMotionEpoch++;
+            if (observedTelescopeInfo is not null)
+            {
+                observedTelescopeInfo.PropertyChanged -= TelescopeInfoPropertyChanged;
+            }
+            if (observedRotatorInfo is not null)
+            {
+                observedRotatorInfo.PropertyChanged -= RotatorInfoPropertyChanged;
+            }
+            observedTelescopeInfo = null;
+            observedRotatorInfo = null;
+            telescopeMotionInitialized = false;
+            rotatorMotionInitialized = false;
+            activeMountMotion = null;
+            activeRotatorMotion = null;
+            pendingMountMotionEnd = null;
+            pendingRotatorMotionEnd = null;
+            mountCompletionQuarantine.Clear();
+            rotatorCompletionQuarantine.Clear();
+            unscopedMountCompletionQuarantineUntil = null;
+            unscopedRotatorCompletionQuarantineUntil = null;
+            mountBoundaryMotionInProgress = false;
+            mountBoundaryMotionFrom = null;
+            mountBoundaryMotionTarget = null;
+            rotatorBoundaryMotionInProgress = false;
+            rotatorBoundaryMotionFrom = null;
+            rotatorBoundaryMotionMechanicalFrom = null;
+            rotatorInfoBroadcastVersion = 0;
+            mountMotionSharingBlocked = true;
+            rotatorMotionSharingBlocked = true;
+        }
+    }
 
     public void UpdateDeviceInfo(FocuserInfo deviceInfo)
     {
@@ -3955,11 +5266,103 @@ internal sealed class NinaDirectDataProvider :
     private Task TelescopeUnparked(object sender, EventArgs args) => AddSimpleEvent("MOUNT-UNPARKED");
     private Task TelescopeSlewed(object sender, MountSlewedEventArgs args)
     {
-        var access = accessPolicy.Current;
-        AddEvent(
-            "MOUNT-SLEWED",
-            ("From", NinaDirectSequenceSnapshot.ProjectCoordinates(args.From, access)),
-            ("To", NinaDirectSequenceSnapshot.ProjectCoordinates(args.To, access)));
+        try
+        {
+            return CaptureTelescopeSlewed(args);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("mount");
+            return Task.CompletedTask;
+        }
+    }
+
+    private Task CaptureTelescopeSlewed(MountSlewedEventArgs args)
+    {
+        var now = utcNow();
+        var info = telescope is null ? observedTelescopeInfo : telescope.GetInfo();
+        var measuredEnd = info is null
+            ? SnapshotCoordinates(args.To) ?? new Dictionary<string, object?>()
+            : SnapshotMountPosition(info);
+        var requestedTarget = SnapshotCoordinates(args.To);
+        var callbackFromKey = CaptureMountCoordinateKey(args.From);
+        var callbackTargetKey = CaptureMountCoordinateKey(args.To);
+        MountMotionSession session;
+        PendingMountMotionEnd ended;
+        var publishRecoveredStart = false;
+        lock (motionGate)
+        {
+            if (mountMotionSharingBlocked || !eventDelivery.Current.SlewMotion)
+            {
+                // A native callback arriving while sharing is closed can
+                // satisfy an old-motion quarantine, but can never publish.
+                TryConsumeMountCompletionQuarantineLocked(
+                    callbackTargetKey,
+                    callbackFromKey);
+                return Task.CompletedTask;
+            }
+            if (TryConsumeMountCompletionQuarantineLocked(
+                callbackTargetKey,
+                callbackFromKey))
+            {
+                return Task.CompletedTask;
+            }
+            if (pendingMountMotionEnd is not null)
+            {
+                if (!MountCallbackMatchesSession(
+                    pendingMountMotionEnd.Session,
+                    callbackTargetKey,
+                    callbackFromKey))
+                {
+                    return Task.CompletedTask;
+                }
+                ended = new PendingMountMotionEnd(
+                    pendingMountMotionEnd.Session,
+                    measuredEnd,
+                    pendingMountMotionEnd.EndedAt);
+                pendingMountMotionEnd = null;
+                session = ended.Session;
+            }
+            else if (activeMountMotion is not null)
+            {
+                if (MountCallbackMatchesSession(
+                    activeMountMotion,
+                    callbackTargetKey,
+                    callbackFromKey))
+                {
+                    activeMountMotion = activeMountMotion with
+                    {
+                        NativeCompletionObserved = true,
+                    };
+                }
+                // N.I.N.A. publishes Slewed only after its idle state was
+                // broadcast. A callback observed while our session is still
+                // active is stale or reordered; it must never terminate the
+                // current physical motion.
+                return Task.CompletedTask;
+            }
+            else
+            {
+                session = new MountMotionSession(
+                    Interlocked.Increment(ref motionId),
+                    now,
+                    SnapshotCoordinates(args.From) ?? new Dictionary<string, object?>(),
+                    requestedTarget,
+                    callbackFromKey,
+                    callbackTargetKey,
+                    NativeCompletionObserved: true,
+                    ObservedInProgress: true,
+                    CaptureHistoryGeneration(),
+                    mountMotionEpoch);
+                ended = new PendingMountMotionEnd(session, measuredEnd, now);
+                publishRecoveredStart = true;
+            }
+        }
+        if (publishRecoveredStart)
+        {
+            PublishMountMotionStart(session);
+        }
+        PublishMountMotionEnd(ended, requestedTarget, "nina_slewed");
         return Task.CompletedTask;
     }
     private Task CameraConnected(object sender, EventArgs args) => AddSimpleEvent("CAMERA-CONNECTED");
@@ -4879,19 +6282,131 @@ internal sealed class NinaDirectDataProvider :
 
     private Task RotatorMoved(object sender, RotatorEventArgs args)
     {
-        var historyGeneration = CaptureHistoryGeneration();
-        AddEvent(historyGeneration, "ROTATOR-MOVED", ("From", args.From), ("To", args.To));
-        return Task.CompletedTask;
+        return CompleteRotatorMotion(args, "ROTATOR-MOVED");
     }
 
     private Task RotatorMovedMechanical(object sender, RotatorEventArgs args)
     {
-        var historyGeneration = CaptureHistoryGeneration();
-        AddEvent(
-            historyGeneration,
+        return CompleteRotatorMotion(args, "ROTATOR-MOVED-MECHANICAL");
+    }
+
+    private Task CompleteRotatorMotion(RotatorEventArgs args, string eventName)
+    {
+        try
+        {
+            return CaptureRotatorMotionCompletion(args, eventName);
+        }
+        catch (Exception)
+        {
+            LogMotionCaptureWarning("rotator");
+            return Task.CompletedTask;
+        }
+    }
+
+    private Task CaptureRotatorMotionCompletion(RotatorEventArgs args, string eventName)
+    {
+        var now = utcNow();
+        var info = rotator is null ? observedRotatorInfo : rotator.GetInfo();
+        var mechanicalMove = eventName.Equals(
             "ROTATOR-MOVED-MECHANICAL",
-            ("From", args.From),
-            ("To", args.To));
+            StringComparison.Ordinal);
+        var measuredPosition = info is not null
+            ? FiniteOrNull(info.Position)
+            : mechanicalMove ? null : FiniteOrNull(args.To);
+        var measuredMechanicalPosition = info is not null
+            ? FiniteOrNull(info.MechanicalPosition)
+            : mechanicalMove ? FiniteOrNull(args.To) : null;
+        var callbackFrom = (double)args.From;
+        var callbackTo = (double)args.To;
+        RotatorMotionSession session;
+        PendingRotatorMotionEnd ended;
+        var publishRecoveredStart = false;
+        lock (motionGate)
+        {
+            if (rotatorMotionSharingBlocked || !eventDelivery.Current.RotatorMotion)
+            {
+                TryConsumeRotatorCompletionQuarantineLocked(
+                    eventName,
+                    callbackFrom,
+                    callbackTo);
+                return Task.CompletedTask;
+            }
+            if (TryConsumeRotatorCompletionQuarantineLocked(
+                eventName,
+                callbackFrom,
+                callbackTo))
+            {
+                return Task.CompletedTask;
+            }
+            if (pendingRotatorMotionEnd is not null)
+            {
+                var correlatedPending = info is null
+                    ? pendingRotatorMotionEnd
+                    : RefreshRotatorMotionEndLocked(pendingRotatorMotionEnd, info);
+                if (!RotatorCallbackMatchesPending(
+                    correlatedPending,
+                    eventName,
+                    callbackFrom,
+                    callbackTo))
+                {
+                    return Task.CompletedTask;
+                }
+                ended = new PendingRotatorMotionEnd(
+                    pendingRotatorMotionEnd.Session,
+                    measuredPosition,
+                    measuredMechanicalPosition,
+                    pendingRotatorMotionEnd.EndedAt,
+                    pendingRotatorMotionEnd.BroadcastVersionAtStop);
+                pendingRotatorMotionEnd = null;
+                session = ended.Session;
+            }
+            else if (activeRotatorMotion is not null)
+            {
+                if (RotatorCallbackMatchesSession(
+                    activeRotatorMotion,
+                    eventName,
+                    callbackFrom))
+                {
+                    activeRotatorMotion = activeRotatorMotion with
+                    {
+                        NativeCompletionObserved = true,
+                    };
+                }
+                // Native rotator callbacks follow an all-fields-written idle
+                // broadcast. Preserve the active session and let its state
+                // edge decide when the movement ended.
+                return Task.CompletedTask;
+            }
+            else
+            {
+                session = new RotatorMotionSession(
+                    Interlocked.Increment(ref motionId),
+                    now,
+                    mechanicalMove ? null : FiniteOrNull(args.From),
+                    mechanicalMove ? FiniteOrNull(args.From) : null,
+                    NativeCompletionObserved: true,
+                    ObservedInProgress: true,
+                    CaptureHistoryGeneration(),
+                    rotatorMotionEpoch);
+                ended = new PendingRotatorMotionEnd(
+                    session,
+                    measuredPosition,
+                    measuredMechanicalPosition,
+                    now,
+                    rotatorInfoBroadcastVersion);
+                publishRecoveredStart = true;
+            }
+        }
+        if (publishRecoveredStart)
+        {
+            PublishRotatorMotionStart(session);
+        }
+        PublishRotatorMotionEnd(
+            ended,
+            eventName,
+            FiniteOrNull(args.From),
+            FiniteOrNull(args.To),
+            "nina_moved");
         return Task.CompletedTask;
     }
 

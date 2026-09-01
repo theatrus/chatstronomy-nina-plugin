@@ -344,6 +344,12 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendMountEvents), value);
     }
 
+    public bool SendSlewMotionEvents
+    {
+        get => options.GetValueBoolean(nameof(SendSlewMotionEvents), false);
+        set => options.SetValueBoolean(nameof(SendSlewMotionEvents), value);
+    }
+
     public bool SendSequenceEvents
     {
         get => options.GetValueBoolean(nameof(SendSequenceEvents), true);
@@ -397,6 +403,12 @@ internal sealed class ChatstronomySettings
     {
         get => options.GetValueBoolean(nameof(SendFilterFocuserRotatorEvents), true);
         set => options.SetValueBoolean(nameof(SendFilterFocuserRotatorEvents), value);
+    }
+
+    public bool SendRotatorMoveEvents
+    {
+        get => options.GetValueBoolean(nameof(SendRotatorMoveEvents), false);
+        set => options.SetValueBoolean(nameof(SendRotatorMoveEvents), value);
     }
 
     public bool SendObservatoryAndFlatPanelEvents
@@ -458,6 +470,7 @@ internal sealed class ChatstronomySettings
         Autofocus: SendAutofocusEvents,
         Guiding: SendGuidingEvents,
         Mount: SendMountEvents,
+        SlewMotion: SendSlewMotionEvents,
         Sequence: SendSequenceEvents,
         Safety: SendSafetyEvents,
         WeatherChanges: SendWeatherChangeEvents,
@@ -465,6 +478,7 @@ internal sealed class ChatstronomySettings
         HighWindThresholdMetersPerSecond: HighWindThresholdMetersPerSecond,
         TargetScheduler: SendTargetSchedulerEvents,
         FilterFocuserRotator: SendFilterFocuserRotatorEvents,
+        RotatorMotion: SendRotatorMoveEvents,
         ObservatoryAndFlatPanel: SendObservatoryAndFlatPanelEvents,
         EquipmentConnections: SendEquipmentConnectionEvents,
         OtherEvents: SendOtherEvents,
