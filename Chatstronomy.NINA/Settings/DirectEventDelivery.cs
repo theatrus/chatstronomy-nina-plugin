@@ -10,6 +10,7 @@ internal sealed record DirectEventDeliveryOptions(
     bool Autofocus,
     bool Guiding,
     bool Mount,
+    bool SlewMotion,
     bool Sequence,
     bool Safety,
     bool WeatherChanges,
@@ -17,6 +18,7 @@ internal sealed record DirectEventDeliveryOptions(
     double HighWindThresholdMetersPerSecond,
     bool TargetScheduler,
     bool FilterFocuserRotator,
+    bool RotatorMotion,
     bool ObservatoryAndFlatPanel,
     bool EquipmentConnections,
     bool OtherEvents,
@@ -32,6 +34,7 @@ internal sealed record DirectEventDeliveryOptions(
         Autofocus: true,
         Guiding: true,
         Mount: true,
+        SlewMotion: false,
         Sequence: true,
         Safety: true,
         WeatherChanges: false,
@@ -39,6 +42,7 @@ internal sealed record DirectEventDeliveryOptions(
         HighWindThresholdMetersPerSecond: 10.0,
         TargetScheduler: true,
         FilterFocuserRotator: true,
+        RotatorMotion: false,
         ObservatoryAndFlatPanel: true,
         EquipmentConnections: true,
         OtherEvents: true,
@@ -106,10 +110,21 @@ internal sealed record DirectEventDeliveryOptions(
         {
             return Guiding;
         }
+        if (eventName.Equals("MOUNT-SLEW-STARTED", StringComparison.Ordinal)
+            || eventName.Equals("MOUNT-SLEWED", StringComparison.Ordinal))
+        {
+            return SlewMotion;
+        }
         if (eventName.StartsWith("MOUNT-", StringComparison.Ordinal)
             || eventName.Equals("ERROR-PLATESOLVE", StringComparison.Ordinal))
         {
             return Mount;
+        }
+        if (eventName.Equals("ROTATOR-MOVE-STARTED", StringComparison.Ordinal)
+            || eventName.Equals("ROTATOR-MOVED", StringComparison.Ordinal)
+            || eventName.Equals("ROTATOR-MOVED-MECHANICAL", StringComparison.Ordinal))
+        {
+            return RotatorMotion;
         }
         if (eventName.StartsWith("FILTERWHEEL-", StringComparison.Ordinal)
             || eventName.StartsWith("ROTATOR-", StringComparison.Ordinal)

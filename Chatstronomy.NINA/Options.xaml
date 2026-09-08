@@ -426,7 +426,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="Event delivery" />
                         <TextBlock
                             Margin="0,3,0,10"
-                            Text="Most events, images, and popup notifications start enabled; weather reports are opt-in. Disabled event categories are never sent to the Hub or local bot, and disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
+                            Text="Most events, images, and popup notifications start enabled; movement diagnostics and weather reports are opt-in. Disabled event categories are never sent to the Hub or local bot, and disabling images also blocks image history and thumbnails. Changes apply immediately to buffered events."
                             TextWrapping="Wrap" />
                         <UniformGrid Columns="2">
                             <Grid Margin="0,3,18,3">
@@ -450,16 +450,24 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Guiding and dithering" />
-                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendGuidingEvents}" />
+                                <TextBlock VerticalAlignment="Center" Text="Mount status, flips, and centering" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendMountEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Mount, slew, and center" />
-                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendMountEvents}" />
+                                <TextBlock VerticalAlignment="Center" Text="Slew start/end diagnostics" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendSlewMotionEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Guiding and dithering" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendGuidingEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>
@@ -511,16 +519,24 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Targets and Target Scheduler" />
-                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendTargetSchedulerEvents}" />
+                                <TextBlock VerticalAlignment="Center" Text="Filter, focuser, and rotator sync" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Filter, focuser, and rotator" />
-                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendFilterFocuserRotatorEvents}" />
+                                <TextBlock VerticalAlignment="Center" Text="Rotator move start/end diagnostics" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendRotatorMoveEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Targets and Target Scheduler" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendTargetSchedulerEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
                                 <Grid.ColumnDefinitions>
@@ -555,6 +571,11 @@
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendNinaNotifications}" />
                             </Grid>
                         </UniformGrid>
+
+                        <TextBlock
+                            Margin="0,7,0,0"
+                            Text="Motion diagnostics normally use observed moving and idle states from N.I.N.A., not exact physical endpoints. Slews include observed RA/Dec and, only when location sharing is enabled above, start/end altitude and azimuth. If a short move completes between updates, Chatstronomy recovers the pair from N.I.N.A.'s completion event; its start has callback RA/Dec but no historical Alt/Az or estimated duration. N.I.N.A. does not expose a rotator target at the start. State-observed rotator starts show available sky and mechanical angles; a recovered start has the callback's logical or mechanical From angle. A normal end marks the first observed idle state; a recovered end marks the completion callback. Neither proves settling or overall success."
+                            TextWrapping="Wrap" />
 
                         <TextBlock
                             Margin="0,7,0,0"
