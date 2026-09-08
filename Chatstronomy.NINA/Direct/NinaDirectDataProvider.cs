@@ -1553,15 +1553,17 @@ internal sealed class NinaDirectDataProvider :
                 activeMountMotion = null;
                 pendingMountMotionEnd = endedMotion;
             }
-        }
-
-        if (interruptedMotion is not null)
-        {
-            PublishMountMotionEnd(interruptedMotion);
-        }
-        if (startedMotion is not null)
-        {
-            PublishMountMotionStart(startedMotion);
+            // Publish the transition before another observer can advance it.
+            // Direct history is consumed in insertion order, including when
+            // a polling response splits the start and end into two batches.
+            if (interruptedMotion is not null)
+            {
+                PublishMountMotionEnd(interruptedMotion);
+            }
+            if (startedMotion is not null)
+            {
+                PublishMountMotionStart(startedMotion);
+            }
         }
         if (endedMotion is not null)
         {
@@ -1667,15 +1669,14 @@ internal sealed class NinaDirectDataProvider :
                 activeRotatorMotion = null;
                 pendingRotatorMotionEnd = endedMotion;
             }
-        }
-
-        if (interruptedMotion is not null)
-        {
-            PublishRotatorMotionEnd(interruptedMotion, "ROTATOR-MOVED");
-        }
-        if (startedMotion is not null)
-        {
-            PublishRotatorMotionStart(startedMotion);
+            if (interruptedMotion is not null)
+            {
+                PublishRotatorMotionEnd(interruptedMotion, "ROTATOR-MOVED");
+            }
+            if (startedMotion is not null)
+            {
+                PublishRotatorMotionStart(startedMotion);
+            }
         }
         if (endedMotion is not null)
         {
@@ -1836,8 +1837,8 @@ internal sealed class NinaDirectDataProvider :
                     : ended;
                 pendingMountMotionEnd = null;
                 QuarantineMountCompletionLocked(finalized.Session);
+                PublishMountMotionEnd(finalized);
             }
-            PublishMountMotionEnd(finalized);
         }
         catch (Exception)
         {
@@ -1904,8 +1905,8 @@ internal sealed class NinaDirectDataProvider :
                     : RefreshRotatorMotionEndLocked(ended, info);
                 pendingRotatorMotionEnd = null;
                 QuarantineRotatorCompletionLocked(finalized);
+                PublishRotatorMotionEnd(finalized, "ROTATOR-MOVED");
             }
-            PublishRotatorMotionEnd(finalized, "ROTATOR-MOVED");
         }
         catch (Exception)
         {
@@ -2024,6 +2025,67 @@ internal sealed class NinaDirectDataProvider :
                 ? ended.MechanicalTo
                 : ended.To;
         return expectedTo.HasValue && RotatorPositionsMatch(expectedTo, to);
+    }
+
+    private string ResolveRotatorCompletionEventNameLocked(
+        string eventName,
+        double from,
+        double to,
+        NinaRotatorInfo? info)
+    {
+        if (!eventName.Equals("ROTATOR-MOVED", StringComparison.Ordinal))
+        {
+            return eventName;
+        }
+
+        // N.I.N.A. 3.2 MoveMechanical raises Moved with mechanical angles.
+        // Prefer recorded operation evidence to the current position: a late
+        // callback can arrive during a successor move. Preserve the named
+        // logical frame when both interpretations match.
+        PruneMotionCompletionQuarantinesLocked(utcNow());
+        var matchingQuarantines = rotatorCompletionQuarantine.Where(item =>
+            RotatorPositionsMatch(item.From, from)
+            && RotatorPositionsMatch(item.To, to));
+        if (matchingQuarantines.Any(item => item.EventName == "ROTATOR-MOVED"))
+        {
+            return eventName;
+        }
+        if (matchingQuarantines.Any(item => item.EventName == "ROTATOR-MOVED-MECHANICAL"))
+        {
+            return "ROTATOR-MOVED-MECHANICAL";
+        }
+        if (pendingRotatorMotionEnd is { } pending)
+        {
+            var measured = info is null ? pending : RefreshRotatorMotionEndLocked(pending, info);
+            if (RotatorCallbackMatchesPending(measured, eventName, from, to))
+            {
+                return eventName;
+            }
+            if (RotatorCallbackMatchesPending(measured, "ROTATOR-MOVED-MECHANICAL", from, to))
+            {
+                return "ROTATOR-MOVED-MECHANICAL";
+            }
+        }
+        if (activeRotatorMotion is { } active)
+        {
+            if (RotatorCallbackMatchesSession(active, eventName, from))
+            {
+                return eventName;
+            }
+            if (RotatorCallbackMatchesSession(active, "ROTATOR-MOVED-MECHANICAL", from))
+            {
+                return "ROTATOR-MOVED-MECHANICAL";
+            }
+        }
+        // Callback-only fast moves have no observed origin. The current idle
+        // endpoint can disambiguate only when the logical and mechanical
+        // positions differ and the callback matches the mechanical one.
+        return info?.Connected == true && !info.IsMoving
+            && RotatorPositionsMatch(FiniteOrNull(info.MechanicalPosition), to)
+            && double.IsFinite(info.MechanicalPosition)
+            && !RotatorPositionsMatch(FiniteOrNull(info.Position), to)
+                ? "ROTATOR-MOVED-MECHANICAL"
+                : eventName;
     }
 
     private void PruneMotionCompletionQuarantinesLocked(DateTimeOffset now)
@@ -5357,12 +5419,12 @@ internal sealed class NinaDirectDataProvider :
                 ended = new PendingMountMotionEnd(session, measuredEnd, now);
                 publishRecoveredStart = true;
             }
+            if (publishRecoveredStart)
+            {
+                PublishMountMotionStart(session);
+            }
+            PublishMountMotionEnd(ended, requestedTarget, "nina_slewed");
         }
-        if (publishRecoveredStart)
-        {
-            PublishMountMotionStart(session);
-        }
-        PublishMountMotionEnd(ended, requestedTarget, "nina_slewed");
         return Task.CompletedTask;
     }
     private Task CameraConnected(object sender, EventArgs args) => AddSimpleEvent("CAMERA-CONNECTED");
@@ -6307,15 +6369,6 @@ internal sealed class NinaDirectDataProvider :
     {
         var now = utcNow();
         var info = rotator is null ? observedRotatorInfo : rotator.GetInfo();
-        var mechanicalMove = eventName.Equals(
-            "ROTATOR-MOVED-MECHANICAL",
-            StringComparison.Ordinal);
-        var measuredPosition = info is not null
-            ? FiniteOrNull(info.Position)
-            : mechanicalMove ? null : FiniteOrNull(args.To);
-        var measuredMechanicalPosition = info is not null
-            ? FiniteOrNull(info.MechanicalPosition)
-            : mechanicalMove ? FiniteOrNull(args.To) : null;
         var callbackFrom = (double)args.From;
         var callbackTo = (double)args.To;
         RotatorMotionSession session;
@@ -6323,6 +6376,17 @@ internal sealed class NinaDirectDataProvider :
         var publishRecoveredStart = false;
         lock (motionGate)
         {
+            eventName = ResolveRotatorCompletionEventNameLocked(
+                eventName, callbackFrom, callbackTo, info);
+            var mechanicalMove = eventName.Equals(
+                "ROTATOR-MOVED-MECHANICAL",
+                StringComparison.Ordinal);
+            var measuredPosition = info is not null
+                ? FiniteOrNull(info.Position)
+                : mechanicalMove ? null : FiniteOrNull(args.To);
+            var measuredMechanicalPosition = info is not null
+                ? FiniteOrNull(info.MechanicalPosition)
+                : mechanicalMove ? FiniteOrNull(args.To) : null;
             if (rotatorMotionSharingBlocked || !eventDelivery.Current.RotatorMotion)
             {
                 TryConsumeRotatorCompletionQuarantineLocked(
@@ -6396,17 +6460,17 @@ internal sealed class NinaDirectDataProvider :
                     rotatorInfoBroadcastVersion);
                 publishRecoveredStart = true;
             }
+            if (publishRecoveredStart)
+            {
+                PublishRotatorMotionStart(session);
+            }
+            PublishRotatorMotionEnd(
+                ended,
+                eventName,
+                FiniteOrNull(args.From),
+                FiniteOrNull(args.To),
+                "nina_moved");
         }
-        if (publishRecoveredStart)
-        {
-            PublishRotatorMotionStart(session);
-        }
-        PublishRotatorMotionEnd(
-            ended,
-            eventName,
-            FiniteOrNull(args.From),
-            FiniteOrNull(args.To),
-            "nina_moved");
         return Task.CompletedTask;
     }
 

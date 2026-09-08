@@ -233,6 +233,12 @@ internal static class Program
             "Rotator motion edges preserve measured start and end positions",
             RotatorMotionEdgesPreserveMeasuredPositions);
         await RunAsync(
+            "N.I.N.A. 3.2 mechanical moves use measured mechanical callback angles",
+            MechanicalRotatorMovesSupportLegacyMovedCallback);
+        await RunAsync(
+            "Concurrent recovered motion callbacks publish complete ordered pairs",
+            ConcurrentRecoveredMotionCallbacksPublishOrderedPairs);
+        await RunAsync(
             "Motion policy publication gaps cannot capture or replay events",
             MotionPolicyPublicationGapsCannotCaptureOrReplay);
         await RunAsync(
@@ -535,6 +541,65 @@ internal static class Program
             AssertEqual(
                 "resource_not_ready",
                 notReadyPayload.GetProperty("error_code").GetString());
+        }
+
+        // These additive fixtures first shipped after payload v3. Older
+        // pinned runtimes remain valid without them, while newer artifacts
+        // must preserve both the diagnostic fields and legacy omissions.
+        foreach (var fixtureName in new[] { "query-result-motion.json", "query-result-motion-legacy.json" })
+        {
+            var path = Path.Combine(fixtures, fixtureName);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+            using var fixture = JsonDocument.Parse(File.ReadAllText(path));
+            var payload = fixture.RootElement.GetProperty("payload");
+            var response = payload.GetProperty("payload");
+            using var wire = JsonDocument.Parse(DirectProtocol.SerializeSuccess(
+                payload.GetProperty("id").GetGuid(), response));
+            AssertTrue(JsonNode.DeepEquals(
+                JsonNode.Parse(response.GetRawText()),
+                JsonNode.Parse(wire.RootElement.GetProperty("payload").GetProperty("payload").GetRawText())));
+
+            var events = response.GetProperty("Response").EnumerateArray().ToArray();
+            if (fixtureName.EndsWith("-legacy.json", StringComparison.Ordinal))
+            {
+                AssertEqual(3, events.Length);
+                AssertTrue(events.All(item => !item.TryGetProperty("MotionId", out _)
+                    && !item.TryGetProperty("DurationSeconds", out _)
+                    && !item.TryGetProperty("EndDetection", out _)));
+                continue;
+            }
+
+            AssertEqual(8, events.Length);
+            for (var index = 0; index < events.Length; index += 2)
+            {
+                var start = events[index];
+                var end = events[index + 1];
+                AssertEqual(start.GetProperty("MotionId").GetInt64(), end.GetProperty("MotionId").GetInt64());
+                if (start.TryGetProperty("ObservedInProgress", out var recovered))
+                {
+                    AssertTrue(recovered.GetBoolean());
+                    AssertTrue(end.GetProperty("ObservedInProgress").GetBoolean());
+                    AssertFalse(end.TryGetProperty("DurationSeconds", out _));
+                }
+                else
+                {
+                    AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
+                    AssertTrue(end.GetProperty("DurationSeconds").GetDouble() > 0);
+                }
+            }
+            var mechanicalStart = events[4];
+            var mechanicalEnd = events[5];
+            AssertFalse(mechanicalStart.TryGetProperty("Position", out _));
+            AssertEqual("ROTATOR-MOVED-MECHANICAL", mechanicalEnd.GetProperty("Event").GetString());
+            AssertEqual(mechanicalStart.GetProperty("MechanicalPosition").GetDouble(),
+                mechanicalEnd.GetProperty("From").GetDouble());
+            AssertEqual(mechanicalEnd.GetProperty("MechanicalPosition").GetDouble(),
+                mechanicalEnd.GetProperty("To").GetDouble());
+            AssertFalse(events[6].GetProperty("From").TryGetProperty("Altitude", out _));
+            AssertFalse(events[7].GetProperty("To").TryGetProperty("Azimuth", out _));
         }
     }
 
@@ -4421,6 +4486,166 @@ internal static class Program
             AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
             AssertEqual(72.5d, recoveredEnd.GetProperty("From").GetDouble());
             AssertEqual(96.5d, recoveredEnd.GetProperty("To").GetDouble());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task MechanicalRotatorMovesSupportLegacyMovedCallback()
+    {
+        // N.I.N.A. 3.2 MoveMechanical raises Moved with mechanical From/To,
+        // even though the separate MovedMechanical event is available.
+        foreach (var delayedCallback in new[] { false, true })
+        {
+            var delivery = new DirectEventDeliveryPolicy(
+                DirectEventDeliveryOptions.Default with { RotatorMotion = true });
+            using var provider = CreateSecurityTestProvider(
+                new DirectAccessPolicy(DirectAccessOptions.Default),
+                deliveryPolicy: delivery);
+            SetProviderStarted(provider, true);
+            try
+            {
+                var info = new global::NINA.Equipment.Equipment.MyRotator.RotatorInfo
+                {
+                    Connected = true,
+                    Position = 12f,
+                    MechanicalPosition = 92f,
+                    IsMoving = false,
+                };
+                provider.UpdateDeviceInfo(info);
+                info.IsMoving = true;
+                info.Position = 42f;
+                info.IsMoving = false;
+                info.MechanicalPosition = 122f;
+                provider.UpdateDeviceInfo(info);
+                if (delayedCallback)
+                {
+                    await WaitForNamedEventCountAsync(
+                        provider, "ROTATOR-MOVED", 1, TimeSpan.FromSeconds(2));
+                }
+
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(92f, 122f));
+                var endName = delayedCallback ? "ROTATOR-MOVED" : "ROTATOR-MOVED-MECHANICAL";
+                var events = await AssertNamedEventCountsRemainAsync(
+                    provider,
+                    TimeSpan.FromSeconds(1),
+                    ("ROTATOR-MOVE-STARTED", 1),
+                    ("ROTATOR-MOVED", delayedCallback ? 1 : 0),
+                    ("ROTATOR-MOVED-MECHANICAL", delayedCallback ? 0 : 1));
+                var end = events.Single(item => item.GetProperty("Event").GetString() == endName);
+                AssertEqual(42d, end.GetProperty("Position").GetDouble());
+                AssertEqual(92d, end.GetProperty("MechanicalFrom").GetDouble());
+                AssertEqual(122d, end.GetProperty("MechanicalTo").GetDouble());
+                if (!delayedCallback)
+                {
+                    AssertEqual(92d, end.GetProperty("From").GetDouble());
+                    AssertEqual(122d, end.GetProperty("To").GetDouble());
+                }
+
+                // A short move missed by the state observer still has an
+                // unambiguous mechanical endpoint in the idle snapshot.
+                info.Position = 52f;
+                info.MechanicalPosition = 132f;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(122f, 132f));
+                events = await SnapshotEvents(provider);
+                var recovered = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVE-STARTED"
+                    && item.TryGetProperty("ObservedInProgress", out _));
+                AssertFalse(recovered.TryGetProperty("Position", out _));
+                AssertEqual(122d, recovered.GetProperty("MechanicalPosition").GetDouble());
+                var recoveredEnd = events.Single(item =>
+                    item.GetProperty("Event").GetString() == "ROTATOR-MOVED-MECHANICAL"
+                    && item.GetProperty("MotionId").GetInt64()
+                        == recovered.GetProperty("MotionId").GetInt64());
+                AssertEqual(52d, recoveredEnd.GetProperty("Position").GetDouble());
+                AssertEqual(132d, recoveredEnd.GetProperty("MechanicalTo").GetDouble());
+
+                // An off/on boundary must also consume the mechanical
+                // predecessor callback instead of recovering private motion.
+                info.IsMoving = true;
+                var enabled = delivery.Current;
+                ApplyEventDeliveryChange(provider, delivery, enabled with { RotatorMotion = false });
+                ApplyEventDeliveryChange(provider, delivery, enabled);
+                info.Position = 62f;
+                info.IsMoving = false;
+                info.MechanicalPosition = 142f;
+                provider.UpdateDeviceInfo(info);
+                var beforePrivateCallback = (await SnapshotEvents(provider)).Length;
+                await InvokeProviderCallbackAsync(
+                    provider,
+                    "RotatorMoved",
+                    new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(132f, 142f));
+                AssertEqual(beforePrivateCallback, (await SnapshotEvents(provider)).Length);
+            }
+            finally
+            {
+                SetProviderStarted(provider, false);
+            }
+        }
+    }
+
+    private static async Task ConcurrentRecoveredMotionCallbacksPublishOrderedPairs()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default with
+        {
+            SlewMotion = true,
+            RotatorMotion = true,
+        });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            deliveryPolicy: delivery);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var mount = Task.Run(async () =>
+            {
+                await ready.Task;
+                for (var index = 0; index < 64; index++)
+                {
+                    await InvokeProviderCallbackAsync(provider, "TelescopeSlewed",
+                        new global::NINA.Equipment.Interfaces.Mediator.MountSlewedEventArgs(
+                            new global::NINA.Astrometry.Coordinates(2, 30,
+                                global::NINA.Astrometry.Epoch.J2000,
+                                global::NINA.Astrometry.Coordinates.RAType.Hours),
+                            new global::NINA.Astrometry.Coordinates(3, 40,
+                                global::NINA.Astrometry.Epoch.J2000,
+                                global::NINA.Astrometry.Coordinates.RAType.Hours)));
+                    Thread.Yield();
+                }
+            });
+            var rotator = Task.Run(async () =>
+            {
+                await ready.Task;
+                for (var index = 0; index < 64; index++)
+                {
+                    await InvokeProviderCallbackAsync(provider, "RotatorMoved",
+                        new global::NINA.Equipment.Interfaces.Mediator.RotatorEventArgs(12f, 42f));
+                    Thread.Yield();
+                }
+            });
+            ready.SetResult();
+            await Task.WhenAll(mount, rotator).WaitAsync(TimeSpan.FromSeconds(10));
+            var events = await SnapshotEvents(provider);
+            AssertEqual(256, events.Length);
+            for (var index = 0; index < events.Length; index += 2)
+            {
+                var start = events[index];
+                var end = events[index + 1];
+                var startName = start.GetProperty("Event").GetString();
+                AssertTrue(startName is "MOUNT-SLEW-STARTED" or "ROTATOR-MOVE-STARTED");
+                AssertEqual(startName == "MOUNT-SLEW-STARTED" ? "MOUNT-SLEWED" : "ROTATOR-MOVED",
+                    end.GetProperty("Event").GetString());
+                AssertEqual(start.GetProperty("MotionId").GetInt64(), end.GetProperty("MotionId").GetInt64());
+            }
         }
         finally
         {

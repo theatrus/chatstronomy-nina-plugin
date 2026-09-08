@@ -151,6 +151,11 @@ recovered mount start contains callback RA/Dec but no historical altitude or
 azimuth; its end is timestamped by the completion callback and uses the
 available live idle snapshot. Neither recovery record implies success.
 
+Timed waits use Discord's localized timestamps and relative countdowns. Matrix
+shows UTC timestamps and the time remaining when the message was sent. Target
+Scheduler waits and sequence time waits are tracked separately; reaching an
+estimated wait time does not by itself mean that the wait has finished.
+
 Once N.I.N.A. accepts a locally permitted command, its terminal failure is
 always delivered as part of that command exchange; optional event switches do
 not hide the outcome. Safety-monitor transitions have their own event switch; a
