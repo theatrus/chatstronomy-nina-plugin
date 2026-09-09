@@ -104,6 +104,8 @@ internal sealed class NinaDirectDataProvider :
     private readonly NinaImageSaveFailureWatcher imageSaveFailureWatcher;
     private readonly Func<BitmapSource, byte[]> thumbnailEncoder;
     private readonly Func<DateTimeOffset> utcNow;
+    private readonly Func<long>? monotonicTimestamp;
+    private EventFloodSession eventFloodSession;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
     private readonly BoundedHistory<Dictionary<string, object?>> logEvents =
@@ -125,8 +127,6 @@ internal sealed class NinaDirectDataProvider :
     private Func<object, SequenceEntityFailureEventArgs, Task>? sequenceFailureHandler;
     private long sequenceFailureGeneration = -1;
     private long sequenceFailureSubscriptionVersion;
-    private string? lastSequenceFailureKey;
-    private DateTimeOffset lastSequenceFailureAt;
     private bool sequenceHadFailure;
     private bool sequenceOutcomeProvenanceComplete;
     private bool sequenceFailureCoverageBlocked;
@@ -233,7 +233,8 @@ internal sealed class NinaDirectDataProvider :
         DirectAccessPolicy accessPolicy,
         string? autofocusReportDirectory = null,
         Func<BitmapSource, byte[]>? thumbnailEncoder = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        Func<long>? monotonicTimestamp = null)
     {
         this.profileService = profileService;
         this.telescope = telescope;
@@ -258,6 +259,8 @@ internal sealed class NinaDirectDataProvider :
         this.accessPolicy = accessPolicy;
         this.thumbnailEncoder = thumbnailEncoder ?? DirectThumbnailEncoder.Encode;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        this.monotonicTimestamp = monotonicTimestamp;
+        eventFloodSession = new(0, new DirectEventFloodLimiter(monotonicTimestamp));
         autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
         safetySharingBlocked = !eventDelivery.Current.Safety;
         weatherChangesSharingBlocked = !eventDelivery.Current.WeatherChanges;
@@ -541,6 +544,9 @@ internal sealed class NinaDirectDataProvider :
             // Work that began during the suspended policy-publication window
             // must remain stale even if it completes after capture resumes.
             historyGeneration++;
+            Volatile.Write(ref eventFloodSession, new EventFloodSession(
+                historyGeneration,
+                eventFloodSession.Limiter));
             historyWritesSuspended = false;
         }
     }
@@ -659,8 +665,6 @@ internal sealed class NinaDirectDataProvider :
                         // not reveal whether such a failure occurred.
                         sequenceOutcomeProvenanceComplete = false;
                         sequenceHadFailure = false;
-                        lastSequenceFailureKey = null;
-                        lastSequenceFailureAt = default;
                     }
                 }
             }
@@ -928,8 +932,6 @@ internal sealed class NinaDirectDataProvider :
         {
             sequenceHadFailure = false;
             sequenceOutcomeProvenanceComplete = false;
-            lastSequenceFailureKey = null;
-            lastSequenceFailureAt = default;
         }
         lock (safetyStateGate)
         {
@@ -1044,6 +1046,9 @@ internal sealed class NinaDirectDataProvider :
         lock (historyGenerationGate)
         {
             historyGeneration++;
+            Volatile.Write(ref eventFloodSession, new EventFloodSession(
+                historyGeneration,
+                new DirectEventFloodLimiter(monotonicTimestamp)));
             events.Clear();
             logEvents.Clear();
             images.Clear();
@@ -4818,6 +4823,12 @@ internal sealed class NinaDirectDataProvider :
         {
             return;
         }
+        if (!TryAdmitEvent(historyGeneration, "NINA-LOG", true,
+            ("Level", record.Level), ("Source", record.Source),
+            ("Member", record.Member), ("Message", record.Message)))
+        {
+            return;
+        }
         AddHistoryIfCurrent(logEvents, BuildEvent(
             record.Time,
             "NINA-LOG",
@@ -5028,10 +5039,25 @@ internal sealed class NinaDirectDataProvider :
         string eventName,
         bool chatEnabled,
         params (string Name, object? Value)[] details) =>
-        AddHistoryIfCurrent(
+        TryAdmitEvent(generation, eventName, chatEnabled, details)
+        && AddHistoryIfCurrent(
             events,
             BuildEvent(time, eventName, chatEnabled, details),
             generation);
+
+    private bool TryAdmitEvent(
+        long generation,
+        string eventName,
+        bool chatEnabled,
+        params (string Name, object? Value)[] details)
+    {
+        var session = Volatile.Read(ref eventFloodSession);
+        return session.Generation == generation
+            && IsHistoryGenerationCurrent(generation)
+            && (!chatEnabled || session.Limiter.TryAdmit(eventName, details));
+    }
+
+    private sealed record EventFloodSession(long Generation, DirectEventFloodLimiter Limiter);
 
     private static Dictionary<string, object?> BuildEvent(
         object time,
@@ -6179,8 +6205,6 @@ internal sealed class NinaDirectDataProvider :
                 sequenceOutcomeProvenanceComplete = !sequenceFailureCoverageBlocked
                     && NinaDirectSequenceSnapshot.HasCompleteSequenceFailureCoverage(
                         eventDelivery.Current);
-                lastSequenceFailureKey = null;
-                lastSequenceFailureAt = default;
             }
         }
         AddEvent(historyGeneration, "SEQUENCE-STARTING");
@@ -6280,37 +6304,6 @@ internal sealed class NinaDirectDataProvider :
             return Task.CompletedTask;
         }
 
-        var entityType = args.Entity?.GetType().Name ?? "Unknown";
-        var entity = SanitizeEventText(args.Entity?.Name ?? entityType, 256);
-        var error = SanitizeEventText(args.Exception?.Message ?? "Sequence entity failed.", 1_024);
-        var entityIdentity = args.Entity is null
-            ? 0
-            : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(args.Entity);
-        var key = $"{historyGeneration}|{entityIdentity}|{entityType}|{error}";
-        var now = DateTimeOffset.UtcNow;
-        lock (sequenceFailureGate)
-        {
-            if (string.Equals(lastSequenceFailureKey, key, StringComparison.Ordinal)
-                && now - lastSequenceFailureAt < TimeSpan.FromSeconds(2))
-            {
-                return Task.CompletedTask;
-            }
-            lastSequenceFailureKey = key;
-            lastSequenceFailureAt = now;
-        }
-
-        if (!TryAddEventCore(
-            historyGeneration,
-            DateTime.Now,
-            "SEQUENCE-ENTITY-FAILED",
-            chatEnabled: true,
-            ("Entity", entity),
-            ("EntityType", entityType),
-            ("Error", error),
-            (SequenceFailureDeliveryScopesField, deliveryScopeMask)))
-        {
-            return Task.CompletedTask;
-        }
         lock (sequenceGate)
         {
             if (!started
@@ -6325,9 +6318,28 @@ internal sealed class NinaDirectDataProvider :
             }
             lock (sequenceFailureGate)
             {
+                // A dropped diagnostic is still a real sequence failure.
+                // Keep the terminal outcome truthful even when another
+                // diagnostic already consumed the whole chat allowance.
                 sequenceHadFailure = true;
             }
         }
+        var entityType = args.Entity?.GetType().Name ?? "Unknown";
+        var entity = args.Entity?.Name ?? entityType;
+        var error = args.Exception?.Message ?? "Sequence entity failed.";
+        if (!TryAdmitEvent(historyGeneration, "SEQUENCE-ENTITY-FAILED", true,
+            ("Entity", entity), ("EntityType", entityType), ("Error", error)))
+        {
+            return Task.CompletedTask;
+        }
+        AddHistoryIfCurrent(events, BuildEvent(
+            DateTime.Now,
+            "SEQUENCE-ENTITY-FAILED",
+            chatEnabled: true,
+            ("Entity", SanitizeEventText(entity, 256)),
+            ("EntityType", entityType),
+            ("Error", SanitizeEventText(error, 1_024)),
+            (SequenceFailureDeliveryScopesField, deliveryScopeMask)), historyGeneration);
         return Task.CompletedTask;
     }
 

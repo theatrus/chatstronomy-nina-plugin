@@ -188,6 +188,16 @@ Every raw log level starts off because logs can be frequent and may include
 device or filesystem details; logs are not read or sent until a level is
 enabled.
 
+Chat forwarding drops repeated diagnostics instead of building a backlog.
+Per profile, errors and warnings share a burst allowance of five messages,
+replenished at one every 12 seconds. Other log lines and popup notifications
+share an allowance of ten, replenished at one every six seconds. Identical
+diagnostics are sent at most once a minute, including alternating failures
+from different sequence items. Excess messages are discarded before entering
+chat history; N.I.N.A.'s own logs are unchanged. Normal equipment events,
+safety changes, sequence outcomes, and responses to remote commands remain
+available. Existing event and log sharing selections still apply.
+
 ## Development
 
 ```powershell
