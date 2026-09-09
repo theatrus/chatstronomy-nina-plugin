@@ -41,6 +41,16 @@ internal static class Program
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
         Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
+        Run("Diagnostic floods are bounded and recover without replay", DiagnosticFloodsAreBounded);
+        Run("Concurrent diagnostic callbacks cannot exceed their allowance", DiagnosticFloodsAreThreadSafe);
+        await RunAsync("Native alternating failures are dropped before history and keep truthful outcomes",
+            NativeDiagnosticFloodsRemainBounded);
+        await RunAsync("Flood protection honors consent, profile changes, and transport reconnects",
+            DiagnosticFloodsRespectProfileAndConsent);
+        await RunAsync("Dropped diagnostic counts remain queryable and private across resets",
+            ElisionCountersRemainQueryableAndPrivate);
+        await RunAsync("Sequence elision counts honor the original item delivery scopes",
+            SequenceElisionCountersHonorItemScopes);
         Run("Oversized log messages are truncated", OversizedLogMessagesAreTruncated);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
@@ -2679,7 +2689,8 @@ internal static class Program
         ISafetyMonitorMediator? safetyMonitor = null,
         string? autofocusReportDirectory = null,
         Func<System.Windows.Media.Imaging.BitmapSource, byte[]>? thumbnailEncoder = null,
-        Func<DateTimeOffset>? utcNow = null) => new(
+        Func<DateTimeOffset>? utcNow = null,
+        Func<long>? monotonicTimestamp = null) => new(
             profileService: profileService!,
             telescope: telescope!,
             camera: null!,
@@ -2704,7 +2715,340 @@ internal static class Program
             accessPolicy: access,
             autofocusReportDirectory: autofocusReportDirectory,
             thumbnailEncoder: thumbnailEncoder,
-            utcNow: utcNow);
+            utcNow: utcNow,
+            monotonicTimestamp: monotonicTimestamp);
+
+    private static void DiagnosticFloodsAreBounded()
+    {
+        long now = 0;
+        var limiter = new DirectEventFloodLimiter(() => now);
+        var alternatingAccepted = 0;
+        for (var i = 0; i < 10_000; i++)
+        {
+            if (limiter.TryAdmit("SEQUENCE-ENTITY-FAILED",
+                ("EntityType", i % 2 == 0 ? "PlanTakeExposure" : "SetReadoutMode"),
+                ("Error", "Camera not connected")))
+            {
+                alternatingAccepted++;
+            }
+        }
+        AssertEqual(2, alternatingAccepted);
+        // Alternating duplicates do not spend the allowance for useful new
+        // failures. Different surfaces do share the remaining error budget.
+        AssertTrue(limiter.TryAdmit("NINA-LOG", ("Level", "WARN"), ("Message", "warning")));
+        AssertTrue(limiter.TryAdmit("NINA-NOTIFICATION", ("Level", "ERROR"), ("Message", "popup")));
+        AssertTrue(limiter.TryAdmit("CAMERA-DOWNLOAD-TIMEOUT"));
+        AssertFalse(limiter.TryAdmit("ERROR-AF"));
+        AssertFalse(limiter.TryAdmit("ERROR-PLATESOLVE"));
+        AssertFalse(limiter.TryAdmit("NINA-LOG", ("Level", "FATAL"), ("Message", "fatal")));
+        AssertFalse(limiter.TryAdmit("NINA-NOTIFICATION", ("Level", " critical "), ("Message", "critical")));
+        var ordinaryAccepted = 0;
+        for (var i = 0; i < 10_000; i++)
+        {
+            if (limiter.TryAdmit(i % 2 == 0 ? "NINA-LOG" : "NINA-NOTIFICATION",
+                ("Level", "INFORMATION"), ("Message", $"unique chatter {i}")))
+            {
+                ordinaryAccepted++;
+            }
+            AssertTrue(limiter.TryAdmit("SAFETY-CHANGED", ("IsSafe", i % 2 == 0)));
+            AssertTrue(limiter.TryAdmit("CHATSTRONOMY-COMMAND-FAILED", ("Error", "command outcome")));
+            AssertTrue(limiter.TryAdmit("SEQUENCE-FINISHED"));
+            AssertTrue(limiter.TryAdmit("AUTOFOCUS-FINISHED"));
+            AssertTrue(limiter.TryAdmit("GUIDER-START"));
+        }
+        AssertEqual(10, ordinaryAccepted);
+        now = Stopwatch.Frequency * 6;
+        AssertTrue(limiter.TryAdmit("NINA-LOG", ("Message", "new ordinary")));
+        AssertFalse(limiter.TryAdmit("NINA-LOG", ("Message", "another ordinary")));
+        AssertFalse(limiter.TryAdmit("IMAGE-SAVE-FAILED"));
+        now = Stopwatch.Frequency * 12;
+        AssertTrue(limiter.TryAdmit("IMAGE-SAVE-FAILED"));
+        AssertFalse(limiter.TryAdmit("ERROR-AF"));
+        now = 0; // A clock anomaly cannot mint extra allowance.
+        AssertFalse(limiter.TryAdmit("ERROR-AF"));
+        now = Stopwatch.Frequency * 59;
+        AssertFalse(limiter.TryAdmit("SEQUENCE-ENTITY-FAILED",
+            ("EntityType", "PlanTakeExposure"), ("Error", "Camera not connected")));
+        now = Stopwatch.Frequency * 60;
+        AssertTrue(limiter.TryAdmit("SEQUENCE-ENTITY-FAILED",
+            ("EntityType", "PlanTakeExposure"), ("Error", "Camera not connected")));
+        // No timers or replay queues exist: only this new callback is emitted.
+    }
+
+    private static void DiagnosticFloodsAreThreadSafe()
+    {
+        long now = 0;
+        var limiter = new DirectEventFloodLimiter(() => Volatile.Read(ref now));
+        var accepted = 0;
+        Parallel.For(0, 20_000, i =>
+        {
+            if (limiter.TryAdmit("SEQUENCE-ENTITY-FAILED", ("Error", $"failure {i}")))
+            {
+                Interlocked.Increment(ref accepted);
+            }
+        });
+        // Contended callbacks intentionally drop, so scheduling may leave
+        // some initial tokens unused. It must never exceed the burst cap.
+        AssertTrue(accepted > 0 && accepted <= 5);
+        for (var i = accepted; i < 5; i++)
+        {
+            AssertTrue(limiter.TryAdmit("ERROR-AF", ("Error", $"remaining token {i}")));
+        }
+        Volatile.Write(ref now, Stopwatch.Frequency * 12);
+        AssertTrue(limiter.TryAdmit("ERROR-AF"));
+        AssertFalse(limiter.TryAdmit("ERROR-PLATESOLVE"));
+        // An independent profile/provider never borrows another one's budget.
+        AssertTrue(new DirectEventFloodLimiter(() => now).TryAdmit("ERROR-AF"));
+    }
+
+    private static async Task NativeDiagnosticFloodsRemainBounded()
+    {
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default),
+            monotonicTimestamp: () => 0);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var bindRoot = typeof(NinaDirectDataProvider).GetMethod(
+                "BindSequenceFailureRoot", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var root = new global::NINA.Sequencer.Container.SequenceRootContainer();
+            bindRoot.Invoke(provider, new object?[] { root });
+            await InvokeProviderCallbackAsync(provider, "SequenceStarting", EventArgs.Empty);
+            var exposure = new global::NINA.Plugin.SequencerPlus.UnknownPluginItem { Name = "TakeExposure" };
+            var readout = new global::NINA.Plugin.SequencerPlus.UnknownPluginItem { Name = "SetReadoutMode" };
+            var failure = new InvalidOperationException("Camera not connected");
+            for (var i = 0; i < 10_000; i++)
+            {
+                await root.RaiseFailureEvent(i % 2 == 0 ? exposure : readout, failure);
+            }
+            var events = await SnapshotEvents(provider);
+            AssertEqual(2, events.Count(item => item.GetProperty("Event").GetString() == "SEQUENCE-ENTITY-FAILED"));
+            AssertEqual(3, events.Length);
+
+            // Spend the remaining diagnostic allowance, then begin a fresh
+            // sequence whose first failure must be dropped. Its final state
+            // must still report a failure, not a false successful completion.
+            for (var i = 0; i < 3; i++)
+            {
+                await root.RaiseFailureEvent(exposure, new InvalidOperationException($"other failure {i}"));
+            }
+            await InvokeProviderCallbackAsync(provider, "SequenceStarting", EventArgs.Empty);
+            await root.RaiseFailureEvent(exposure, failure);
+            root.Status = global::NINA.Core.Enum.SequenceEntityStatus.FINISHED;
+            await InvokeProviderCallbackAsync(provider, "SequenceFinished", EventArgs.Empty);
+            events = await SnapshotEvents(provider);
+            AssertEqual(5, events.Count(item => item.GetProperty("Event").GetString() == "SEQUENCE-ENTITY-FAILED"));
+            var outcome = events.Single(item => item.GetProperty("Event").GetString() == "SEQUENCE-FINISHED");
+            AssertEqual("completed_with_failures", outcome.GetProperty("Outcome").GetString());
+            AssertTrue(outcome.GetProperty("HadFailures").GetBoolean());
+        }
+        finally
+        {
+            SetProviderStarted(provider, false);
+        }
+    }
+
+    private static async Task DiagnosticFloodsRespectProfileAndConsent()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default), deliveryPolicy: delivery,
+            monotonicTimestamp: () => 0);
+        var type = typeof(NinaDirectDataProvider);
+        var capture = type.GetMethod("CaptureHistoryGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var recordLog = type.GetMethod("RecordLog", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var recordPopup = type.GetMethod("RecordNotification", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        long Generation() => (long)capture.Invoke(provider, null)!;
+        void Log(long generation, string text) => recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(DateTime.Now, "ERROR", "Camera", "Expose", 1, text), generation,
+        });
+        void Popup(long generation, string text) => recordPopup.Invoke(provider, new object[]
+        {
+            new NinaNotificationRecord(DateTime.Now, "WARNING", "Camera", text), generation,
+        });
+        var firstGeneration = Generation();
+        for (var i = 0; i < 1_000; i++)
+        {
+            Log(firstGeneration, $"disabled error {i}");
+        }
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+        delivery.Update(delivery.Current with { NinaLogErrors = true });
+        for (var i = 0; i < 1_000; i++)
+        {
+            if (i % 2 == 0) Log(firstGeneration, $"enabled error {i}");
+            else Popup(firstGeneration, $"enabled warning {i}");
+        }
+        AssertEqual(5, (await SnapshotEvents(provider)).Length);
+        provider.RotateDirectSession();
+        provider.SuspendEventCapture();
+        provider.ResumeEventCapture();
+        Log(Generation(), "reconnect must not replenish");
+        AssertEqual(5, (await SnapshotEvents(provider)).Length);
+
+        provider.RevokeProfileAccess();
+        provider.Reset();
+        for (var i = 0; i < 1_000; i++)
+        {
+            Log(firstGeneration, $"stale predecessor log {i}");
+            Popup(firstGeneration, $"stale predecessor popup {i}");
+        }
+        for (var i = 0; i < 5; i++) Log(Generation(), $"new profile error {i}");
+        var successor = await SnapshotEvents(provider);
+        AssertEqual(5, successor.Length);
+        AssertTrue(successor.All(item => item.GetProperty("Message").GetString()!.StartsWith("new profile")));
+        delivery.Update(delivery.Current with { NinaLogErrors = false });
+        AssertEqual(0, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task<DirectElidedEvent[]> SnapshotElisions(NinaDirectDataProvider provider)
+        => (await SnapshotElisionState(provider)).Where(item => item.Count > 0).ToArray();
+
+    private static async Task<DirectElidedEvent[]> SnapshotElisionState(NinaDirectDataProvider provider)
+    {
+        var result = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory), CancellationToken.None);
+        var json = JsonSerializer.SerializeToElement(result, DirectProtocol.JsonOptions);
+        // Empty is authoritative. Omission would look like a legacy plugin.
+        return json.GetProperty("ElidedEvents").Deserialize<DirectElidedEvent[]>(DirectProtocol.JsonOptions)!;
+    }
+
+    private static async Task ElisionCountersRemainQueryableAndPrivate()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { NinaLogInformation = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default), deliveryPolicy: delivery,
+            monotonicTimestamp: () => 0);
+        var type = typeof(NinaDirectDataProvider);
+        var recordLog = type.GetMethod("RecordLog", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var recordPopup = type.GetMethod("RecordNotification", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var capture = type.GetMethod("CaptureHistoryGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        long Generation() => (long)capture.Invoke(provider, null)!;
+        void Log(long generation) => recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(DateTime.Now, "INFO", "camera", "capture", 1, "PRIVATE_LOG_TEXT"), generation,
+        });
+        void Popup(long generation) => recordPopup.Invoke(provider, new object[]
+        {
+            new NinaNotificationRecord(DateTime.Now, "WARNING", "camera", "PRIVATE_POPUP_TEXT"), generation,
+        });
+        var generation = Generation();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var initialState = await SnapshotElisionState(provider);
+        AssertTrue(initialState.Length > 0 && initialState.All(item => item.Count == 0));
+        AssertTrue(initialState.Any(item => item.Event == "NINA-LOG" && item.Level == "INFORMATION"));
+        AssertFalse(initialState.Any(item => item.Event == "NINA-LOG" && item.Level == "ERROR"));
+        for (var i = 0; i < 1_000; i++) { Log(generation); Popup(generation); }
+        var counts = await SnapshotElisions(provider);
+        AssertEqual(2, counts.Length);
+        AssertTrue(counts.All(item => item.Count == 999));
+        AssertEqual("INFORMATION", counts.Single(item => item.Event == "NINA-LOG").Level);
+        AssertEqual<string?>(null, counts.Single(item => item.Event == "NINA-NOTIFICATION").Level);
+        AssertTrue(counts.All(item => Guid.TryParse(item.Epoch, out _)));
+        var serialized = JsonSerializer.Serialize(counts, DirectProtocol.JsonOptions);
+        AssertFalse(serialized.Contains("PRIVATE_", StringComparison.Ordinal));
+        // Nothing else arrives after the flood. Repeated queries still expose
+        // the same cumulative values; reads never consume or multiply them.
+        AssertEqual(serialized, JsonSerializer.Serialize(await SnapshotElisions(provider), DirectProtocol.JsonOptions));
+        provider.RotateDirectSession();
+        AssertEqual(serialized, JsonSerializer.Serialize(await SnapshotElisions(provider), DirectProtocol.JsonOptions));
+        var plainEnvelope = JsonSerializer.SerializeToElement(DirectApiEnvelope<string>.Ok("unrelated query"), DirectProtocol.JsonOptions);
+        AssertFalse(plainEnvelope.TryGetProperty("ElidedEvents", out _));
+
+        var oldSession = GetPrivateField<object>(provider, "eventElisionSession");
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = false });
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var restrictedState = await SnapshotElisionState(provider);
+        AssertFalse(restrictedState.Any(item => item.Event == "NINA-NOTIFICATION"));
+        AssertTrue(restrictedState.All(item => item.Epoch != initialState[0].Epoch));
+        for (var i = 0; i < 1_000; i++) Popup(Generation());
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = true });
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var restoredState = await SnapshotElisionState(provider);
+        AssertEqual(0UL, restoredState.Single(item => item.Event == "NINA-NOTIFICATION").Count);
+        AssertTrue(restoredState.All(item => item.Epoch != restrictedState[0].Epoch));
+        Popup(Generation()); // Its old fingerprint still limits forwarding.
+        var newCounts = await SnapshotElisions(provider);
+        AssertEqual(1UL, newCounts.Single().Count);
+        AssertFalse(newCounts.Single().Epoch == counts[0].Epoch);
+
+        // An old callback finishing after a policy change can mutate only its
+        // retired counter object, never the new snapshot or its epoch.
+        var oldCounters = (DirectEventElisionCounters)oldSession.GetType().GetProperty("Counters")!.GetValue(oldSession)!;
+        oldCounters.Record("NINA-NOTIFICATION", delivery.Current, []);
+        AssertEqual(1UL, (await SnapshotElisions(provider)).Single().Count);
+
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaLogInformation = false });
+        Log(Generation());
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        provider.RevokeProfileAccess();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        provider.Reset();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        for (var i = 0; i < 100; i++) Popup(generation);
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        Popup(Generation());
+        Popup(Generation());
+        var resetCounts = await SnapshotElisions(provider);
+        AssertEqual(1UL, resetCounts.Single().Count);
+        AssertFalse(resetCounts.Single().Epoch == newCounts.Single().Epoch);
+
+        // Hold the limiter gate on another thread: dropped callbacks remain
+        // nonblocking and still increment the count exactly once each.
+        var floodSession = GetPrivateField<object>(provider, "eventFloodSession");
+        var limiter = (DirectEventFloodLimiter)floodSession.GetType().GetProperty("Limiter")!.GetValue(floodSession)!;
+        var limiterGate = typeof(DirectEventFloodLimiter).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(limiter)!;
+        using var holding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            lock (limiterGate) { holding.Set(); release.Wait(TimeSpan.FromSeconds(5)); }
+        });
+        AssertTrue(holding.Wait(TimeSpan.FromSeconds(2)));
+        try { Parallel.For(0, 1_000, _ => Popup(Generation())); }
+        finally { release.Set(); }
+        await holder;
+        AssertEqual(1_001UL, (await SnapshotElisions(provider)).Single().Count);
+    }
+
+    private static async Task SequenceElisionCountersHonorItemScopes()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default), deliveryPolicy: delivery,
+            monotonicTimestamp: () => 0);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var root = new global::NINA.Sequencer.Container.SequenceRootContainer();
+            typeof(NinaDirectDataProvider).GetMethod("BindSequenceFailureRoot", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(provider, new object[] { root });
+            var exposure = new global::NINA.Plugin.SequencerPlus.TakeExposure();
+            var failure = new InvalidOperationException("PRIVATE_CAMERA_ERROR");
+            await root.RaiseFailureEvent(exposure, failure);
+            await root.RaiseFailureEvent(exposure, failure);
+            var counts = await SnapshotElisions(provider);
+            AssertEqual("SEQUENCE-ENTITY-FAILED", counts.Single().Event);
+            AssertEqual(1UL, counts.Single().Count);
+            ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = false });
+            await root.RaiseFailureEvent(exposure, failure);
+            AssertEqual(0, (await SnapshotElisions(provider)).Length);
+            var restricted = await SnapshotElisionState(provider);
+            AssertFalse(restricted.Any(item => item.Event == "IMAGE-SAVE-FAILED"));
+            // Sequence itself remains enabled, but even its zero watermark
+            // changes epoch when a contributing item's scope is revoked.
+            AssertFalse(restricted.Single(item => item.Event == "SEQUENCE-ENTITY-FAILED").Epoch == counts.Single().Epoch);
+            ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = true });
+            AssertEqual(0, (await SnapshotElisions(provider)).Length);
+            await root.RaiseFailureEvent(exposure, failure);
+            var reopened = await SnapshotElisions(provider);
+            AssertEqual(1UL, reopened.Single().Count);
+            AssertFalse(reopened.Single().Epoch == counts.Single().Epoch);
+        }
+        finally { SetProviderStarted(provider, false); }
+    }
 
     private static void DirectCommandsUseSemanticWireNames()
     {

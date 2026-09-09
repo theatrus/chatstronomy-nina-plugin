@@ -188,6 +188,28 @@ Every raw log level starts off because logs can be frequent and may include
 device or filesystem details; logs are not read or sent until a level is
 enabled.
 
+Chat forwarding drops repeated diagnostics instead of building a backlog.
+Per profile, errors and warnings share a burst allowance of five messages,
+replenished at one every 12 seconds. Other log lines and popup notifications
+share an allowance of ten, replenished at one every six seconds. Identical
+diagnostics are sent at most once a minute, including alternating failures
+from different sequence items. Excess messages are discarded before entering
+chat history; N.I.N.A.'s own logs are unchanged. Normal equipment events,
+safety changes, sequence outcomes, and responses to remote commands remain
+available. Existing event and log sharing selections still apply.
+
+The Hub can report how many diagnostics were omitted, even if no further
+event arrives. Event-history responses include an additive `ElidedEvents`
+array of cumulative `{Event, Level?, Count, Epoch}` counters, including enabled
+counter slots with a zero count. Unchanged reads do not drain or duplicate
+counts. These contain no suppressed message text.
+Counters obey the original event and log-level permissions, clear when sharing
+settings change, and start a new epoch after a profile reset. Missing slots
+and changed epochs clear pending notices, including messages dropped by the
+Hub itself. An empty array means no diagnostic counters are currently shared;
+older runtimes can ignore the new envelope field while continuing to read the
+unchanged event list.
+
 ## Development
 
 ```powershell
