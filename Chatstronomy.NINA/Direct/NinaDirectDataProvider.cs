@@ -1086,8 +1086,9 @@ internal sealed class NinaDirectDataProvider :
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
                     SnapshotEventHistoryForQuery(query, directSessionToken)) with
                 {
-                    // Always present, including [] after a privacy reset, so
-                    // consumers can discard stale pending source summaries.
+                    // Always present, including zero-count permitted slots,
+                    // so consumers can discard stale pending summaries when
+                    // a slot is revoked or its privacy epoch changes.
                     ElidedEvents = SnapshotElidedEvents(),
                 },
             DirectQueryKind.ImageHistory =>

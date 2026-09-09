@@ -2902,6 +2902,9 @@ internal static class Program
     }
 
     private static async Task<DirectElidedEvent[]> SnapshotElisions(NinaDirectDataProvider provider)
+        => (await SnapshotElisionState(provider)).Where(item => item.Count > 0).ToArray();
+
+    private static async Task<DirectElidedEvent[]> SnapshotElisionState(NinaDirectDataProvider provider)
     {
         var result = await provider.ExecuteAsync(
             new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory), CancellationToken.None);
@@ -2932,6 +2935,10 @@ internal static class Program
         });
         var generation = Generation();
         AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var initialState = await SnapshotElisionState(provider);
+        AssertTrue(initialState.Length > 0 && initialState.All(item => item.Count == 0));
+        AssertTrue(initialState.Any(item => item.Event == "NINA-LOG" && item.Level == "INFORMATION"));
+        AssertFalse(initialState.Any(item => item.Event == "NINA-LOG" && item.Level == "ERROR"));
         for (var i = 0; i < 1_000; i++) { Log(generation); Popup(generation); }
         var counts = await SnapshotElisions(provider);
         AssertEqual(2, counts.Length);
@@ -2952,10 +2959,16 @@ internal static class Program
         var oldSession = GetPrivateField<object>(provider, "eventElisionSession");
         ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = false });
         AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var restrictedState = await SnapshotElisionState(provider);
+        AssertFalse(restrictedState.Any(item => item.Event == "NINA-NOTIFICATION"));
+        AssertTrue(restrictedState.All(item => item.Epoch != initialState[0].Epoch));
         for (var i = 0; i < 1_000; i++) Popup(Generation());
         AssertEqual(0, (await SnapshotElisions(provider)).Length);
         ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = true });
         AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        var restoredState = await SnapshotElisionState(provider);
+        AssertEqual(0UL, restoredState.Single(item => item.Event == "NINA-NOTIFICATION").Count);
+        AssertTrue(restoredState.All(item => item.Epoch != restrictedState[0].Epoch));
         Popup(Generation()); // Its old fingerprint still limits forwarding.
         var newCounts = await SnapshotElisions(provider);
         AssertEqual(1UL, newCounts.Single().Count);
@@ -3022,6 +3035,11 @@ internal static class Program
             ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = false });
             await root.RaiseFailureEvent(exposure, failure);
             AssertEqual(0, (await SnapshotElisions(provider)).Length);
+            var restricted = await SnapshotElisionState(provider);
+            AssertFalse(restricted.Any(item => item.Event == "IMAGE-SAVE-FAILED"));
+            // Sequence itself remains enabled, but even its zero watermark
+            // changes epoch when a contributing item's scope is revoked.
+            AssertFalse(restricted.Single(item => item.Event == "SEQUENCE-ENTITY-FAILED").Epoch == counts.Single().Epoch);
             ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = true });
             AssertEqual(0, (await SnapshotElisions(provider)).Length);
             await root.RaiseFailureEvent(exposure, failure);

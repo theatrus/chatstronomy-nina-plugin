@@ -72,7 +72,11 @@ internal sealed class DirectEventElisionCounters(DirectEventDeliveryOptions poli
         foreach (var counter in counters)
         {
             var count = Volatile.Read(ref counter.Count);
-            if (count > 0 && Enabled(counter, current))
+            // Zero slots still advertise a permission/epoch watermark. The
+            // Hub may have dropped an event itself even when this source has
+            // no drops; a later revoked slot or new epoch must clear that
+            // pending Hub summary as well.
+            if (Enabled(counter, current))
             {
                 result.Add(new(counter.Event, counter.Level, (ulong)count, epoch));
             }
