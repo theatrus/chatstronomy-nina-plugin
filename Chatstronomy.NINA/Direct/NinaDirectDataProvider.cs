@@ -106,6 +106,7 @@ internal sealed class NinaDirectDataProvider :
     private readonly Func<DateTimeOffset> utcNow;
     private readonly Func<long>? monotonicTimestamp;
     private EventFloodSession eventFloodSession;
+    private EventElisionSession? eventElisionSession;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
         new(EventHistoryCapacity);
     private readonly BoundedHistory<Dictionary<string, object?>> logEvents =
@@ -261,6 +262,7 @@ internal sealed class NinaDirectDataProvider :
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         this.monotonicTimestamp = monotonicTimestamp;
         eventFloodSession = new(0, new DirectEventFloodLimiter(monotonicTimestamp));
+        eventElisionSession = new(0, new DirectEventElisionCounters(eventDelivery.Current));
         autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
         safetySharingBlocked = !eventDelivery.Current.Safety;
         weatherChangesSharingBlocked = !eventDelivery.Current.WeatherChanges;
@@ -547,6 +549,11 @@ internal sealed class NinaDirectDataProvider :
             Volatile.Write(ref eventFloodSession, new EventFloodSession(
                 historyGeneration,
                 eventFloodSession.Limiter));
+            if (eventElisionSession is { } elision)
+            {
+                Volatile.Write(ref eventElisionSession, new EventElisionSession(
+                    historyGeneration, elision.Counters));
+            }
             historyWritesSuspended = false;
         }
     }
@@ -555,6 +562,9 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        // Close count publication before consent changes. Old callbacks keep
+        // only their old counter object; re-enabling cannot reveal that tally.
+        Volatile.Write(ref eventElisionSession, null);
         if (previous.SlewMotion != current.SlewMotion)
         {
             // A movement spanning a local transmission-policy boundary has no
@@ -675,6 +685,8 @@ internal sealed class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        Volatile.Write(ref eventElisionSession, new EventElisionSession(
+            CaptureHistoryGeneration(), new DirectEventElisionCounters(current)));
         if (previous.SlewMotion != current.SlewMotion)
         {
             lock (motionGate)
@@ -757,6 +769,7 @@ internal sealed class NinaDirectDataProvider :
 
     public void RevokeProfileAccess()
     {
+        Volatile.Write(ref eventElisionSession, null);
         // Close motion publication and the predecessor Direct session before
         // any watcher stop that may wait for filesystem activity. Equipment
         // property changes can continue on N.I.N.A.'s update thread while
@@ -1049,6 +1062,9 @@ internal sealed class NinaDirectDataProvider :
             Volatile.Write(ref eventFloodSession, new EventFloodSession(
                 historyGeneration,
                 new DirectEventFloodLimiter(monotonicTimestamp)));
+            Volatile.Write(ref eventElisionSession, new EventElisionSession(
+                historyGeneration,
+                new DirectEventElisionCounters(eventDelivery.Current)));
             events.Clear();
             logEvents.Clear();
             images.Clear();
@@ -1068,7 +1084,12 @@ internal sealed class NinaDirectDataProvider :
         {
             DirectQueryKind.EventHistory =>
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
-                    SnapshotEventHistoryForQuery(query, directSessionToken)),
+                    SnapshotEventHistoryForQuery(query, directSessionToken)) with
+                {
+                    // Always present, including [] after a privacy reset, so
+                    // consumers can discard stale pending source summaries.
+                    ElidedEvents = SnapshotElidedEvents(),
+                },
             DirectQueryKind.ImageHistory =>
                 DirectApiEnvelope<IReadOnlyList<DirectImageMetadata>>.Ok(
                     SnapshotImagesForQuery(query, directSessionToken)),
@@ -5052,12 +5073,32 @@ internal sealed class NinaDirectDataProvider :
         params (string Name, object? Value)[] details)
     {
         var session = Volatile.Read(ref eventFloodSession);
-        return session.Generation == generation
-            && IsHistoryGenerationCurrent(generation)
-            && (!chatEnabled || session.Limiter.TryAdmit(eventName, details));
+        var elision = Volatile.Read(ref eventElisionSession);
+        if (session.Generation != generation || !IsHistoryGenerationCurrent(generation))
+        {
+            return false;
+        }
+        if (!chatEnabled || session.Limiter.TryAdmit(eventName, details))
+        {
+            return true;
+        }
+        if (elision?.Generation == generation)
+        {
+            elision.Counters.Record(eventName, eventDelivery.Current, details);
+        }
+        return false;
     }
 
     private sealed record EventFloodSession(long Generation, DirectEventFloodLimiter Limiter);
+    private sealed record EventElisionSession(long Generation, DirectEventElisionCounters Counters);
+
+    private IReadOnlyList<DirectElidedEvent> SnapshotElidedEvents()
+    {
+        var session = Volatile.Read(ref eventElisionSession);
+        if (session is null || !IsHistoryGenerationCurrent(session.Generation)) return [];
+        var counts = session.Counters.Snapshot(eventDelivery.Current);
+        return ReferenceEquals(session, Volatile.Read(ref eventElisionSession)) ? counts : [];
+    }
 
     private static Dictionary<string, object?> BuildEvent(
         object time,
@@ -6328,7 +6369,8 @@ internal sealed class NinaDirectDataProvider :
         var entity = args.Entity?.Name ?? entityType;
         var error = args.Exception?.Message ?? "Sequence entity failed.";
         if (!TryAdmitEvent(historyGeneration, "SEQUENCE-ENTITY-FAILED", true,
-            ("Entity", entity), ("EntityType", entityType), ("Error", error)))
+            ("Entity", entity), ("EntityType", entityType), ("Error", error),
+            (SequenceFailureDeliveryScopesField, deliveryScopeMask)))
         {
             return Task.CompletedTask;
         }

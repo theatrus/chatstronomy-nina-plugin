@@ -198,6 +198,15 @@ chat history; N.I.N.A.'s own logs are unchanged. Normal equipment events,
 safety changes, sequence outcomes, and responses to remote commands remain
 available. Existing event and log sharing selections still apply.
 
+The Hub can report how many diagnostics were omitted, even if no further
+event arrives. Event-history responses include an additive `ElidedEvents`
+array of cumulative `{Event, Level?, Count, Epoch}` counters; unchanged reads
+do not drain or duplicate counts. These contain no suppressed message text.
+Counters obey the original event and log-level permissions, clear when sharing
+settings change, and start a new epoch after a profile reset. An empty array
+explicitly clears pending source-count notices; older runtimes can ignore the
+new envelope field while continuing to read the unchanged event list.
+
 ## Development
 
 ```powershell

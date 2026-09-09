@@ -47,6 +47,10 @@ internal static class Program
             NativeDiagnosticFloodsRemainBounded);
         await RunAsync("Flood protection honors consent, profile changes, and transport reconnects",
             DiagnosticFloodsRespectProfileAndConsent);
+        await RunAsync("Dropped diagnostic counts remain queryable and private across resets",
+            ElisionCountersRemainQueryableAndPrivate);
+        await RunAsync("Sequence elision counts honor the original item delivery scopes",
+            SequenceElisionCountersHonorItemScopes);
         Run("Oversized log messages are truncated", OversizedLogMessagesAreTruncated);
         Run("Legacy hosted defaults migrate to the hub", LegacyHostedDefaultsMigrateToHub);
         Run("Hosted hub URLs require TLS and map to Direct WSS", HostedHubUrlsAreSecure);
@@ -2895,6 +2899,137 @@ internal static class Program
         AssertTrue(successor.All(item => item.GetProperty("Message").GetString()!.StartsWith("new profile")));
         delivery.Update(delivery.Current with { NinaLogErrors = false });
         AssertEqual(0, (await SnapshotEvents(provider)).Length);
+    }
+
+    private static async Task<DirectElidedEvent[]> SnapshotElisions(NinaDirectDataProvider provider)
+    {
+        var result = await provider.ExecuteAsync(
+            new DirectQuery(Guid.NewGuid(), DirectQueryKind.EventHistory), CancellationToken.None);
+        var json = JsonSerializer.SerializeToElement(result, DirectProtocol.JsonOptions);
+        // Empty is authoritative. Omission would look like a legacy plugin.
+        return json.GetProperty("ElidedEvents").Deserialize<DirectElidedEvent[]>(DirectProtocol.JsonOptions)!;
+    }
+
+    private static async Task ElisionCountersRemainQueryableAndPrivate()
+    {
+        var delivery = new DirectEventDeliveryPolicy(
+            DirectEventDeliveryOptions.Default with { NinaLogInformation = true });
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default), deliveryPolicy: delivery,
+            monotonicTimestamp: () => 0);
+        var type = typeof(NinaDirectDataProvider);
+        var recordLog = type.GetMethod("RecordLog", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var recordPopup = type.GetMethod("RecordNotification", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var capture = type.GetMethod("CaptureHistoryGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        long Generation() => (long)capture.Invoke(provider, null)!;
+        void Log(long generation) => recordLog.Invoke(provider, new object[]
+        {
+            new NinaLogRecord(DateTime.Now, "INFO", "camera", "capture", 1, "PRIVATE_LOG_TEXT"), generation,
+        });
+        void Popup(long generation) => recordPopup.Invoke(provider, new object[]
+        {
+            new NinaNotificationRecord(DateTime.Now, "WARNING", "camera", "PRIVATE_POPUP_TEXT"), generation,
+        });
+        var generation = Generation();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        for (var i = 0; i < 1_000; i++) { Log(generation); Popup(generation); }
+        var counts = await SnapshotElisions(provider);
+        AssertEqual(2, counts.Length);
+        AssertTrue(counts.All(item => item.Count == 999));
+        AssertEqual("INFORMATION", counts.Single(item => item.Event == "NINA-LOG").Level);
+        AssertEqual<string?>(null, counts.Single(item => item.Event == "NINA-NOTIFICATION").Level);
+        AssertTrue(counts.All(item => Guid.TryParse(item.Epoch, out _)));
+        var serialized = JsonSerializer.Serialize(counts, DirectProtocol.JsonOptions);
+        AssertFalse(serialized.Contains("PRIVATE_", StringComparison.Ordinal));
+        // Nothing else arrives after the flood. Repeated queries still expose
+        // the same cumulative values; reads never consume or multiply them.
+        AssertEqual(serialized, JsonSerializer.Serialize(await SnapshotElisions(provider), DirectProtocol.JsonOptions));
+        provider.RotateDirectSession();
+        AssertEqual(serialized, JsonSerializer.Serialize(await SnapshotElisions(provider), DirectProtocol.JsonOptions));
+        var plainEnvelope = JsonSerializer.SerializeToElement(DirectApiEnvelope<string>.Ok("unrelated query"), DirectProtocol.JsonOptions);
+        AssertFalse(plainEnvelope.TryGetProperty("ElidedEvents", out _));
+
+        var oldSession = GetPrivateField<object>(provider, "eventElisionSession");
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = false });
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        for (var i = 0; i < 1_000; i++) Popup(Generation());
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaNotifications = true });
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        Popup(Generation()); // Its old fingerprint still limits forwarding.
+        var newCounts = await SnapshotElisions(provider);
+        AssertEqual(1UL, newCounts.Single().Count);
+        AssertFalse(newCounts.Single().Epoch == counts[0].Epoch);
+
+        // An old callback finishing after a policy change can mutate only its
+        // retired counter object, never the new snapshot or its epoch.
+        var oldCounters = (DirectEventElisionCounters)oldSession.GetType().GetProperty("Counters")!.GetValue(oldSession)!;
+        oldCounters.Record("NINA-NOTIFICATION", delivery.Current, []);
+        AssertEqual(1UL, (await SnapshotElisions(provider)).Single().Count);
+
+        ApplyEventDeliveryChange(provider, delivery, delivery.Current with { NinaLogInformation = false });
+        Log(Generation());
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        provider.RevokeProfileAccess();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        provider.Reset();
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        for (var i = 0; i < 100; i++) Popup(generation);
+        AssertEqual(0, (await SnapshotElisions(provider)).Length);
+        Popup(Generation());
+        Popup(Generation());
+        var resetCounts = await SnapshotElisions(provider);
+        AssertEqual(1UL, resetCounts.Single().Count);
+        AssertFalse(resetCounts.Single().Epoch == newCounts.Single().Epoch);
+
+        // Hold the limiter gate on another thread: dropped callbacks remain
+        // nonblocking and still increment the count exactly once each.
+        var floodSession = GetPrivateField<object>(provider, "eventFloodSession");
+        var limiter = (DirectEventFloodLimiter)floodSession.GetType().GetProperty("Limiter")!.GetValue(floodSession)!;
+        var limiterGate = typeof(DirectEventFloodLimiter).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(limiter)!;
+        using var holding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            lock (limiterGate) { holding.Set(); release.Wait(TimeSpan.FromSeconds(5)); }
+        });
+        AssertTrue(holding.Wait(TimeSpan.FromSeconds(2)));
+        try { Parallel.For(0, 1_000, _ => Popup(Generation())); }
+        finally { release.Set(); }
+        await holder;
+        AssertEqual(1_001UL, (await SnapshotElisions(provider)).Single().Count);
+    }
+
+    private static async Task SequenceElisionCountersHonorItemScopes()
+    {
+        var delivery = new DirectEventDeliveryPolicy(DirectEventDeliveryOptions.Default);
+        using var provider = CreateSecurityTestProvider(
+            new DirectAccessPolicy(DirectAccessOptions.Default), deliveryPolicy: delivery,
+            monotonicTimestamp: () => 0);
+        SetProviderStarted(provider, true);
+        try
+        {
+            var root = new global::NINA.Sequencer.Container.SequenceRootContainer();
+            typeof(NinaDirectDataProvider).GetMethod("BindSequenceFailureRoot", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(provider, new object[] { root });
+            var exposure = new global::NINA.Plugin.SequencerPlus.TakeExposure();
+            var failure = new InvalidOperationException("PRIVATE_CAMERA_ERROR");
+            await root.RaiseFailureEvent(exposure, failure);
+            await root.RaiseFailureEvent(exposure, failure);
+            var counts = await SnapshotElisions(provider);
+            AssertEqual("SEQUENCE-ENTITY-FAILED", counts.Single().Event);
+            AssertEqual(1UL, counts.Single().Count);
+            ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = false });
+            await root.RaiseFailureEvent(exposure, failure);
+            AssertEqual(0, (await SnapshotElisions(provider)).Length);
+            ApplyEventDeliveryChange(provider, delivery, delivery.Current with { Images = true });
+            AssertEqual(0, (await SnapshotElisions(provider)).Length);
+            await root.RaiseFailureEvent(exposure, failure);
+            var reopened = await SnapshotElisions(provider);
+            AssertEqual(1UL, reopened.Single().Count);
+            AssertFalse(reopened.Single().Epoch == counts.Single().Epoch);
+        }
+        finally { SetProviderStarted(provider, false); }
     }
 
     private static void DirectCommandsUseSemanticWireNames()

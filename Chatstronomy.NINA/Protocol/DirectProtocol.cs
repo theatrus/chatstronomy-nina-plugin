@@ -461,6 +461,10 @@ internal sealed record DirectApiEnvelope<T>(
     [property: JsonPropertyName("Success")] bool Success,
     [property: JsonPropertyName("Type")] string Type)
 {
+    [JsonPropertyName("ElidedEvents")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<DirectElidedEvent>? ElidedEvents { get; init; }
+
     internal static DirectApiEnvelope<T> Ok(T response) =>
         new(response, string.Empty, 200, true, "API");
 
@@ -471,6 +475,13 @@ internal sealed record DirectApiEnvelope<T>(
     internal static DirectApiEnvelope<T> Accepted(T response) =>
         new(response, string.Empty, 202, true, "API");
 }
+
+internal sealed record DirectElidedEvent(
+    [property: JsonPropertyName("Event")] string Event,
+    [property: JsonPropertyName("Level")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Level,
+    [property: JsonPropertyName("Count")] ulong Count,
+    [property: JsonPropertyName("Epoch")] string Epoch);
 
 internal sealed record DirectCapabilities(
     [property: JsonPropertyName("event_history")] bool EventHistory,
