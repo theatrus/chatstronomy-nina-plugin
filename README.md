@@ -101,6 +101,11 @@ Add the matching trigger to the active target's enclosing instruction set:
 | `/center-rotate-target` | Chatstronomy Center and Rotate Target |
 
 An enclosing parent instruction set can provide the trigger for its targets.
+For Target Scheduler's standard planning container, add the triggers directly
+to its Target Scheduler container. Requests follow the same scheduled project
+and target across its per-exposure plans, but are cancelled if the target or
+its coordinates change. Other scheduler modes without a verifiable target
+are rejected.
 During a running sequence, requests require a matching active trigger; they
 are rejected if no suitable trigger is available. Each operation has its own
 local permission. Target commands re-steer to the current target resolved

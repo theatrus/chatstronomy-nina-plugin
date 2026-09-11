@@ -32,6 +32,7 @@ internal sealed class SequenceCommandCoordinator
     private readonly object gate = new();
     private readonly Dictionary<ChatstronomyCommandTrigger, Registration> registrations = new();
     private long registrationVersion;
+    private long invalidationVersion;
     private Request? current;
 
     internal SequenceCommandCoordinator() { }
@@ -47,7 +48,15 @@ internal sealed class SequenceCommandCoordinator
 
     internal bool HasActiveTrigger(SequenceCommandKind kind, ISequenceRootContainer root, ISequenceContainer scope)
     {
-        lock (gate) return FindRegistration(kind, root, scope) is not null;
+        long version;
+        lock (gate) version = invalidationVersion;
+        var normalizedScope = TargetSchedulerCommandContext.NormalizeScope(scope);
+        var discovery = CaptureSchedulerTriggers(root, scope, normalizedScope);
+        lock (gate)
+        {
+            if (version != invalidationVersion || !ApplySchedulerTriggers(root, normalizedScope, discovery)) return false;
+            return FindRegistration(kind, root, normalizedScope) is not null;
+        }
     }
 
     /// <summary>
@@ -71,6 +80,8 @@ internal sealed class SequenceCommandCoordinator
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(validate);
         ArgumentNullException.ThrowIfNull(execute);
+        long version;
+        lock (gate) version = invalidationVersion;
         cancellationToken.ThrowIfCancellationRequested();
         if (!validate()) throw new InvalidOperationException("The command is no longer permitted in this N.I.N.A. profile.");
         var lifetime = timeout ?? TimeSpan.FromMinutes(30);
@@ -84,16 +95,28 @@ internal sealed class SequenceCommandCoordinator
         var target = NativeTargetCommands.TryCaptureTarget(scope);
         if (target is null && kind is SequenceCommandKind.SlewToTarget or SequenceCommandKind.CenterTarget or SequenceCommandKind.CenterRotateTarget)
             throw new InvalidOperationException("There is no active native target for this sequence command.");
+        var originalScope = scope;
+        scope = TargetSchedulerCommandContext.NormalizeScope(scope);
+        var discovery = CaptureSchedulerTriggers(root, originalScope, scope);
+        Request? observed;
+        lock (gate) observed = current;
+        var sameTarget = observed is not null && deduplicationKey is not null
+            && (observed.Target is null ? target is null : observed.Target.IsCurrent(originalScope));
         Request request;
         lock (gate)
         {
+            if (version != invalidationVersion)
+                throw new InvalidOperationException("The sequence or trigger changed while this command was being accepted.");
             if (current is { } existing)
             {
                 if (deduplicationKey is not null && existing.Kind == kind
                     && existing.Key == deduplicationKey && ReferenceEquals(existing.Root, root)
-                    && ReferenceEquals(existing.Scope, scope)) return existing.Completion.Task;
+                    && ReferenceEquals(existing.Scope, scope) && !existing.Settling && existing.CancellationReason is null
+                    && ReferenceEquals(existing, observed) && sameTarget) return existing.Completion.Task;
                 throw new InvalidOperationException("Another Chatstronomy sequence command is already queued or running.");
             }
+            if (!ApplySchedulerTriggers(root, scope, discovery))
+                throw new InvalidOperationException("The Target Scheduler instruction is no longer the single active sequence operation.");
             var registration = FindRegistration(kind, root, scope)
                 ?? throw new InvalidOperationException($"Add an enabled {ChatstronomyCommandTrigger.DisplayName(kind)} trigger to the active sequential instruction set first.");
             request = new(kind, root, scope, registration, target, validate, execute, failure, estimate, deduplicationKey);
@@ -114,7 +137,13 @@ internal sealed class SequenceCommandCoordinator
     internal void Invalidate(string reason)
     {
         Request? request;
-        lock (gate) request = current;
+        lock (gate)
+        {
+            invalidationVersion++;
+            request = current;
+            foreach (var registration in registrations.Values.Where(item => item.DynamicScheduler).ToArray())
+                registrations.Remove(registration.Trigger);
+        }
         if (request is not null) Cancel(request, new OperationCanceledException(reason));
     }
 
@@ -166,11 +195,60 @@ internal sealed class SequenceCommandCoordinator
         Request? request = null;
         lock (gate)
         {
+            invalidationVersion++;
             if (registrations.Remove(trigger) && current?.Registration.Trigger == trigger) request = current;
         }
         if (request is not null) Cancel(request,
             new OperationCanceledException("The sequence command trigger left its active instruction set."));
     }
+
+    private static SchedulerDiscovery CaptureSchedulerTriggers(ISequenceRootContainer root, ISequenceContainer originalScope,
+        ISequenceContainer normalizedScope)
+    {
+        // Target Scheduler 5.x bypasses its base execution strategy, so its
+        // own triggers never receive SequenceBlockInitialize. Only recover
+        // that known extension's live trigger set; never register arbitrary
+        // inactive/future containers merely because a command names them.
+        if (!TargetSchedulerCommandContext.IsSchedulerScope(normalizedScope)) return new(true, null, []);
+        if (root.Status != SequenceEntityStatus.RUNNING || normalizedScope.Status != SequenceEntityStatus.RUNNING
+            || normalizedScope is not ITriggerable triggerable
+            || !SafeAncestry(originalScope, root) || !IsDescendant(originalScope, normalizedScope)) return new(false, null, []);
+        var running = root.GetCurrentRunningItems().Where(item => item is not ISequenceContainer
+            && item.Status == SequenceEntityStatus.RUNNING).Take(2).ToArray();
+        if (running.Length != 1 || running[0].Parent is null
+            || !IsDescendant(running[0].Parent, originalScope) || !SafeAncestry(running[0].Parent, root)) return new(false, null, []);
+        // Snapshot outside gate: native Remove(trigger) holds its collection
+        // lock while invoking AfterParentChanged -> Unregister.
+        return new(true, running[0], triggerable.GetTriggersSnapshot().OfType<ChatstronomyCommandTrigger>().ToArray());
+    }
+
+    private bool ApplySchedulerTriggers(ISequenceRootContainer root, ISequenceContainer normalizedScope,
+        SchedulerDiscovery discovery)
+    {
+        foreach (var registration in registrations.Values.Where(item => item.DynamicScheduler).ToArray())
+        {
+            if (registration.Root.Status != SequenceEntityStatus.RUNNING
+                || registration.Parent.Status != SequenceEntityStatus.RUNNING
+                || !ReferenceEquals(RootOf(registration.Parent), registration.Root)
+                || !ReferenceEquals(registration.Trigger.Parent, registration.Parent)) registrations.Remove(registration.Trigger);
+        }
+        if (!discovery.Eligible || discovery.RunningLeaf is { } leaf
+            && (leaf.Status != SequenceEntityStatus.RUNNING || leaf.Parent is null
+                || !IsDescendant(leaf.Parent, normalizedScope) || !SafeAncestry(leaf.Parent, root))) return false;
+        foreach (var trigger in discovery.Triggers)
+        {
+            if (registrations.Count >= MaximumRegistrations) break;
+            if (trigger.Status == SequenceEntityStatus.DISABLED || !ReferenceEquals(trigger.Parent, normalizedScope)
+                || registrations.ContainsKey(trigger)) continue;
+            registrations[trigger] = new(trigger, normalizedScope, root, ++registrationVersion, DynamicScheduler: true);
+        }
+        return true;
+    }
+
+    private static bool IsAttached(Registration registration) =>
+        ReferenceEquals(registration.Trigger.Parent, registration.Parent)
+        && registration.Parent is ITriggerable triggerable
+        && triggerable.GetTriggersSnapshot().Any(trigger => ReferenceEquals(trigger, registration.Trigger));
 
     internal bool ShouldExecute(ChatstronomyCommandTrigger trigger, ISequenceItem? previous, ISequenceItem? next)
     {
@@ -261,16 +339,20 @@ internal sealed class SequenceCommandCoordinator
 
     private bool Eligible(Request request, ChatstronomyCommandTrigger trigger, ISequenceContainer context)
     {
+        Registration? active;
         lock (gate)
         {
-            return ReferenceEquals(current, request)
-                && !request.Settling && request.CancellationReason is null
-                && registrations.TryGetValue(trigger, out var active) && active.Version == request.Registration.Version
-                && trigger.Status != SequenceEntityStatus.DISABLED && ReferenceEquals(trigger.Parent, active.Parent)
-                && active.Parent.Status == SequenceEntityStatus.RUNNING && request.Root.Status == SequenceEntityStatus.RUNNING
-                && IsDescendant(context, request.Scope) && IsDescendant(context, active.Parent)
-                && (request.Target is null || request.Target.IsCurrent(context))
-                && SafeAncestry(context, request.Root);
+            if (!ReferenceEquals(current, request) || request.Settling || request.CancellationReason is not null
+                || !registrations.TryGetValue(trigger, out active) || active.Version != request.Registration.Version) return false;
+        }
+        if (trigger.Status == SequenceEntityStatus.DISABLED || !IsAttached(active)
+            || active.Parent.Status != SequenceEntityStatus.RUNNING || request.Root.Status != SequenceEntityStatus.RUNNING
+            || !IsDescendant(context, request.Scope) || !IsDescendant(context, active.Parent)
+            || (request.Target is not null && !request.Target.IsCurrent(context)) || !SafeAncestry(context, request.Root)) return false;
+        lock (gate)
+        {
+            return ReferenceEquals(current, request) && !request.Settling && request.CancellationReason is null
+                && registrations.TryGetValue(trigger, out var stillActive) && stillActive.Version == active.Version;
         }
     }
 
@@ -380,7 +462,9 @@ internal sealed class SequenceCommandCoordinator
     }
 
     private sealed record Registration(ChatstronomyCommandTrigger Trigger, ISequenceContainer Parent,
-        ISequenceRootContainer Root, long Version);
+        ISequenceRootContainer Root, long Version, bool DynamicScheduler = false);
+
+    private sealed record SchedulerDiscovery(bool Eligible, ISequenceItem? RunningLeaf, ChatstronomyCommandTrigger[] Triggers);
 
     private sealed class Request(SequenceCommandKind kind, ISequenceRootContainer root, ISequenceContainer scope,
         Registration registration, NativeTargetCommands.TargetSnapshot? target, Func<bool> validate,

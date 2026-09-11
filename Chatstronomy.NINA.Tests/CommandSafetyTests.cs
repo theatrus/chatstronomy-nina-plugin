@@ -87,6 +87,19 @@ internal static class CommandSafetyTests
         {
             await fixture.Send(DirectRigCommandKind.StartAutofocus);
             await fixture.WaitForAutofocus();
+            await fixture.Send(DirectRigCommandKind.CancelAutofocus);
+            await WaitUntil(() => fixture.AutofocusToken.IsCancellationRequested, "Autofocus cancellation was not signalled");
+            // Some autofocus implementations return a partial report while
+            // unwinding cancellation rather than throwing cancellation.
+            fixture.AutofocusCompletion.SetResult(new AutoFocusReport { Timestamp = DateTime.Now, Filter = "L" });
+            await fixture.WaitForRelease();
+            Check(fixture.AutofocusHistory == 0 && fixture.WindowCloses == 1,
+                "A cancelled autofocus report was published as completed");
+        }
+        using (var fixture = new Fixture())
+        {
+            await fixture.Send(DirectRigCommandKind.StartAutofocus);
+            await fixture.WaitForAutofocus();
             fixture.Provider.RevokeRemoteControl();
             await WaitUntil(() => fixture.AutofocusToken.IsCancellationRequested, "Revocation did not cancel autofocus");
             Check(fixture.AutofocusToken.IsCancellationRequested, "Revocation did not cancel owned autofocus");
@@ -223,15 +236,38 @@ internal static class CommandSafetyTests
 
     private static async Task NativeAutofocusCannotBeReenteredOrCancelled()
     {
-        using var fixture = new Fixture();
-        fixture.Provider.AutoFocusRunStarting();
-        await Reject(() => fixture.Send(DirectRigCommandKind.StartAutofocus), "already active");
-        var cancelled = await fixture.Send(DirectRigCommandKind.CancelAutofocus);
-        Check(cancelled is DirectApiEnvelope<string> { StatusCode: 200 },
-            "Cancel should report no owned request when only native autofocus is running");
-        await Reject(() => fixture.Send(DirectRigCommandKind.StartAutofocus), "already active");
-        Check(fixture.AutofocusCalls == 0 && fixture.HardwareCalls == 0,
-            "A remote request reentered or cancelled native/Hocus autofocus");
+        foreach (var canceled in new[] { false, true })
+        {
+            using var fixture = new Fixture();
+            // N.I.N.A.'s autofocus tool owns capture until cleanup completes.
+            // Its success event is not an end event: failures/cancellations
+            // never emit it, and successful runs still have cleanup to do.
+            fixture.CameraOwner = new object();
+            fixture.Provider.AutoFocusRunStarting();
+            await Reject(() => fixture.Send(DirectRigCommandKind.StartAutofocus), "camera is busy");
+            var cancellationReply = await fixture.Send(DirectRigCommandKind.CancelAutofocus);
+            Check(cancellationReply is DirectApiEnvelope<string> { StatusCode: 200 },
+                "Cancel should report no owned request when only native autofocus is running");
+            await Reject(() => fixture.Send(DirectRigCommandKind.StartAutofocus), "camera is busy");
+            Check(fixture.AutofocusCalls == 0 && fixture.HardwareCalls == 0,
+                "A remote request reentered or cancelled native/Hocus autofocus");
+
+            fixture.CameraOwner = null; // Native failure/cancel cleanup, without a success event.
+            fixture.AutofocusStarted = _ => fixture.Provider.AutoFocusRunStarting();
+            AssertAccepted(await fixture.Send(DirectRigCommandKind.StartAutofocus));
+            await fixture.WaitForAutofocus();
+            if (canceled) fixture.AutofocusCompletion.SetCanceled();
+            else fixture.AutofocusCompletion.SetException(new InvalidOperationException("Autofocus failed"));
+            await fixture.WaitForRelease();
+
+            // An owned failure/cancellation likewise cannot latch the profile
+            // into a permanently busy state after its awaited cleanup exits.
+            fixture.AutofocusCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            AssertAccepted(await fixture.Send(DirectRigCommandKind.StartAutofocus));
+            await WaitUntil(() => fixture.AutofocusCalls == 2, "Autofocus did not recover after cleanup without a success event");
+            fixture.AutofocusCompletion.SetCanceled();
+            await fixture.WaitForRelease();
+        }
     }
 
     private static async Task FalseHardwareResultsRemainVisible()

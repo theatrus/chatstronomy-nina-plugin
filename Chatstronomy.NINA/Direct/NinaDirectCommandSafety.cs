@@ -18,7 +18,6 @@ internal sealed partial class NinaDirectDataProvider
     private CommandAdmission? commandAdmission;
     private CommandAdmission? idleCommand;
     private readonly object commandAdmissionGate = new();
-    private int nativeAutofocusActive;
     private long sequenceControlEpoch;
 
     // Commands share the same admission queue as N.I.N.A.'s UI start buttons.
@@ -71,12 +70,6 @@ internal sealed partial class NinaDirectDataProvider
                 ? DirectApiEnvelope<string>.Accepted("Chatstronomy autofocus cancellation requested")
                 : DirectApiEnvelope<string>.Ok("No Chatstronomy autofocus request is pending or running");
         }
-        if (command.Kind == DirectRigCommandKind.StartAutofocus
-            && Volatile.Read(ref nativeAutofocusActive) != 0)
-        {
-            throw new InvalidOperationException("An autofocus run is already active in N.I.N.A. Wait for it to finish.");
-        }
-
         var state = ReadSequenceCommandState();
         if (command.Kind == DirectRigCommandKind.StopSequence)
         {
@@ -121,16 +114,18 @@ internal sealed partial class NinaDirectDataProvider
             {
                 throw new InvalidOperationException("A previous Chatstronomy hardware operation is still finishing.");
             }
+            var sequenceEpoch = Volatile.Read(ref sequenceControlEpoch);
             var (root, scope) = ActiveSequenceCommandContext();
             var targetSnapshot = NativeTargetCommands.TryCaptureTarget(scope);
             ValidateInjectedEquipment(command);
             authorize();
             var task = sequenceCommands.Queue(queuedKind.Value, root, scope,
-                validate: () => IsQueuedCommandCurrent(command, generation, root),
+                validate: () => IsQueuedCommandCurrent(command, generation, sequenceEpoch, root),
                 execute: (context, progress, token) => Task.Run(() => ExecuteInjectedCommandAsync(
                     command, context, progress, token, generation, targetSnapshot)),
                 failure: exception => AddCommandFailureIfCurrent(
                     command.Kind.ToString(), exception.Message, generation),
+                estimatedDuration: EstimateSequenceCommand(command),
                 deduplicationKey: command.FilterId?.ToString(),
                 cancellationToken: profileSession.Token);
             // The coordinator emits a terminal failure when an accepted
@@ -139,7 +134,7 @@ internal sealed partial class NinaDirectDataProvider
                 CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted,
                 TaskScheduler.Default);
             return DirectApiEnvelope<string>.Accepted(
-                $"{command.Kind} queued for the next light exposure boundary in this sequence target");
+                $"{CommandLabel(command.Kind)} queued for the next light exposure boundary in this sequence target");
         }
 
         if (sequenceCommands.IsBusy || Volatile.Read(ref idleCommand) is not null)
@@ -194,7 +189,7 @@ internal sealed partial class NinaDirectDataProvider
                 admission.Operation = Task.Run(() => ExecuteInjectedCommandAsync(command, context,
                     CreateProgress(), admission.Stop.Token, generation, snapshot));
                 ObserveCommand(admission.Operation, command.Kind.ToString(), generation);
-                response = DirectApiEnvelope<string>.Accepted($"{command.Kind} requested");
+                response = DirectApiEnvelope<string>.Accepted($"{CommandLabel(command.Kind)} requested");
             }
             else
             {
@@ -247,16 +242,18 @@ internal sealed partial class NinaDirectDataProvider
 
     private void CancelIdleCommand() => Volatile.Read(ref idleCommand)?.Cancel();
 
-    private bool IsQueuedCommandCurrent(DirectRigCommand command, long generation,
+    private bool IsQueuedCommandCurrent(DirectRigCommand command, long generation, long sequenceEpoch,
         ISequenceRootContainer root)
     {
-        if (generation != Volatile.Read(ref commandGeneration) || profileSession.IsCancellationRequested)
+        if (generation != Volatile.Read(ref commandGeneration)
+            || sequenceEpoch != Volatile.Read(ref sequenceControlEpoch) || profileSession.IsCancellationRequested)
         {
             return false;
         }
         accessPolicy.RequireRemoteControl(command);
         var state = ReadSequenceCommandState();
-        return state.AdvancedRunning && !state.SimpleRunning
+        return sequenceEpoch == Volatile.Read(ref sequenceControlEpoch)
+            && state.AdvancedRunning && !state.SimpleRunning
             && ReferenceEquals(root, NinaDirectSequenceSnapshot.TryGetSequenceRoot(sequence));
     }
 
@@ -296,6 +293,13 @@ internal sealed partial class NinaDirectDataProvider
         else if (telescope.GetInfo().Slewing)
         {
             throw new InvalidOperationException("The mount is already moving. Wait for it to stop before requesting a target move.");
+        }
+        if (command.Kind is DirectRigCommandKind.CenterTarget or DirectRigCommandKind.CenterRotateTarget)
+        {
+            if (!camera.GetInfo().Connected)
+                throw new InvalidOperationException("Centering requires a connected camera.");
+            if (command.Kind == DirectRigCommandKind.CenterRotateTarget && !rotator.GetInfo().Connected)
+                throw new InvalidOperationException("Centering and rotating requires a connected rotator.");
         }
     }
 
@@ -396,6 +400,7 @@ internal sealed partial class NinaDirectDataProvider
                 return (vm ?? throw new InvalidOperationException("Autofocus did not start."))
                     .StartAutoFocus(selected, cancellationToken, progress);
             }).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (report is null)
             {
                 throw new InvalidOperationException("No autofocus report was returned.");
@@ -429,6 +434,32 @@ internal sealed partial class NinaDirectDataProvider
         DirectRigCommandKind.CenterRotateTarget => SequenceCommandKind.CenterRotateTarget,
         _ => null,
     };
+
+    private static string CommandLabel(DirectRigCommandKind command) => command switch
+    {
+        DirectRigCommandKind.StartAutofocus => "Autofocus",
+        DirectRigCommandKind.ChangeFilter => "Filter change",
+        DirectRigCommandKind.SlewToTarget => "Slew to target",
+        DirectRigCommandKind.CenterTarget => "Target centering",
+        DirectRigCommandKind.CenterRotateTarget => "Target centering and rotation",
+        _ => command.ToString(),
+    };
+
+    private TimeSpan EstimateSequenceCommand(DirectRigCommand command)
+    {
+        if (command.Kind == DirectRigCommandKind.ChangeFilter) return TimeSpan.FromSeconds(30);
+        var estimate = TimeSpan.FromMinutes(10);
+        if (command.Kind == DirectRigCommandKind.StartAutofocus)
+        {
+            // Use the native exposure/step/settling/attempt estimate rather
+            // than underestimating slow autofocus configurations near a flip.
+            var native = new global::NINA.Sequencer.SequenceItem.Autofocus.RunAutofocus(
+                profileService, imageHistory, camera, filterWheel, focuser, autoFocusFactory)
+                .GetEstimatedDuration();
+            if (native > estimate) estimate = native;
+        }
+        return estimate;
+    }
 
     private Task RunHardwareCommand(Func<CancellationToken, Task> operation,
         Action authorize, bool falseMeansFailure = true)

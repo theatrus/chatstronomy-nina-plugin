@@ -102,6 +102,7 @@ internal static class Program
         Run("Target commands have separate local permissions and visible settings", CommandSettingsTests.Run);
         await RunAsync("Commands respect sequence and capture ownership through cancellation", CommandSafetyTests.RunAsync);
         await RunAsync("Native N.I.N.A. triggers safely execute queued chat commands", SequencingTests.RunAsync);
+        await RunAsync("Native centering and rotation use local targets and restore guiding", NativeTargetCommandTests.RunAsync);
         Run("Skipping sequence validation requires separate explicit consent", SequenceValidationBypassRequiresConsent);
         Run("Changing N.I.N.A. profiles immediately revokes in-flight hardware commands", ProfileChangesRevokeRemoteControl);
         Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
@@ -512,6 +513,25 @@ internal static class Program
         AssertEqual(DirectQueryKind.Command, command.Kind);
         AssertEqual(DirectRigCommandKind.StartSequence, command.Command?.Kind);
         AssertEqual<bool?>(true, command.Command?.SkipValidation);
+
+        var targetHelloPath = Path.Combine(fixtures, "client-hello-target-commands.json");
+        if (File.Exists(targetHelloPath))
+        {
+            using var hello = JsonDocument.Parse(File.ReadAllText(targetHelloPath));
+            AssertTrue(hello.RootElement.GetProperty("payload").GetProperty("capabilities")
+                .GetProperty("target_commands").GetBoolean());
+            foreach (var (file, kind) in new[]
+            {
+                ("query-slew-target.json", DirectRigCommandKind.SlewToTarget),
+                ("query-center-target.json", DirectRigCommandKind.CenterTarget),
+                ("query-center-rotate-target.json", DirectRigCommandKind.CenterRotateTarget),
+            })
+            {
+                var targetCommand = DirectProtocol.ParseQuery(File.ReadAllText(Path.Combine(fixtures, file)));
+                AssertEqual(kind, targetCommand.Command?.Kind);
+                AssertEqual<int?>(null, targetCommand.Command?.FilterId);
+            }
+        }
 
         var error = DirectProtocol.ParseHubMessage(
             File.ReadAllText(Path.Combine(fixtures, "error.json")));

@@ -27,13 +27,17 @@ internal static class SequencingTests
         await NativeSequencerAwaitsCommandBetweenNestedExposures();
         await FailureReachesCompletionDespiteNativeTriggerCatchingIt();
         await PendingCancellationAndPermissionRevocationAreTerminal();
+        await InvalidationDuringAdmissionCannotPublishAnOldRunRequest();
+        await NativeTriggerRemovalCannotInvertCoordinatorAndContainerLocks();
         await CancellationDoesNotBlockCallerOrReleaseWhileDriverCleanupRuns();
         await DetachAndExternalAutofocusCancelPendingRequests();
+        await NativeAutofocusCompletionSupersedesARequestQueuedDuringItsRun();
         await ExpirationDoesNotWaitForAnotherExposure();
         await ReusedTargetContainerCannotRedirectAnyQueuedCommand();
         await NativeTargetCommandsRecheckPreparatoryReadsAndPreserveGuiding();
         await MeridianDeferralDoesNotConsumeTheRequest();
         RejectMissingDisabledAndParallelTriggers();
+        await TargetSchedulerSequencingTests.RunAsync();
     }
 
     private static void ExportedTriggersCloneWithoutPendingState()
@@ -141,6 +145,71 @@ internal static class SequencingTests
         Check(!fixture.Coordinator.IsBusy && !invoked, "Revocation clears pending command immediately.");
     }
 
+    private static async Task InvalidationDuringAdmissionCannotPublishAnOldRunRequest()
+    {
+        var fixture = Fixture.Active();
+        var validationEntered = NewSignal();
+        using var releaseValidation = new ManualResetEventSlim();
+        var attempt = Task.Run(() => fixture.Coordinator.Queue(SequenceCommandKind.Autofocus, fixture.Root, fixture.Inner,
+            () =>
+            {
+                validationEntered.TrySetResult();
+                if (!releaseValidation.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Validation was not released.");
+                return true;
+            }, (_, _, _) => throw new Exception("An invalidated request executed.")));
+        await validationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        fixture.Coordinator.Invalidate("The prior sequence run ended during admission.");
+        releaseValidation.Set();
+        await ExpectFailure(attempt);
+        Check(!fixture.Coordinator.IsBusy, "Invalidation before publication must not leave a request from the old sequence epoch.");
+    }
+
+    private static async Task NativeTriggerRemovalCannotInvertCoordinatorAndContainerLocks()
+    {
+        var profile = Fake<IProfileService>();
+        var coordinator = SequenceCommandCoordinator.For(profile);
+        var root = new SequenceRootContainer { Status = SequenceEntityStatus.RUNNING };
+        var parent = new InstrumentedTriggerContainer { Status = SequenceEntityStatus.RUNNING };
+        root.Add(parent);
+        var trigger = new ChatstronomyAutofocusTrigger(profile);
+        parent.Add(trigger);
+        trigger.SequenceBlockInitialize();
+        var next = new Exposure(_ => Task.CompletedTask);
+        parent.Add(next);
+        var completion = coordinator.Queue(SequenceCommandKind.Autofocus, root, parent, () => true,
+            (_, _, _) => throw new Exception("Detached trigger executed."));
+        var collectionLocked = NewSignal();
+        using var snapshotRequested = new ManualResetEventSlim();
+        var nativeLock = typeof(SequenceContainer).GetField("lockObj", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        parent.BeforeSnapshot = () => snapshotRequested.Set();
+        var removing = Task.Run(() =>
+        {
+            // Native Remove holds this collection lock and calls into the
+            // trigger's AfterParentChanged -> coordinator.Unregister hook.
+            lock (nativeLock)
+            {
+                collectionLocked.TrySetResult();
+                if (!snapshotRequested.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Trigger snapshot was not requested.");
+                parent.Remove(trigger);
+            }
+        });
+        await collectionLocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deciding = Task.Run(() => trigger.ShouldTrigger(null!, next));
+        await Task.WhenAll(removing, deciding).WaitAsync(TimeSpan.FromSeconds(5));
+        await ExpectFailure(completion);
+        Check(!deciding.Result && !coordinator.IsBusy, "Container removal and trigger eligibility must not hold each other's locks.");
+    }
+
+    private sealed class InstrumentedTriggerContainer : SequentialContainer, ITriggerable
+    {
+        internal Action? BeforeSnapshot;
+        ICollection<ISequenceTrigger> ITriggerable.GetTriggersSnapshot()
+        {
+            BeforeSnapshot?.Invoke();
+            return GetTriggersSnapshot();
+        }
+    }
+
     private static async Task CancellationDoesNotBlockCallerOrReleaseWhileDriverCleanupRuns()
     {
         var fixture = Fixture.Active();
@@ -196,6 +265,18 @@ internal static class SequencingTests
         fixture.Trigger.AttachNewParent(null!);
         await ExpectFailure(completion);
         Check(!fixture.Coordinator.IsBusy, "Detached active trigger revokes pending request.");
+    }
+
+    private static async Task NativeAutofocusCompletionSupersedesARequestQueuedDuringItsRun()
+    {
+        var fixture = Fixture.Active();
+        fixture.Coordinator.NotifyExternalAutofocus(); // Native run began before the request existed.
+        var completion = fixture.Queue((_, _, _) => throw new Exception("Superseded AF executed"));
+        Check(!completion.IsCompleted, "A request can be queued while another native trigger is awaited.");
+        fixture.Coordinator.NotifyExternalAutofocus(); // N.I.N.A.'s successful AF report arrived.
+        await ExpectFailure(completion);
+        Check(!fixture.Trigger.ShouldTrigger(null!, fixture.Next()) && !fixture.Coordinator.IsBusy,
+            "An already-completed native run satisfies and clears the redundant pending autofocus.");
     }
 
     private static async Task ExpirationDoesNotWaitForAnotherExposure()

@@ -35,6 +35,14 @@ internal sealed class NativeTargetCommands(
 
     internal static TargetSnapshot? TryCaptureTarget(ISequenceContainer context)
     {
+        var scheduler = TargetSchedulerCommandContext.TryCapture(context);
+        if (scheduler is not null)
+        {
+            var target = scheduler.Target;
+            return new TargetSnapshot(scheduler.Owner, target, target.DeepSkyObject, target.TargetName,
+                new ContextCoordinates(target.InputCoordinates.Coordinates.Clone(), target.PositionAngle,
+                    target.DeepSkyObject.ShiftTrackingRate), scheduler);
+        }
         foreach (var ancestor in SequenceCommandCoordinator.Ancestors(context))
         {
             if (ancestor is not IDeepSkyObjectContainer targetContainer) continue;
@@ -129,25 +137,40 @@ internal sealed class NativeTargetCommands(
             throw new InvalidOperationException("The active sequence target changed after this command was requested.");
     }
 
-    internal sealed class TargetSnapshot(ISequenceContainer owner, object target, object deepSkyObject, string? targetName, ContextCoordinates coordinates)
+    internal sealed class TargetSnapshot(ISequenceContainer owner, object target, object deepSkyObject, string? targetName,
+        ContextCoordinates coordinates, TargetSchedulerCommandContext.Snapshot? scheduler = null)
     {
         internal ContextCoordinates Coordinates { get; } = coordinates;
         internal bool IsCurrent(ISequenceContainer context)
         {
+            if (scheduler is not null)
+            {
+                try
+                {
+                    var current = TargetSchedulerCommandContext.TryCapture(context);
+                    return current is not null && scheduler.HasSameIdentity(current) && SamePosition(current.Target);
+                }
+                catch (InvalidOperationException) { return false; }
+            }
             foreach (var ancestor in SequenceCommandCoordinator.Ancestors(context))
             {
                 if (ancestor is not IDeepSkyObjectContainer candidate) continue;
                 var current = candidate.Target;
-                var position = current?.InputCoordinates?.Coordinates;
                 return ReferenceEquals(ancestor, owner) && ReferenceEquals(current, target)
                     && ReferenceEquals(current?.DeepSkyObject, deepSkyObject)
-                    && string.Equals(current?.TargetName, targetName, StringComparison.Ordinal)
-                    && position is not null && position.RA.Equals(Coordinates.Coordinates.RA)
-                    && position.Dec.Equals(Coordinates.Coordinates.Dec)
-                    && position.Epoch == Coordinates.Coordinates.Epoch
-                    && current!.PositionAngle.Equals(Coordinates.PositionAngle);
+                    && current is not null && SamePosition(current);
             }
             return false;
+        }
+
+        private bool SamePosition(InputTarget current)
+        {
+            var position = current.InputCoordinates?.Coordinates;
+            return string.Equals(current.TargetName, targetName, StringComparison.Ordinal)
+                && position is not null && position.RA.Equals(Coordinates.Coordinates.RA)
+                && position.Dec.Equals(Coordinates.Coordinates.Dec)
+                && position.Epoch == Coordinates.Coordinates.Epoch
+                && current.PositionAngle.Equals(Coordinates.PositionAngle);
         }
     }
 }

@@ -2673,7 +2673,6 @@ internal sealed partial class NinaDirectDataProvider :
 
     public void UpdateEndAutoFocusRun(AutoFocusInfo info)
     {
-        Volatile.Write(ref nativeAutofocusActive, 0);
         sequenceCommands.NotifyExternalAutofocus();
         var historyGeneration = CaptureHistoryGeneration();
         if (!started)
@@ -2757,7 +2756,6 @@ internal sealed partial class NinaDirectDataProvider :
 
     public void AutoFocusRunStarting()
     {
-        Volatile.Write(ref nativeAutofocusActive, 1);
         sequenceCommands.NotifyExternalAutofocus();
         var historyGeneration = CaptureHistoryGeneration();
         var generation = Volatile.Read(ref autofocusCaptureGeneration);
