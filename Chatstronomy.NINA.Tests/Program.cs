@@ -425,8 +425,8 @@ internal static class Program
                 "Failed webhook requests never expose credentials in the local runtime log",
                 () => PluginRuntimeRedactsFailedWebhookDeliveries(runtimePath));
             await RunAsync(
-                "Plugin runtime queries the native Direct data pipe",
-                () => PluginRuntimeUsesDirectPipe(runtimePath));
+                "Plugin runtime accepts target-command capabilities and queries the native Direct data pipe",
+                () => PluginRuntimeUsesDirectPipe(runtimePath, targetCommands: true));
             await RunAsync(
                 "Release runtime renders Direct guider and autofocus pipe payloads to PNG",
                 () => DirectPipeRendersCharts(runtimePath));
@@ -441,8 +441,11 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(hubRuntimePath) && File.Exists(hubRuntimePath))
         {
             await RunAsync(
-                "Release hub pairs the N.I.N.A. plugin and renders remote charts",
-                () => HostedPluginUsesRustHub(hubRuntimePath));
+                "Release hub pairs a legacy-capability N.I.N.A. plugin and renders remote charts",
+                () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: false));
+            await RunAsync(
+                "Release hub accepts target-command capabilities and renders remote charts",
+                () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: true));
         }
         else
         {
@@ -11012,9 +11015,9 @@ internal static class Program
         }
     }
 
-    private static async Task PluginRuntimeUsesDirectPipe(string runtimePath)
+    private static async Task PluginRuntimeUsesDirectPipe(string runtimePath, bool targetCommands)
     {
-        var provider = new FakeDirectDataProvider();
+        var provider = new FakeDirectDataProvider(targetCommands: targetCommands);
         var controller = new ChatstronomyRuntimeController(provider);
         try
         {
@@ -11119,7 +11122,7 @@ internal static class Program
         }
     }
 
-    private static async Task HostedPluginUsesRustHub(string runtimePath)
+    private static async Task HostedPluginUsesRustHub(string runtimePath, bool targetCommands)
     {
         var artifactDirectory = Environment.GetEnvironmentVariable(
             "CHATSTRONOMY_CHART_ARTIFACT_DIRECTORY");
@@ -11130,6 +11133,7 @@ internal static class Program
         var suffix = string.IsNullOrWhiteSpace(artifactDirectory)
             ? $"-{Guid.NewGuid():N}"
             : string.Empty;
+        if (targetCommands) suffix += "-target-commands";
         var guiderOutputPath = Path.Combine(
             outputDirectory,
             $"chatstronomy-hosted-guider{suffix}.png");
@@ -11150,7 +11154,7 @@ internal static class Program
         startInfo.ArgumentList.Add(autofocusOutputPath);
         using var process = System.Diagnostics.Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start the Direct hub probe.");
-        var provider = new FakeDirectDataProvider();
+        var provider = new FakeDirectDataProvider(targetCommands: targetCommands);
         provider.Start();
         try
         {
@@ -11180,7 +11184,14 @@ internal static class Program
             }
             AssertTrue(ready.HasValue);
 
-            var hello = HostedHello();
+            // Exercise the additive capability in the actual signed Hub's
+            // pairing parser; the legacy pass omits it. Command dispatch is
+            // covered independently by the C# transport and Rust source tests,
+            // because the released probe intentionally only requests charts.
+            var hello = HostedHello() with { Capabilities = provider.Capabilities };
+            var capabilities = JsonSerializer.SerializeToElement(hello.Capabilities);
+            AssertEqual(targetCommands, capabilities.TryGetProperty("target_commands", out var advertised));
+            if (targetCommands) AssertTrue(advertised.GetBoolean());
             var client = new ChatstronomyHubClient(provider);
             HubCredentialIssuedEventArgs? issued = null;
             client.CredentialIssued += (_, args) => issued = args;
@@ -11748,6 +11759,7 @@ internal static class Program
     {
         private readonly DirectAccessPolicy? accessPolicy;
         private readonly Exception? executeFailure;
+        private readonly bool targetCommands;
         private CancellationTokenSource directSession = new();
         private Guid directSessionId = Guid.NewGuid();
         private CancellationTokenSource profileSession = new();
@@ -11761,10 +11773,12 @@ internal static class Program
 
         internal FakeDirectDataProvider(
             DirectAccessPolicy? accessPolicy = null,
-            Exception? executeFailure = null)
+            Exception? executeFailure = null,
+            bool targetCommands = false)
         {
             this.accessPolicy = accessPolicy;
             this.executeFailure = executeFailure;
+            this.targetCommands = targetCommands;
         }
 
         public DirectCapabilities Capabilities => new(
@@ -11775,7 +11789,10 @@ internal static class Program
             EquipmentSnapshots: true,
             AutofocusDetails: true,
             GuiderGraph: true,
-            Commands: accessPolicy?.Current.CommandsEnabled ?? true);
+            Commands: accessPolicy?.Current.CommandsEnabled ?? true)
+        {
+            TargetCommands = targetCommands,
+        };
 
         public CancellationToken ProfileSessionToken =>
             Volatile.Read(ref profileSession).Token;
