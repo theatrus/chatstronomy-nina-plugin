@@ -22,6 +22,9 @@ internal enum DirectCommandPermissions : ushort
     AbortExposure = 1 << 10,
     StopSequence = 1 << 11,
     StartSequence = 1 << 12,
+    SlewToTarget = 1 << 13,
+    CenterTarget = 1 << 14,
+    CenterRotateTarget = 1 << 15,
 }
 
 /// <summary>
@@ -125,6 +128,9 @@ internal sealed class DirectAccessPolicy(DirectAccessOptions initial)
             DirectRigCommandKind.AbortExposure => DirectCommandPermissions.AbortExposure,
             DirectRigCommandKind.StopSequence => DirectCommandPermissions.StopSequence,
             DirectRigCommandKind.StartSequence => DirectCommandPermissions.StartSequence,
+            DirectRigCommandKind.SlewToTarget => DirectCommandPermissions.SlewToTarget,
+            DirectRigCommandKind.CenterTarget => DirectCommandPermissions.CenterTarget,
+            DirectRigCommandKind.CenterRotateTarget => DirectCommandPermissions.CenterRotateTarget,
             _ => throw new NotSupportedException(
                 $"Direct command '{command}' has no local permission."),
         };
@@ -144,6 +150,9 @@ internal sealed class DirectAccessPolicy(DirectAccessOptions initial)
         DirectRigCommandKind.AbortExposure => "aborting an exposure",
         DirectRigCommandKind.StopSequence => "stopping the sequence",
         DirectRigCommandKind.StartSequence => "starting the sequence",
+        DirectRigCommandKind.SlewToTarget => "slewing to the current target",
+        DirectRigCommandKind.CenterTarget => "centering the current target",
+        DirectRigCommandKind.CenterRotateTarget => "centering and rotating to the current target",
         _ => command.ToString(),
     };
 }

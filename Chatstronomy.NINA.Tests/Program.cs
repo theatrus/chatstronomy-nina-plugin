@@ -99,6 +99,9 @@ internal static class Program
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct access defaults to local read-only monitoring", DirectAccessDefaultsToReadOnly);
         Run("Each hardware command requires its own local consent", EveryCommandRequiresIndividualConsent);
+        Run("Target commands have separate local permissions and visible settings", CommandSettingsTests.Run);
+        await RunAsync("Commands respect sequence and capture ownership through cancellation", CommandSafetyTests.RunAsync);
+        await RunAsync("Native N.I.N.A. triggers safely execute queued chat commands", SequencingTests.RunAsync);
         Run("Skipping sequence validation requires separate explicit consent", SequenceValidationBypassRequiresConsent);
         Run("Changing N.I.N.A. profiles immediately revokes in-flight hardware commands", ProfileChangesRevokeRemoteControl);
         Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
@@ -943,7 +946,7 @@ internal static class Program
             .Descendants(presentation + "UniformGrid")
             .Single(element =>
                 (string?)element.Attribute("IsEnabled") == "{Binding AllowRemoteControl}");
-        AssertEqual(14, commandPermissions.Elements(presentation + "Grid").Count());
+        AssertEqual(17, commandPermissions.Elements(presentation + "Grid").Count());
         var validationBypass = commandPermissions
             .Descendants(presentation + "CheckBox")
             .Single(element =>
@@ -1242,7 +1245,7 @@ internal static class Program
     private static void EveryCommandRequiresIndividualConsent()
     {
         var allKinds = Enum.GetValues<DirectRigCommandKind>();
-        AssertEqual(13, allKinds.Length);
+        AssertEqual(16, allKinds.Length);
         var allPermissions = DirectCommandPermissions.None;
 
         foreach (var kind in allKinds)
@@ -1262,7 +1265,7 @@ internal static class Program
                 allowed.RequireRemoteControl(new DirectRigCommand(sibling)));
         }
 
-        AssertEqual(13, Enum.GetValues<DirectCommandPermissions>().Length - 1);
+        AssertEqual(16, Enum.GetValues<DirectCommandPermissions>().Length - 1);
     }
 
     private static void SequenceValidationBypassRequiresConsent()
@@ -1426,7 +1429,10 @@ internal static class Program
         var access = new DirectAccessPolicy(allowed);
         var mediator = DispatchProxy.Create<ITelescopeMediator, GuardedTelescopeProxy>();
         var telescope = (GuardedTelescopeProxy)(object)mediator;
-        using var provider = CreateSecurityTestProvider(access, telescope: mediator);
+        using var commandFixture = new CommandSafetyTests.Fixture(mediator);
+        using var provider = commandFixture.Provider;
+        access = commandFixture.Access;
+        access.Update(allowed);
         var command = new DirectQuery(
             Guid.NewGuid(),
             DirectQueryKind.Command,

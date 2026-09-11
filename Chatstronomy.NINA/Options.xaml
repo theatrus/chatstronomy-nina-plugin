@@ -128,6 +128,30 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Slew to current target (/slew-target)" TextWrapping="Wrap" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowSlewToTarget}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Center current target (/center-target)" TextWrapping="Wrap" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowCenterTarget}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Center and rotate to current target (/center-rotate-target)" TextWrapping="Wrap" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowCenterRotateTarget}" />
+                            </Grid>
+                            <Grid Margin="0,3,16,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <TextBlock VerticalAlignment="Center" Text="Start guiding (/guider-start)" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding AllowStartGuiding}" />
                             </Grid>
@@ -212,6 +236,18 @@
                                     IsChecked="{Binding AllowSkipSequenceValidation}" />
                             </Grid>
                         </UniformGrid>
+                        <TextBlock
+                            Margin="0,0,0,6"
+                            FontWeight="SemiBold"
+                            Text="Commands during a sequence" />
+                        <TextBlock
+                            Margin="0,0,0,6"
+                            Text="Autofocus, filter changes, and target moves wait until the next light exposure. Add the matching Chatstronomy trigger to the active target's instruction set: Autofocus, Filter Change, Slew to Target, Center Target, or Center and Rotate Target. Without a matching trigger, the request is rejected. Target moves use the current target configured in N.I.N.A., not coordinates from chat."
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            Margin="0,0,0,12"
+                            Text="Cooling and warming can run during a sequence. Mount park, home, and unpark, guiding changes, and exposure abortion are blocked while a sequence is running; use /stop-sequence to stop it first. /start-sequence starts the loaded advanced sequence when N.I.N.A. is idle."
+                            TextWrapping="Wrap" />
                         <Grid Margin="0,0,0,4">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />

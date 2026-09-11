@@ -6,6 +6,8 @@ using NINA.Plugin;
 using NINA.Plugin.Interfaces;
 using NINA.Profile.Interfaces;
 using NINA.Equipment.Interfaces.Mediator;
+using NINA.Equipment.Interfaces;
+using NINA.PlateSolving.Interfaces;
 using NINA.Sequencer.Interfaces.Mediator;
 using NINA.Core.Utility.WindowService;
 using NINA.WPF.Base.Interfaces;
@@ -70,7 +72,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         IAutoFocusVMFactory autoFocusFactory,
         IImageHistoryVM imageHistory,
         IWindowServiceFactory windowFactory,
-        IMessageBroker messageBroker)
+        IMessageBroker messageBroker,
+        IImagingMediator imaging,
+        IDomeFollower domeFollower,
+        IPlateSolverFactory plateSolverFactory)
     {
         this.profileService = profileService;
         settings = new ChatstronomySettings(profileService);
@@ -97,7 +102,10 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             windowFactory,
             messageBroker,
             eventDelivery,
-            accessPolicy);
+            accessPolicy,
+            imaging: imaging,
+            domeFollower: domeFollower,
+            plateSolverFactory: plateSolverFactory);
         runtimeController = new ChatstronomyRuntimeController(directDataProvider);
         hubClient = new ChatstronomyHubClient(directDataProvider);
         startRuntimeCommand = new AsyncCommand(
@@ -499,6 +507,24 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         get => settings.AllowSkipSequenceValidation;
         set => SetCommandPermission(() => settings.AllowSkipSequenceValidation = value);
+    }
+
+    public bool AllowSlewToTarget
+    {
+        get => settings.AllowSlewToTarget;
+        set => SetCommandPermission(() => settings.AllowSlewToTarget = value);
+    }
+
+    public bool AllowCenterTarget
+    {
+        get => settings.AllowCenterTarget;
+        set => SetCommandPermission(() => settings.AllowCenterTarget = value);
+    }
+
+    public bool AllowCenterRotateTarget
+    {
+        get => settings.AllowCenterRotateTarget;
+        set => SetCommandPermission(() => settings.AllowCenterRotateTarget = value);
     }
 
     public bool SendImageEvents
@@ -1334,6 +1360,9 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(AllowStopSequence),
             nameof(AllowStartSequence),
             nameof(AllowSkipSequenceValidation),
+            nameof(AllowSlewToTarget),
+            nameof(AllowCenterTarget),
+            nameof(AllowCenterRotateTarget),
             nameof(SendImageEvents),
             nameof(SendAutofocusEvents),
             nameof(SendGuidingEvents),
