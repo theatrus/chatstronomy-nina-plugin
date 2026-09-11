@@ -106,6 +106,7 @@ internal sealed partial class NinaDirectDataProvider :
     private readonly Func<BitmapSource, byte[]> thumbnailEncoder;
     private readonly Func<DateTimeOffset> utcNow;
     private readonly Func<long>? monotonicTimestamp;
+    private readonly DirectAutofocusReplay autofocusReplay;
     private EventFloodSession eventFloodSession;
     private EventElisionSession? eventElisionSession;
     private readonly BoundedHistory<Dictionary<string, object?>> events =
@@ -272,6 +273,7 @@ internal sealed partial class NinaDirectDataProvider :
         this.thumbnailEncoder = thumbnailEncoder ?? DirectThumbnailEncoder.Encode;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         this.monotonicTimestamp = monotonicTimestamp;
+        autofocusReplay = new(EventHistoryCapacity, monotonicTimestamp);
         eventFloodSession = new(0, new DirectEventFloodLimiter(monotonicTimestamp));
         eventElisionSession = new(0, new DirectEventElisionCounters(eventDelivery.Current));
         autofocusSharingBlocked = !eventDelivery.Current.Autofocus;
@@ -360,6 +362,7 @@ internal sealed partial class NinaDirectDataProvider :
         Commands: accessPolicy.Current.CommandsEnabled)
     {
         TargetCommands = true,
+        AutofocusDeliveryAck = true,
     };
 
     public CancellationToken ProfileSessionToken =>
@@ -1082,6 +1085,7 @@ internal sealed partial class NinaDirectDataProvider :
                 historyGeneration,
                 new DirectEventElisionCounters(eventDelivery.Current)));
             events.Clear();
+            autofocusReplay.Clear();
             logEvents.Clear();
             images.Clear();
             guideSteps.Clear();
@@ -1121,6 +1125,8 @@ internal sealed partial class NinaDirectDataProvider :
             DirectQueryKind.LastAutofocus =>
                 DirectApiEnvelope<JsonElement>.Ok(
                     await GetLastAutofocusAsync(cancellationToken).ConfigureAwait(false)),
+            DirectQueryKind.AcknowledgeAutofocus =>
+                DirectApiEnvelope<bool>.Ok(AcknowledgeAutofocus(query, directSessionToken)),
             DirectQueryKind.MountInfo =>
                 DirectApiEnvelope<IReadOnlyDictionary<string, object?>>.Ok(GetMountInfo()),
             DirectQueryKind.CameraInfo =>
@@ -1141,6 +1147,33 @@ internal sealed partial class NinaDirectDataProvider :
                 $"Direct query '{query.Kind}' is not implemented by this plugin version."),
         };
         return result;
+    }
+
+    private bool AcknowledgeAutofocus(DirectQuery query, CancellationToken? directSessionToken)
+    {
+        if (query.IsExpiredAt(utcNow().ToUnixTimeSeconds()))
+        {
+            throw new InvalidOperationException("The autofocus receipt has expired.");
+        }
+        var reportTimestamp = query.ReportTimestamp
+            ?? throw new DirectProtocolException("The autofocus receipt timestamp is missing.");
+        if (!directSessionToken.HasValue)
+        {
+            throw new InvalidOperationException("An autofocus receipt requires the current Direct session.");
+        }
+        lock (directSessionGate)
+        {
+            _ = RequireCurrentDirectSession(directSessionToken.Value);
+            directSessionToken.Value.ThrowIfCancellationRequested();
+            lock (historyGenerationGate)
+            {
+                if (historyWritesSuspended)
+                {
+                    throw new OperationCanceledException(directSessionToken.Value);
+                }
+                return autofocusReplay.Acknowledge(reportTimestamp);
+            }
+        }
     }
 
     public void ConfirmDirectQueryResponse(
@@ -1188,12 +1221,10 @@ internal sealed partial class NinaDirectDataProvider :
                     session.LastLogEvent = events.LogTail;
                     if (events.NewAutofocusEvents.Count != 0)
                     {
-                        // Direct v1 has no acknowledgement for "the chart was
-                        // rendered and the chat message was accepted". Keep
-                        // the latest completion at-least-once across every
-                        // forced transport rotation instead of treating a
-                        // LastAutofocus read (which slash commands can also
-                        // issue) as delivery completion.
+                        // A report read is not proof of notification delivery.
+                        // Retain only bounded, unacknowledged completion replay;
+                        // the explicit receipt retires it without erasing the
+                        // cached report used by read-only slash commands.
                         session.PendingAutofocusEvents.Clear();
                         session.PendingAutofocusEvents.UnionWith(
                             events.NewAutofocusEvents);
@@ -1233,12 +1264,19 @@ internal sealed partial class NinaDirectDataProvider :
         lock (directSessionGate)
         {
             var session = RequireCurrentDirectSession(directSessionToken.Value);
-            return session.EventReplayPending
-                ? new DirectEventHistoryBarrier(
+            if (!session.EventReplayPending)
+            {
+                return null;
+            }
+            lock (historyGenerationGate)
+            {
+                var retiredAutofocus = autofocusReplay.RetiredSequences();
+                return new DirectEventHistoryBarrier(
                     session.LastEquipmentEvent,
                     session.LastLogEvent,
-                    session.PendingAutofocusEvents.ToHashSet())
-                : null;
+                    session.PendingAutofocusEvents.Except(retiredAutofocus).ToHashSet(),
+                    retiredAutofocus);
+            }
         }
     }
 
@@ -1280,10 +1318,16 @@ internal sealed partial class NinaDirectDataProvider :
             {
                 throw new OperationCanceledException(directSessionToken.Value);
             }
+            HashSet<long> retiredAutofocus;
+            lock (historyGenerationGate)
+            {
+                retiredAutofocus = autofocusReplay.RetiredSequences();
+            }
             var newlyObservedAutofocus = !wasReplayBaseline
                 && session.EventHistoryQueried
                     ? equipmentSnapshot
                         .Where(entry => entry.Sequence > session.LastEquipmentEvent
+                            && !retiredAutofocus.Contains(entry.Sequence)
                             && entry.Item.TryGetValue("Event", out var eventName)
                             && eventName is "AUTOFOCUS-FINISHED"
                             && entry.Item.TryGetValue("ChatEnabled", out var chatEnabled)
@@ -2719,7 +2763,10 @@ internal sealed partial class NinaDirectDataProvider :
                 info.Temperature,
                 info.Timestamp,
                 TryGetActiveProfileId(),
-                chatEnabled);
+                chatEnabled)
+            {
+                ReplayCapturedAt = autofocusReplay.CaptureTimestamp(),
+            };
 
             // Never answer a completion-triggered query with the preceding
             // run. The report file is written by N.I.N.A. just before this
@@ -3432,11 +3479,12 @@ internal sealed partial class NinaDirectDataProvider :
                 return;
             }
 
-            AddEventCore(
+            _ = TryAddEventCoreWithAutofocusCapture(
                 pendingAutofocusHistoryGeneration,
                 DateTime.Now,
                 "AUTOFOCUS-FINISHED",
                 completion.ChatEnabled,
+                completion.ReplayCapturedAt,
                 ("Filter", completion.Filter),
                 ("Position", FiniteOrZero(completion.Position)),
                 ("Temperature", double.IsFinite(completion.Temperature)
@@ -4770,7 +4818,8 @@ internal sealed partial class NinaDirectDataProvider :
             logSnapshot,
             replayBarrier?.Equipment,
             replayBarrier?.Logs,
-            replayBarrier?.ExcludedEquipment);
+            replayBarrier?.ExcludedEquipment,
+            replayBarrier?.IncludedEquipment);
     }
 
     private IReadOnlyList<Dictionary<string, object?>> SnapshotEventHistory() =>
@@ -4779,14 +4828,16 @@ internal sealed partial class NinaDirectDataProvider :
             logEvents.SnapshotEntries(),
             maximumEquipmentSequence: null,
             maximumLogSequence: null,
-            excludedEquipmentSequences: null);
+            excludedEquipmentSequences: null,
+            includedEquipmentSequences: null);
 
     private IReadOnlyList<Dictionary<string, object?>> SnapshotEventHistory(
         IReadOnlyList<BoundedHistoryEntry<Dictionary<string, object?>>> equipmentSnapshot,
         IReadOnlyList<BoundedHistoryEntry<Dictionary<string, object?>>> logSnapshot,
         long? maximumEquipmentSequence,
         long? maximumLogSequence,
-        IReadOnlySet<long>? excludedEquipmentSequences)
+        IReadOnlySet<long>? excludedEquipmentSequences,
+        IReadOnlySet<long>? includedEquipmentSequences)
     {
         var access = accessPolicy.Current;
         var delivery = eventDelivery.Current;
@@ -4796,7 +4847,11 @@ internal sealed partial class NinaDirectDataProvider :
         // user may explicitly choose to share again later.
         var equipment = equipmentSnapshot
             .Where(entry => !maximumEquipmentSequence.HasValue
-                || entry.Sequence <= maximumEquipmentSequence.Value)
+                || entry.Sequence <= maximumEquipmentSequence.Value
+                // Acknowledged, superseded, or expired AF is historical even
+                // inside the ordinary one-poll replay window. Include it in
+                // the silent baseline so it cannot reappear as a live event.
+                || includedEquipmentSequences?.Contains(entry.Sequence) == true)
             .Where(entry => excludedEquipmentSequences is null
                 || !excludedEquipmentSequences.Contains(entry.Sequence))
             .Select(entry => entry.Item)
@@ -4946,11 +5001,32 @@ internal sealed partial class NinaDirectDataProvider :
         string eventName,
         bool chatEnabled,
         params (string Name, object? Value)[] details) =>
-        TryAdmitEvent(generation, eventName, chatEnabled, details)
-        && AddHistoryIfCurrent(
-            events,
-            BuildEvent(time, eventName, chatEnabled, details),
-            generation);
+        TryAddEventCoreWithAutofocusCapture(generation, time, eventName, chatEnabled, null, details);
+
+    private bool TryAddEventCoreWithAutofocusCapture(
+        long generation,
+        object time,
+        string eventName,
+        bool chatEnabled,
+        long? autofocusCapturedAt,
+        params (string Name, object? Value)[] details)
+    {
+        if (!TryAdmitEvent(generation, eventName, chatEnabled, details))
+        {
+            return false;
+        }
+        var item = BuildEvent(time, eventName, chatEnabled, details);
+        lock (historyGenerationGate)
+        {
+            if (historyWritesSuspended || generation != historyGeneration)
+            {
+                return false;
+            }
+            var sequence = events.Add(item);
+            autofocusReplay.Observe(sequence, eventName, item, autofocusCapturedAt);
+            return true;
+        }
+    }
 
     private bool TryAdmitEvent(
         long generation,
@@ -6531,7 +6607,8 @@ internal sealed record DirectImageHistoryObservation(
 internal sealed record DirectEventHistoryBarrier(
     long Equipment,
     long Logs,
-    IReadOnlySet<long> ExcludedEquipment);
+    IReadOnlySet<long> ExcludedEquipment,
+    IReadOnlySet<long> IncludedEquipment);
 
 internal enum DirectSafetyState
 {
@@ -6671,7 +6748,10 @@ internal sealed record DirectAutofocusCompletion(
     double Temperature,
     DateTime Timestamp,
     Guid? ProfileId,
-    bool ChatEnabled);
+    bool ChatEnabled)
+{
+    internal long? ReplayCapturedAt { get; init; }
+}
 
 internal sealed record DirectFilterInfo(string Name, int Id);
 

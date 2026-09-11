@@ -210,6 +210,20 @@ internal static class Program
         await RunAsync(
             "Direct session rotations retain autofocus delivery through report fetch",
             DirectSessionRotationsRetainPendingAutofocusDelivery);
+        Run("Autofocus delivery receipts have an additive read-only wire contract",
+            AutofocusReceiptWireContract);
+        await RunAsync("Acknowledged autofocus is historical across reconnects and remains queryable",
+            AcknowledgedAutofocusIsHistorical);
+        await RunAsync("Autofocus receipt rejects stale sessions, expiry, and mismatched runs",
+            AutofocusReceiptRespectsSession);
+        await RunAsync("Native Direct pipe receipts prevent autofocus replay on physical reconnect",
+            AutofocusReceiptCrossesNativePipe);
+        await RunAsync("Unacknowledged autofocus replay expires using monotonic time",
+            AutofocusReplayExpires);
+        await RunAsync("Starting another autofocus retires the previous completion replay",
+            NewAutofocusRetiresPreviousReplay);
+        Run("Delayed autofocus reports cannot resurrect superseded replay",
+            DelayedAutofocusReplayIsRetired);
         await RunAsync(
             "Physical Direct reconnects replay the last delta without changing logical identity",
             PhysicalDirectReconnectsReplayLastDelta);
@@ -446,6 +460,13 @@ internal static class Program
             await RunAsync(
                 "Release hub accepts target-command capabilities and renders remote charts",
                 () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: true));
+            if (Environment.GetEnvironmentVariable("CHATSTRONOMY_EXPECT_AUTOFOCUS_ACK_PROBE") == "1")
+            {
+                await RunAsync(
+                    "Current Rust Hub acknowledges the exact rendered autofocus report over WebSocket",
+                    () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: true,
+                        verifyAutofocusReceipt: true));
+            }
         }
         else
         {
@@ -2402,7 +2423,8 @@ internal static class Program
     private static void RecordInternalEvent(
         NinaDirectDataProvider provider,
         string eventName,
-        string marker)
+        string marker,
+        DateTimeOffset? reportTimestamp = null)
     {
         var addEvent = typeof(NinaDirectDataProvider)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
@@ -2413,7 +2435,10 @@ internal static class Program
         addEvent.Invoke(provider, new object[]
         {
             eventName,
-            new (string Name, object? Value)[] { ("Marker", marker) },
+            new (string Name, object? Value)[]
+            {
+                ("Marker", marker), ("ReportTimestamp", reportTimestamp),
+            },
         });
     }
 
@@ -4216,6 +4241,223 @@ internal static class Program
         AssertEqual(
             1,
             (await SnapshotTrackedEvents(provider, acknowledgedSession)).Items.Length);
+    }
+
+    private static void AutofocusReceiptWireContract()
+    {
+        var id = Guid.NewGuid();
+        var wire = JsonSerializer.Serialize(new
+        {
+            type = "query",
+            payload = new
+            {
+                id,
+                kind = "acknowledge_autofocus",
+                report_timestamp = "2026-09-11T01:00:00-05:00",
+                expires_at = 123L,
+            },
+        });
+        var parsed = DirectProtocol.ParseQuery(wire);
+        AssertEqual(DirectQueryKind.AcknowledgeAutofocus, parsed.Kind);
+        AssertEqual(id, parsed.Id);
+        AssertEqual(123L, parsed.ExpiresAt!.Value);
+        AssertEqual(new DateTimeOffset(2026, 9, 11, 6, 0, 0, TimeSpan.Zero), parsed.ReportTimestamp!.Value);
+        AssertThrows<DirectProtocolException>(() => DirectProtocol.ParseQuery(
+            wire.Replace("2026-09-11T01:00:00-05:00", "not a timestamp")));
+        AssertThrows<DirectProtocolException>(() => DirectProtocol.ParseQuery(
+            wire.Replace("\"report_timestamp\"", "\"wrong_field\"")));
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default));
+        AssertFalse(provider.Capabilities.Commands);
+        AssertTrue(provider.Capabilities.AutofocusDeliveryAck);
+        AssertTrue(JsonSerializer.Serialize(provider.Capabilities, DirectProtocol.JsonOptions)
+            .Contains("\"autofocus_delivery_ack\":true", StringComparison.Ordinal));
+        AssertFalse(JsonSerializer.Serialize(DirectCapabilities.None, DirectProtocol.JsonOptions)
+            .Contains("autofocus_delivery_ack", StringComparison.Ordinal));
+    }
+
+    private static async Task<bool> AcknowledgeAutofocus(
+        NinaDirectDataProvider provider, CancellationToken? session, DateTimeOffset timestamp,
+        long? expiresAt = null)
+    {
+        var response = await provider.ExecuteAsync(new DirectQuery(
+            Guid.NewGuid(), DirectQueryKind.AcknowledgeAutofocus,
+            ExpiresAt: expiresAt, ReportTimestamp: timestamp), CancellationToken.None, session);
+        return ((DirectApiEnvelope<bool>)response!).Response;
+    }
+
+    private static async Task AcknowledgedAutofocusIsHistorical()
+    {
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default));
+        var session = provider.DirectSessionToken;
+        var timestamp = new DateTimeOffset(2026, 9, 11, 6, 0, 0, TimeSpan.Zero);
+        await SnapshotTrackedEvents(provider, session);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "completed", timestamp);
+        await SnapshotTrackedEvents(provider, session);
+        var completion = new DirectAutofocusCompletion("L", 3500, -4, timestamp.UtcDateTime, null, true);
+        SetPendingAutofocusCompletion(provider, completion);
+        AssertTrue(provider.TryCacheObservedAutofocusReport(
+            JsonSerializer.SerializeToElement(new
+            {
+                Timestamp = timestamp,
+                Filter = "L",
+                CalculatedFocusPoint = new { Position = 3500 },
+            }), GetAutofocusCaptureGeneration(provider), chatEnabledAtCompletion: true));
+        AssertTrue(await AcknowledgeAutofocus(provider, session, timestamp.ToOffset(TimeSpan.FromHours(-5))));
+        AssertFalse(await AcknowledgeAutofocus(provider, session, timestamp));
+
+        // Even an immediate reconnect must silently baseline a receipt,
+        // despite the ordinary rewind watermark predating this event.
+        provider.BeginDirectTransport(session);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        RecordInternalEvent(provider, "MOUNT-PARKED", "unrelated later action");
+        await SnapshotTrackedEvents(provider, session);
+        await SnapshotTrackedEvents(provider, session);
+        provider.RotateDirectSession();
+        session = provider.DirectSessionToken;
+        var baseline = await SnapshotTrackedEvents(provider, session);
+        AssertEqual(2, baseline.Items.Length);
+        AssertEqual(2, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertFalse(baseline.Wire.Contains("ReplayCapturedAt", StringComparison.Ordinal));
+        var cached = await provider.ExecuteAsync(new DirectQuery(Guid.NewGuid(), DirectQueryKind.LastAutofocus),
+            CancellationToken.None, session);
+        AssertEqual(3500, ((DirectApiEnvelope<JsonElement>)cached!).Response
+            .GetProperty("CalculatedFocusPoint").GetProperty("Position").GetInt32());
+    }
+
+    private static async Task AutofocusReceiptRespectsSession()
+    {
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default));
+        var timestamp = DateTimeOffset.UtcNow;
+        var session = provider.DirectSessionToken;
+        await SnapshotTrackedEvents(provider, session);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "pending", timestamp);
+        await SnapshotTrackedEvents(provider, session);
+        AssertFalse(await AcknowledgeAutofocus(provider, session, timestamp.AddTicks(1)));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            AcknowledgeAutofocus(provider, null, timestamp));
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+            AcknowledgeAutofocus(provider, session, timestamp, expiresAt: 1));
+        provider.RotateDirectSession();
+        await AssertThrowsAsync<OperationCanceledException>(() =>
+            AcknowledgeAutofocus(provider, session, timestamp));
+        session = provider.DirectSessionToken;
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        provider.SuspendEventCapture();
+        await AssertThrowsAsync<OperationCanceledException>(() =>
+            AcknowledgeAutofocus(provider, session, timestamp));
+        provider.Reset();
+        AssertFalse(await AcknowledgeAutofocus(provider, provider.DirectSessionToken, timestamp));
+    }
+
+    private static async Task AutofocusReceiptCrossesNativePipe()
+    {
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default));
+        var timestamp = DateTimeOffset.UtcNow;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        for (var connection = 0; connection < 2; connection++)
+        {
+            // The runtime supervisor creates a new one-client pipe server for
+            // each physical connection while keeping the provider/session.
+            var pipeName = NinaDirectPipeServer.CreatePipeName();
+            using var server = new NinaDirectPipeServer(provider, pipeName);
+            server.Start();
+            using var pipe = new System.IO.Pipes.NamedPipeClientStream(".", pipeName,
+                System.IO.Pipes.PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous);
+            await pipe.ConnectAsync(timeout.Token);
+            using var reader = new StreamReader(pipe, leaveOpen: true);
+            using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
+            async Task<JsonElement> Query(string kind, string? reportTimestamp = null)
+            {
+                var id = Guid.NewGuid();
+                await writer.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    type = "query",
+                    payload = new { id, kind, report_timestamp = reportTimestamp },
+                }));
+                var responseLine = await reader.ReadLineAsync(timeout.Token)
+                    ?? throw new InvalidOperationException("Direct receipt query returned no response.");
+                using var document = JsonDocument.Parse(responseLine);
+                var payload = document.RootElement.GetProperty("payload");
+                AssertEqual(id, payload.GetProperty("id").GetGuid());
+                AssertTrue(payload.GetProperty("ok").GetBoolean());
+                return payload.GetProperty("payload").GetProperty("Response").Clone();
+            }
+            var baseline = await Query("event_history");
+            AssertEqual(connection, baseline.GetArrayLength());
+            if (connection == 0)
+            {
+                RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "pipe-delivered", timestamp);
+                AssertEqual(1, (await Query("event_history")).GetArrayLength());
+                AssertTrue((await Query("acknowledge_autofocus", timestamp.ToString("O"))).GetBoolean());
+                AssertFalse((await Query("acknowledge_autofocus", timestamp.ToString("O"))).GetBoolean());
+            }
+            else
+            {
+                AssertEqual("AUTOFOCUS-FINISHED", baseline[0].GetProperty("Event").GetString());
+                AssertEqual(1, (await Query("event_history")).GetArrayLength());
+            }
+        }
+    }
+
+    private static async Task AutofocusReplayExpires()
+    {
+        long now = 0;
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default),
+            monotonicTimestamp: () => now);
+        var session = provider.DirectSessionToken;
+        await SnapshotTrackedEvents(provider, session);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "old", DateTimeOffset.UtcNow);
+        await SnapshotTrackedEvents(provider, session);
+        now = Stopwatch.Frequency * 599;
+        provider.BeginDirectTransport(session);
+        AssertEqual(0, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        now = Stopwatch.Frequency * 600;
+        provider.BeginDirectTransport(session);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+
+        // An actual new completion captured while disconnected still arrives
+        // after the baseline, even though older history has expired.
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "completed offline", DateTimeOffset.UtcNow.AddMinutes(1));
+        provider.BeginDirectTransport(session);
+        AssertEqual(1, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+        AssertEqual(2, (await SnapshotTrackedEvents(provider, session)).Items.Length);
+    }
+
+    private static async Task NewAutofocusRetiresPreviousReplay()
+    {
+        using var provider = CreateSecurityTestProvider(new DirectAccessPolicy(DirectAccessOptions.Default));
+        var session = provider.DirectSessionToken;
+        await SnapshotTrackedEvents(provider, session);
+        RecordInternalEvent(provider, "AUTOFOCUS-FINISHED", "previous complete run", DateTimeOffset.UtcNow);
+        await SnapshotTrackedEvents(provider, session);
+        SetProviderStarted(provider, true);
+        try { provider.AutoFocusRunStarting(); }
+        finally { SetProviderStarted(provider, false); }
+        // The new run never completes; old completion must not be announced.
+        provider.BeginDirectTransport(session);
+        var baseline = await SnapshotTrackedEvents(provider, session);
+        AssertEqual(1, baseline.Items.Length);
+        AssertEqual("AUTOFOCUS-FINISHED", baseline.Items[0].GetProperty("Event").GetString());
+        var following = await SnapshotTrackedEvents(provider, session);
+        AssertEqual(2, following.Items.Length);
+        AssertEqual(1, following.Items.Count(item => item.GetProperty("Event").GetString() == "AUTOFOCUS-FINISHED"));
+    }
+
+    private static void DelayedAutofocusReplayIsRetired()
+    {
+        long now = 10;
+        var replay = new DirectAutofocusReplay(10, () => now);
+        var completedAt = replay.CaptureTimestamp();
+        now = 20;
+        replay.Observe(1, "AUTOFOCUS-STARTING", new Dictionary<string, object?>());
+        now = 30;
+        replay.Observe(2, "AUTOFOCUS-FINISHED", new Dictionary<string, object?>(), completedAt);
+        AssertFalse(replay.CanReplay(2));
+        AssertTrue(replay.RetiredSequences().Contains(2));
     }
 
     private static async Task DirectSessionRotationsReplayLastWrittenDelta()
@@ -11122,7 +11364,8 @@ internal static class Program
         }
     }
 
-    private static async Task HostedPluginUsesRustHub(string runtimePath, bool targetCommands)
+    private static async Task HostedPluginUsesRustHub(string runtimePath, bool targetCommands,
+        bool verifyAutofocusReceipt = false)
     {
         var artifactDirectory = Environment.GetEnvironmentVariable(
             "CHATSTRONOMY_CHART_ARTIFACT_DIRECTORY");
@@ -11134,6 +11377,7 @@ internal static class Program
             ? $"-{Guid.NewGuid():N}"
             : string.Empty;
         if (targetCommands) suffix += "-target-commands";
+        if (verifyAutofocusReceipt) suffix += "-autofocus-receipt";
         var guiderOutputPath = Path.Combine(
             outputDirectory,
             $"chatstronomy-hosted-guider{suffix}.png");
@@ -11148,13 +11392,18 @@ internal static class Program
             RedirectStandardError = true,
         };
         startInfo.ArgumentList.Add("direct-hub-probe");
+        if (verifyAutofocusReceipt)
+        {
+            startInfo.ArgumentList.Add("--verify-autofocus-receipt");
+        }
         startInfo.ArgumentList.Add("--guider-output");
         startInfo.ArgumentList.Add(guiderOutputPath);
         startInfo.ArgumentList.Add("--autofocus-output");
         startInfo.ArgumentList.Add(autofocusOutputPath);
         using var process = System.Diagnostics.Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start the Direct hub probe.");
-        var provider = new FakeDirectDataProvider(targetCommands: targetCommands);
+        var provider = new FakeDirectDataProvider(targetCommands: targetCommands,
+            autofocusDeliveryAck: verifyAutofocusReceipt);
         provider.Start();
         try
         {
@@ -11230,6 +11479,8 @@ internal static class Program
             AssertTrue(issued?.Credential.StartsWith("csrc_", StringComparison.Ordinal) == true);
             AssertTrue(provider.QueriedKinds.Contains(DirectQueryKind.GuiderGraph));
             AssertTrue(provider.QueriedKinds.Contains(DirectQueryKind.LastAutofocus));
+            AssertEqual(verifyAutofocusReceipt,
+                provider.QueriedKinds.Contains(DirectQueryKind.AcknowledgeAutofocus));
 
             foreach (var outputPath in new[] { guiderOutputPath, autofocusOutputPath })
             {
@@ -11760,6 +12011,7 @@ internal static class Program
         private readonly DirectAccessPolicy? accessPolicy;
         private readonly Exception? executeFailure;
         private readonly bool targetCommands;
+        private readonly bool autofocusDeliveryAck;
         private CancellationTokenSource directSession = new();
         private Guid directSessionId = Guid.NewGuid();
         private CancellationTokenSource profileSession = new();
@@ -11774,11 +12026,13 @@ internal static class Program
         internal FakeDirectDataProvider(
             DirectAccessPolicy? accessPolicy = null,
             Exception? executeFailure = null,
-            bool targetCommands = false)
+            bool targetCommands = false,
+            bool autofocusDeliveryAck = false)
         {
             this.accessPolicy = accessPolicy;
             this.executeFailure = executeFailure;
             this.targetCommands = targetCommands;
+            this.autofocusDeliveryAck = autofocusDeliveryAck;
         }
 
         public DirectCapabilities Capabilities => new(
@@ -11792,6 +12046,7 @@ internal static class Program
             Commands: accessPolicy?.Current.CommandsEnabled ?? true)
         {
             TargetCommands = targetCommands,
+            AutofocusDeliveryAck = autofocusDeliveryAck,
         };
 
         public CancellationToken ProfileSessionToken =>
@@ -11903,6 +12158,8 @@ internal static class Program
                     200),
                 DirectQueryKind.GuiderGraph => GuiderGraph(),
                 DirectQueryKind.LastAutofocus => LastAutofocus(),
+                DirectQueryKind.AcknowledgeAutofocus when autofocusDeliveryAck =>
+                    AcknowledgeAutofocusFixture(query),
                 _ => throw new NotSupportedException(),
             };
             return Task.FromResult<object?>(response);
@@ -11934,6 +12191,14 @@ internal static class Program
                 HistorySize: 500,
                 PixelScale: 2,
                 Scale: 1));
+        }
+
+        private static object AcknowledgeAutofocusFixture(DirectQuery query)
+        {
+            var expected = ((DirectApiEnvelope<JsonElement>)LastAutofocus())
+                .Response.GetProperty("Timestamp").GetDateTimeOffset();
+            AssertEqual(expected, query.ReportTimestamp!.Value);
+            return DirectApiEnvelope<bool>.Ok(true);
         }
 
         private static object LastAutofocus()

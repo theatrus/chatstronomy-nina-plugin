@@ -52,6 +52,11 @@ internal static class DirectProtocol
                 Index: RequiredUInt32(payload, "index"),
                 ExpiresAt: expiresAt),
             "last_autofocus" => new DirectQuery(id, DirectQueryKind.LastAutofocus, ExpiresAt: expiresAt),
+            "acknowledge_autofocus" => new DirectQuery(
+                id,
+                DirectQueryKind.AcknowledgeAutofocus,
+                ExpiresAt: expiresAt,
+                ReportTimestamp: RequiredTimestamp(payload, "report_timestamp")),
             "mount_info" => new DirectQuery(id, DirectQueryKind.MountInfo, ExpiresAt: expiresAt),
             "camera_info" => new DirectQuery(id, DirectQueryKind.CameraInfo, ExpiresAt: expiresAt),
             "filterwheel_info" => new DirectQuery(id, DirectQueryKind.FilterwheelInfo, ExpiresAt: expiresAt),
@@ -272,6 +277,17 @@ internal static class DirectProtocol
         return result;
     }
 
+    private static DateTimeOffset RequiredTimestamp(JsonElement parent, string name)
+    {
+        if (!parent.TryGetProperty(name, out var value)
+            || value.ValueKind != JsonValueKind.String
+            || !value.TryGetDateTimeOffset(out var timestamp))
+        {
+            throw new DirectProtocolException($"Direct message field '{name}' must be an ISO-8601 timestamp.");
+        }
+        return timestamp;
+    }
+
     private static bool? OptionalBoolean(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null)
@@ -323,6 +339,7 @@ internal enum DirectQueryKind
     Sequence,
     Thumbnail,
     LastAutofocus,
+    AcknowledgeAutofocus,
     MountInfo,
     CameraInfo,
     FilterwheelInfo,
@@ -338,7 +355,8 @@ internal sealed record DirectQuery(
     DirectQueryKind Kind,
     uint? Index = null,
     DirectRigCommand? Command = null,
-    long? ExpiresAt = null)
+    long? ExpiresAt = null,
+    DateTimeOffset? ReportTimestamp = null)
 {
     internal bool IsExpiredAt(long unixTimeSeconds)
     {
@@ -504,6 +522,11 @@ internal sealed record DirectCapabilities(
     [JsonPropertyName("target_commands")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool TargetCommands { get; init; }
+
+    /// Delivery receipts retire notification replay, not the cached report.
+    [JsonPropertyName("autofocus_delivery_ack")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AutofocusDeliveryAck { get; init; }
 
     internal static DirectCapabilities None { get; } = new(
         EventHistory: false,

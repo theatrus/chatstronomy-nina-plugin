@@ -77,6 +77,12 @@ rather than weakening the requirement that autofocus sharing stay enabled for
 the whole run. Full optimizer or Inspector feedback requires a future Hocus
 Focus event or adapter contract.
 
+Autofocus notifications are tied to a completed run. A delivery receipt stops
+that run from being replayed after reconnect; reading its report does not.
+Pending notification replay expires after ten minutes or when another focus
+run starts, including with older Hub or local-runtime versions that do not
+send receipts. The last completed report stays available for status queries.
+
 Event families, images, and popup notifications can be controlled independently
 for each N.I.N.A. profile. Slew diagnostics, rotator-motion diagnostics, weather
 changes, and high-wind alerts are separate and start disabled; most other event
