@@ -174,6 +174,9 @@ internal static class DirectProtocol
                 Minutes: RequiredDouble(command, "minutes")),
             "start_autofocus" => new DirectRigCommand(DirectRigCommandKind.StartAutofocus),
             "cancel_autofocus" => new DirectRigCommand(DirectRigCommandKind.CancelAutofocus),
+            "slew_to_target" => new DirectRigCommand(DirectRigCommandKind.SlewToTarget),
+            "center_target" => new DirectRigCommand(DirectRigCommandKind.CenterTarget),
+            "center_rotate_target" => new DirectRigCommand(DirectRigCommandKind.CenterRotateTarget),
             "park_mount" => new DirectRigCommand(DirectRigCommandKind.ParkMount),
             "abort_exposure" => new DirectRigCommand(DirectRigCommandKind.AbortExposure),
             "stop_sequence" => new DirectRigCommand(DirectRigCommandKind.StopSequence),
@@ -368,6 +371,9 @@ internal enum DirectRigCommandKind
     AbortExposure,
     StopSequence,
     StartSequence,
+    SlewToTarget,
+    CenterTarget,
+    CenterRotateTarget,
 }
 
 internal sealed record DirectRigCommand(
@@ -493,6 +499,12 @@ internal sealed record DirectCapabilities(
     [property: JsonPropertyName("guider_graph")] bool GuiderGraph,
     [property: JsonPropertyName("commands")] bool Commands)
 {
+    /// Additive implementation support, not permission to actuate hardware.
+    /// Omission means a legacy peer does not understand target commands.
+    [JsonPropertyName("target_commands")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool TargetCommands { get; init; }
+
     internal static DirectCapabilities None { get; } = new(
         EventHistory: false,
         ImageHistory: false,

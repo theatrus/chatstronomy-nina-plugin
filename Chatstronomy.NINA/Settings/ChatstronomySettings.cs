@@ -301,6 +301,24 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(AllowSkipSequenceValidation), value);
     }
 
+    public bool AllowSlewToTarget
+    {
+        get => options.GetValueBoolean(nameof(AllowSlewToTarget), false);
+        set => options.SetValueBoolean(nameof(AllowSlewToTarget), value);
+    }
+
+    public bool AllowCenterTarget
+    {
+        get => options.GetValueBoolean(nameof(AllowCenterTarget), false);
+        set => options.SetValueBoolean(nameof(AllowCenterTarget), value);
+    }
+
+    public bool AllowCenterRotateTarget
+    {
+        get => options.GetValueBoolean(nameof(AllowCenterRotateTarget), false);
+        set => options.SetValueBoolean(nameof(AllowCenterRotateTarget), value);
+    }
+
     internal DirectAccessOptions AccessOptions => new(
         AllowRemoteControl: AllowRemoteControl,
         ShareObservatoryLocation: ShareObservatoryLocation,
@@ -317,7 +335,10 @@ internal sealed class ChatstronomySettings
             | (AllowParkMount ? DirectCommandPermissions.ParkMount : DirectCommandPermissions.None)
             | (AllowAbortExposure ? DirectCommandPermissions.AbortExposure : DirectCommandPermissions.None)
             | (AllowStopSequence ? DirectCommandPermissions.StopSequence : DirectCommandPermissions.None)
-            | (AllowStartSequence ? DirectCommandPermissions.StartSequence : DirectCommandPermissions.None),
+            | (AllowStartSequence ? DirectCommandPermissions.StartSequence : DirectCommandPermissions.None)
+            | (AllowSlewToTarget ? DirectCommandPermissions.SlewToTarget : DirectCommandPermissions.None)
+            | (AllowCenterTarget ? DirectCommandPermissions.CenterTarget : DirectCommandPermissions.None)
+            | (AllowCenterRotateTarget ? DirectCommandPermissions.CenterRotateTarget : DirectCommandPermissions.None),
         AllowSkipSequenceValidation: AllowSkipSequenceValidation);
 
     public bool SendImageEvents

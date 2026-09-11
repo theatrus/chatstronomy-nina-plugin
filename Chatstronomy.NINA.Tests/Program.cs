@@ -99,6 +99,10 @@ internal static class Program
         Run("Direct runtime bootstrap carries only its pipe", DirectRuntimeBootstrapCarriesOnlyPipe);
         Run("Direct access defaults to local read-only monitoring", DirectAccessDefaultsToReadOnly);
         Run("Each hardware command requires its own local consent", EveryCommandRequiresIndividualConsent);
+        Run("Target commands have separate local permissions and visible settings", CommandSettingsTests.Run);
+        await RunAsync("Commands respect sequence and capture ownership through cancellation", CommandSafetyTests.RunAsync);
+        await RunAsync("Native N.I.N.A. triggers safely execute queued chat commands", SequencingTests.RunAsync);
+        await RunAsync("Native centering and rotation use local targets and restore guiding", NativeTargetCommandTests.RunAsync);
         Run("Skipping sequence validation requires separate explicit consent", SequenceValidationBypassRequiresConsent);
         Run("Changing N.I.N.A. profiles immediately revokes in-flight hardware commands", ProfileChangesRevokeRemoteControl);
         Run("Queued UI hardware callbacks recheck consent, deadlines, and cancellation", QueuedHardwareActionsRecheckConsent);
@@ -421,8 +425,8 @@ internal static class Program
                 "Failed webhook requests never expose credentials in the local runtime log",
                 () => PluginRuntimeRedactsFailedWebhookDeliveries(runtimePath));
             await RunAsync(
-                "Plugin runtime queries the native Direct data pipe",
-                () => PluginRuntimeUsesDirectPipe(runtimePath));
+                "Plugin runtime accepts target-command capabilities and queries the native Direct data pipe",
+                () => PluginRuntimeUsesDirectPipe(runtimePath, targetCommands: true));
             await RunAsync(
                 "Release runtime renders Direct guider and autofocus pipe payloads to PNG",
                 () => DirectPipeRendersCharts(runtimePath));
@@ -437,8 +441,11 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(hubRuntimePath) && File.Exists(hubRuntimePath))
         {
             await RunAsync(
-                "Release hub pairs the N.I.N.A. plugin and renders remote charts",
-                () => HostedPluginUsesRustHub(hubRuntimePath));
+                "Release hub pairs a legacy-capability N.I.N.A. plugin and renders remote charts",
+                () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: false));
+            await RunAsync(
+                "Release hub accepts target-command capabilities and renders remote charts",
+                () => HostedPluginUsesRustHub(hubRuntimePath, targetCommands: true));
         }
         else
         {
@@ -509,6 +516,25 @@ internal static class Program
         AssertEqual(DirectQueryKind.Command, command.Kind);
         AssertEqual(DirectRigCommandKind.StartSequence, command.Command?.Kind);
         AssertEqual<bool?>(true, command.Command?.SkipValidation);
+
+        var targetHelloPath = Path.Combine(fixtures, "client-hello-target-commands.json");
+        if (File.Exists(targetHelloPath))
+        {
+            using var hello = JsonDocument.Parse(File.ReadAllText(targetHelloPath));
+            AssertTrue(hello.RootElement.GetProperty("payload").GetProperty("capabilities")
+                .GetProperty("target_commands").GetBoolean());
+            foreach (var (file, kind) in new[]
+            {
+                ("query-slew-target.json", DirectRigCommandKind.SlewToTarget),
+                ("query-center-target.json", DirectRigCommandKind.CenterTarget),
+                ("query-center-rotate-target.json", DirectRigCommandKind.CenterRotateTarget),
+            })
+            {
+                var targetCommand = DirectProtocol.ParseQuery(File.ReadAllText(Path.Combine(fixtures, file)));
+                AssertEqual(kind, targetCommand.Command?.Kind);
+                AssertEqual<int?>(null, targetCommand.Command?.FilterId);
+            }
+        }
 
         var error = DirectProtocol.ParseHubMessage(
             File.ReadAllText(Path.Combine(fixtures, "error.json")));
@@ -943,7 +969,7 @@ internal static class Program
             .Descendants(presentation + "UniformGrid")
             .Single(element =>
                 (string?)element.Attribute("IsEnabled") == "{Binding AllowRemoteControl}");
-        AssertEqual(14, commandPermissions.Elements(presentation + "Grid").Count());
+        AssertEqual(17, commandPermissions.Elements(presentation + "Grid").Count());
         var validationBypass = commandPermissions
             .Descendants(presentation + "CheckBox")
             .Single(element =>
@@ -1242,7 +1268,7 @@ internal static class Program
     private static void EveryCommandRequiresIndividualConsent()
     {
         var allKinds = Enum.GetValues<DirectRigCommandKind>();
-        AssertEqual(13, allKinds.Length);
+        AssertEqual(16, allKinds.Length);
         var allPermissions = DirectCommandPermissions.None;
 
         foreach (var kind in allKinds)
@@ -1262,7 +1288,7 @@ internal static class Program
                 allowed.RequireRemoteControl(new DirectRigCommand(sibling)));
         }
 
-        AssertEqual(13, Enum.GetValues<DirectCommandPermissions>().Length - 1);
+        AssertEqual(16, Enum.GetValues<DirectCommandPermissions>().Length - 1);
     }
 
     private static void SequenceValidationBypassRequiresConsent()
@@ -1426,7 +1452,10 @@ internal static class Program
         var access = new DirectAccessPolicy(allowed);
         var mediator = DispatchProxy.Create<ITelescopeMediator, GuardedTelescopeProxy>();
         var telescope = (GuardedTelescopeProxy)(object)mediator;
-        using var provider = CreateSecurityTestProvider(access, telescope: mediator);
+        using var commandFixture = new CommandSafetyTests.Fixture(mediator);
+        using var provider = commandFixture.Provider;
+        access = commandFixture.Access;
+        access.Update(allowed);
         var command = new DirectQuery(
             Guid.NewGuid(),
             DirectQueryKind.Command,
@@ -10986,9 +11015,9 @@ internal static class Program
         }
     }
 
-    private static async Task PluginRuntimeUsesDirectPipe(string runtimePath)
+    private static async Task PluginRuntimeUsesDirectPipe(string runtimePath, bool targetCommands)
     {
-        var provider = new FakeDirectDataProvider();
+        var provider = new FakeDirectDataProvider(targetCommands: targetCommands);
         var controller = new ChatstronomyRuntimeController(provider);
         try
         {
@@ -11093,7 +11122,7 @@ internal static class Program
         }
     }
 
-    private static async Task HostedPluginUsesRustHub(string runtimePath)
+    private static async Task HostedPluginUsesRustHub(string runtimePath, bool targetCommands)
     {
         var artifactDirectory = Environment.GetEnvironmentVariable(
             "CHATSTRONOMY_CHART_ARTIFACT_DIRECTORY");
@@ -11104,6 +11133,7 @@ internal static class Program
         var suffix = string.IsNullOrWhiteSpace(artifactDirectory)
             ? $"-{Guid.NewGuid():N}"
             : string.Empty;
+        if (targetCommands) suffix += "-target-commands";
         var guiderOutputPath = Path.Combine(
             outputDirectory,
             $"chatstronomy-hosted-guider{suffix}.png");
@@ -11124,7 +11154,7 @@ internal static class Program
         startInfo.ArgumentList.Add(autofocusOutputPath);
         using var process = System.Diagnostics.Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start the Direct hub probe.");
-        var provider = new FakeDirectDataProvider();
+        var provider = new FakeDirectDataProvider(targetCommands: targetCommands);
         provider.Start();
         try
         {
@@ -11154,7 +11184,14 @@ internal static class Program
             }
             AssertTrue(ready.HasValue);
 
-            var hello = HostedHello();
+            // Exercise the additive capability in the actual signed Hub's
+            // pairing parser; the legacy pass omits it. Command dispatch is
+            // covered independently by the C# transport and Rust source tests,
+            // because the released probe intentionally only requests charts.
+            var hello = HostedHello() with { Capabilities = provider.Capabilities };
+            var capabilities = JsonSerializer.SerializeToElement(hello.Capabilities);
+            AssertEqual(targetCommands, capabilities.TryGetProperty("target_commands", out var advertised));
+            if (targetCommands) AssertTrue(advertised.GetBoolean());
             var client = new ChatstronomyHubClient(provider);
             HubCredentialIssuedEventArgs? issued = null;
             client.CredentialIssued += (_, args) => issued = args;
@@ -11722,6 +11759,7 @@ internal static class Program
     {
         private readonly DirectAccessPolicy? accessPolicy;
         private readonly Exception? executeFailure;
+        private readonly bool targetCommands;
         private CancellationTokenSource directSession = new();
         private Guid directSessionId = Guid.NewGuid();
         private CancellationTokenSource profileSession = new();
@@ -11735,10 +11773,12 @@ internal static class Program
 
         internal FakeDirectDataProvider(
             DirectAccessPolicy? accessPolicy = null,
-            Exception? executeFailure = null)
+            Exception? executeFailure = null,
+            bool targetCommands = false)
         {
             this.accessPolicy = accessPolicy;
             this.executeFailure = executeFailure;
+            this.targetCommands = targetCommands;
         }
 
         public DirectCapabilities Capabilities => new(
@@ -11749,7 +11789,10 @@ internal static class Program
             EquipmentSnapshots: true,
             AutofocusDetails: true,
             GuiderGraph: true,
-            Commands: accessPolicy?.Current.CommandsEnabled ?? true);
+            Commands: accessPolicy?.Current.CommandsEnabled ?? true)
+        {
+            TargetCommands = targetCommands,
+        };
 
         public CancellationToken ProfileSessionToken =>
             Volatile.Read(ref profileSession).Token;
