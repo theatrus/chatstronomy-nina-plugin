@@ -3,289 +3,106 @@
 Bridge N.I.N.A. with Discord and Matrix, supporting bot slash commands for
 control.
 
-Chatstronomy reads the active N.I.N.A. profile natively. It can start a bundled
-local runtime for a private Discord webhook, Discord application, or Matrix
-account, or connect outbound to the hosted
-[Chatstronomy Hub](https://hub.chatstronomy.com).
+See image previews, autofocus and guiding graphs, and session updates in chat.
+Install the plugin and pair with [Chatstronomy Hub](https://hub.chatstronomy.com)
+for the simplest setup, or run your own Discord or Matrix integration locally.
 
-## Install
+<a id="install"></a>
 
-Install **Chatstronomy** from N.I.N.A.'s plugin manager and restart N.I.N.A.
-Use the official N.I.N.A. repository when the release is listed there. For
-the current release through our development repository, open
-**Options → General → Plugin Repositories**, add the
-following feed (N.I.N.A. appends `/plugins/manifests`), then install
-Chatstronomy from **Plugins → Available**:
+## Install from N.I.N.A.
+
+Chatstronomy is available in the **official N.I.N.A. plugin repository**.
+No extra repository is needed. Requires N.I.N.A. 3.2+ on Windows.
+
+1. Open **Plugins → Available**, install **Chatstronomy**, and restart N.I.N.A.
+2. Open **Options → Plugins → Chatstronomy** and review your sharing and
+   hardware-control settings.
+3. For hosted Discord, get a pairing code from
+   [Chatstronomy Hub](https://hub.chatstronomy.com), enter it in the plugin,
+   and connect your Discord channel in the Hub.
+
+Read the [Hub privacy policy](https://chatstronomy.com/hub-privacy.html) and
+[terms](https://chatstronomy.com/hub-terms.html) before pairing.
+
+### Development version (optional)
+
+Our development repository may offer newer reviewed releases before the official
+listing catches up. Add it alongside the official repository under
+**Options → General → Plugin Repositories → +**:
 
 ```text
 https://raw.githubusercontent.com/theatrus/chatstronomy-nina-plugin/main/registry
 ```
 
-Open **Options → Plugins → Chatstronomy** after restart.
+Then install or update Chatstronomy through the plugin manager and restart
+N.I.N.A. Both feeds can point to the same version; this is not a separate beta
+channel. See the [latest release](https://github.com/theatrus/chatstronomy-nina-plugin/releases/latest)
+and [development repository notes](registry/README.md).
 
 ## Modes
 
-- **Hosted Hub** — the recommended centralized path. Pair each N.I.N.A. profile
-  with [hub.chatstronomy.com](https://hub.chatstronomy.com). Multiple N.I.N.A.
-  systems can share one managed Discord application. Hosted delivery currently
-  supports Discord; Matrix is available in local mode.
-- **Local Discord webhook** — simple notifications using your webhook.
-- **Local Discord app / bot** — runs the full bot with your token, channel, and
-  slash commands.
-- **Local Matrix** — logs in to an HTTPS Matrix homeserver and posts to your
-  selected room. Matrix can also accompany either local Discord option.
+- **Hosted Hub — recommended:** pair one or more N.I.N.A. computers with the
+  managed Discord bot. No observatory ports to open.
+- **Local:** use your own Discord bot, Discord webhook, or Matrix account on
+  an HTTPS homeserver. Matrix can also accompany either local Discord option.
 
-Local mode starts and stops its signed bundled runtime with N.I.N.A. Local
-delivery secrets and hosted connection credentials are stored in Windows
-Credential Manager, not in the N.I.N.A. profile. Local credentials cross only a
-current-user named pipe and are never placed in command-line arguments or
-generated configuration files. Hosted mode uses an outbound TLS WebSocket and a
-credential bound to the profile and node.
+The plugin manages the bundled local runtime for you. Credentials are stored
+in Windows Credential Manager. Slash commands are Discord-only; Matrix and
+webhooks provide notifications.
 
 ## Local control consent and hosted privacy
 
-Remote telescope and camera control is **disabled by default in each N.I.N.A.
-profile**. The plugin's **Security and privacy** settings provide an overall
-control switch and an individual permission for every supported hardware
-command; both the overall switch and every command permission start off. Turning
-on the overall switch alone does not authorize any action: explicitly select
-only the commands an authorized Discord server or locally managed bot should be
-allowed to run. Skipping sequence validation requires its own additional local
-permission. These N.I.N.A.-side controls are the hardware trust boundary: Hub
-roles, channel permissions, and server policies cannot override them.
+Choose which event categories, images, logs, and location data to share in the
+plugin. Disabled event categories are not sent to the Hub or local bot;
+disabling images also blocks history and thumbnails. Most ordinary events and
+images start enabled, so review the settings before connecting.
 
-Observatory position sharing is also disabled by default. With sharing disabled,
-the plugin redacts site coordinates, elevation, and location-derived mount
-values before sending telemetry. Hardware device identifiers and structured
-local filesystem or script paths are always redacted, even when position
-sharing is enabled. Images, selected log lines, notifications, user-entered
-target names, and ordinary network connection information can still contain
-identifying information. Enabled sequence sharing can also include user-authored
-annotation and message text. Failure summaries can contain sanitized N.I.N.A.
-operational error text; local path-shaped strings are redacted before
-transmission. Review these choices before enabling forwarding.
+Hardware commands require **both the local master switch and each command's
+permission**. Hub roles cannot override them. Skipping sequence validation
+requires separate approval.
 
-Most event categories, image sharing, and popup notifications start enabled.
-Slew diagnostics, rotator-motion diagnostics, weather-change reports, and
-high-wind alerts are separate opt-ins and start disabled. Review those settings
-before pairing with the Hub or starting a local runtime, and turn off anything
-you do not want to leave N.I.N.A. Turning a
-category off prevents its underlying events from reaching the Hub or local bot,
-including events already buffered before the setting changed. Turning off
-images also blocks image history and thumbnails.
-Equipment/status queries remain available, although disabling event categories
-can reduce the detail available for target, sequence, and equipment tracking.
-Raw N.I.N.A. logs are neither read nor sent until you enable at least one log
-level. Before pairing, review the hosted
-[privacy policy](https://chatstronomy.com/hub-privacy.html) and
-[terms of service](https://chatstronomy.com/hub-terms.html).
+See [events, sharing, and privacy](docs/events-and-privacy.md) for defaults,
+redaction rules, supported events, and reporting limits.
 
 ## Commands while imaging
 
-`/autofocus` chooses the appropriate path automatically. When N.I.N.A. is idle,
-it runs the selected autofocus implementation, including Hocus Focus, while
-reserving the camera. During an advanced sequence, it queues a request for
-the **Chatstronomy Autofocus** trigger to run before the next light exposure.
-It never starts a competing autofocus run in the middle of an exposure.
-`/autofocus cancel:true` cancels only Chatstronomy's own queued or running
-autofocus request, not autofocus started elsewhere in N.I.N.A.
+In Discord, use `/chatstronomy` followed by a subcommand such as `status`,
+`last-image`, or `autofocus`.
 
-Add the matching trigger to the active target's enclosing instruction set:
+Autofocus uses the selected N.I.N.A. implementation, including Hocus Focus.
+During an advanced sequence, autofocus, filter changes, and target moves queue
+through their matching Chatstronomy triggers before a light exposure. Add the
+triggers to the enclosing instruction set—or directly to the Target Scheduler
+container in its standard workflow. The simple sequencer and parallel
+instruction sets do not support queued commands.
 
-| Chat command | N.I.N.A. trigger |
-| --- | --- |
-| `/autofocus` | Chatstronomy Autofocus |
-| `/change-filter` | Chatstronomy Filter Change |
-| `/slew-target` | Chatstronomy Slew to Target |
-| `/center-target` | Chatstronomy Center Target |
-| `/center-rotate-target` | Chatstronomy Center and Rotate Target |
+Cooling and warming remain available while sequencing. Other hardware commands
+have sequence guards; `stop-sequence` stops the active sequence and
+`start-sequence` starts the loaded advanced sequence when idle.
 
-An enclosing parent instruction set can provide the trigger for its targets.
-For Target Scheduler's standard planning container, add the triggers directly
-to its Target Scheduler container. Requests follow the same scheduled project
-and target across its per-exposure plans, but are cancelled if the target or
-its coordinates change. Other scheduler modes without a verifiable target
-are rejected.
-During a running sequence, requests require a matching active trigger; they
-are rejected if no suitable trigger is available. Each operation has its own
-local permission. Target commands re-steer to the current target resolved
-inside N.I.N.A.; they accept no arbitrary coordinates from chat and are
-rejected when there is no suitable current target. Centering uses N.I.N.A.'s
-plate solver; centering and rotating also applies the target's rotation.
-
-Queued is not completed: the command reply indicates acceptance, and failures
-are reported separately. Pending requests do not survive sequence or profile
-changes or revoked local permission. Repeated requests cannot create an
-unbounded work queue.
-
-Cooling and warming remain available during a sequence. Mount parking,
-homing and unparking, guiding changes, and exposure abortion are rejected
-while a sequence is running. Use `/stop-sequence` to stop the active sequence
-through N.I.N.A. first. `/start-sequence` starts the loaded advanced sequence
-when N.I.N.A. is idle, with normal validation unless its separate local bypass
-permission is enabled. The ordinary local master switch and individual
-command permissions apply to all of these operations.
-
-Queued requests expire after 30 minutes and pause near a scheduled meridian
-flip. Parallel instruction sets and the simple sequencer do not support
-injection. When idle, a target-move command requires exactly one loaded
-advanced-sequence target so it cannot choose the wrong target.
+See the [command and trigger guide](docs/commands.md) for trigger names,
+target selection, cancellation, and local permissions. A queued or accepted
+reply is not a completion notice.
 
 ## Native data and event controls
 
-The plugin provides bounded native histories and typed command handling for:
+- Image previews with capture details.
+- Native N.I.N.A. and Hocus Focus autofocus reports, plus guider graphs.
+- Target Scheduler targets, sequence progress, waits, cooling, and safety updates.
+- Equipment events, optional weather and motion diagnostics, and selected logs.
 
-- equipment connection and state changes, including dome/shutter activity,
-  flat-panel cover, light, and brightness changes, and connection state for
-  weather and switch devices;
-- images, larger chat thumbnails, and image-save failures;
-- autofocus results and charts from the report matching the completed run,
-  including every native N.I.N.A. focus and fitting mode plus Hocus Focus fit
-  quality, star-count, region, validation, and algorithm details when present;
-- guider state, dithers, history, and graphs;
-- native safety-monitor connection and safe/unsafe transitions, retained as
-  current status while safety delivery remains enabled;
-- optional, rate-limited weather-change reports and independent high-wind and
-  recovery alerts from N.I.N.A.'s wind-speed or gust readings;
-- sequence lifecycle, item failures, and explicit completion outcomes;
-- built-in timed, altitude, Moon-altitude, Sun-altitude, horizon, and safety
-  waits, plus supported long-running Sequencer+ condition and manual waits;
-- camera cooling and warming, optional mount-slew start/end diagnostics,
-  center, and plate-solve results;
-- optional rotator move start/end diagnostics with sky and mechanical angles
-  when N.I.N.A. exposes them;
-- Target Scheduler broker events and the active scheduled target name;
-- N.I.N.A. popup status notifications;
-- N.I.N.A. log events at individually selected levels.
-
-Hocus Focus 4.0.0.13's normal autofocus workflow publishes N.I.N.A.'s full
-start/completion lifecycle and is supported. Chatstronomy copies a reviewed set
-of result and algorithm fields; raw Hocus settings, paths, device IDs, images,
-and star lists stay inside N.I.N.A. Optional fields fall back naturally to the
-standard N.I.N.A. report. Hocus's Star Detection Optimizer feedback variants are
-not exported in its normal autofocus report. Its Aberration Inspector publishes
-only completion and exposes the complete six-region analysis only through an
-optional private save folder, so Chatstronomy keeps Inspector reports local
-rather than weakening the requirement that autofocus sharing stay enabled for
-the whole run. Full optimizer or Inspector feedback requires a future Hocus
-Focus event or adapter contract.
-
-Event families, images, and popup notifications can be controlled independently
-for each N.I.N.A. profile. Slew diagnostics, rotator-motion diagnostics, weather
-changes, and high-wind alerts are separate and start disabled; most other event
-families start enabled. Disabled categories never leave N.I.N.A. over either the
-hosted WebSocket or the local bot's named pipe; turning a category off
-immediately removes its buffered events from subsequent queries. Images and
-thumbnails are also withheld when their category is off.
-
-N.I.N.A. exposes public completion callbacks for slews and rotator moves, but no
-public start callback. When its separate motion switches are enabled,
-Chatstronomy detects moving and idle edges from N.I.N.A.'s live
-`Slewing` and `IsMoving` state. When both edges are observed, a motion ID pairs
-the start and end and the interval spans those observations. Slew events record
-a requested target when N.I.N.A. provides one, plus observed moving and idle
-RA/Dec positions. State-observed starts and ends also include altitude and
-azimuth only while **Share exact observatory coordinates and location-derived
-mount position** is enabled.
-N.I.N.A. does not expose the requested rotator target at its public start-state
-boundary. State-observed rotator starts report available sky and mechanical
-angles; a recovered start carries the callback's available logical or mechanical
-`From` angle. An
-ordinary “ended” event means N.I.N.A. first reported the device idle; it does
-not by itself claim that settling or the overall operation succeeded. Delayed native
-completion callbacks enrich or deduplicate the same motion without blocking
-N.I.N.A.'s equipment callbacks. If a short movement completes between live
-state observations, Chatstronomy recovers a paired start and end from N.I.N.A.'s
-completion callback, labels it **Recovered after motion began**, and omits a
-duration it could not observe. Because that callback has no start timestamp, a
-recovered mount start contains callback RA/Dec but no historical altitude or
-azimuth; its end is timestamped by the completion callback and uses the
-available live idle snapshot. Neither recovery record implies success.
-
-Timed waits use Discord's localized timestamps and relative countdowns. Matrix
-shows UTC timestamps and the time remaining when the message was sent. Target
-Scheduler waits and sequence time waits are tracked separately; reaching an
-estimated wait time does not by itself mean that the wait has finished.
-
-Once N.I.N.A. accepts a locally permitted command, its terminal failure is
-always delivered as part of that command exchange; optional event switches do
-not hide the outcome. Safety-monitor transitions have their own event switch; a
-safety wait is sent only when both sequence and safety delivery are enabled.
-The dedicated **Observatory and flat panel** switch covers dome/shutter actions
-and flat cover, light, and brightness changes. Their connection events, along
-with weather-station and switch-device connection state, use **Equipment
-connections**. Structured weather measurements remain private unless
-**Meaningful weather changes** or **High-wind alerts** is enabled. General
-weather reports group significant changes and send
-at most once every five minutes, except rain onset; they can include available
-temperature, dew point, humidity, pressure, cloud, rain, wind, sky, and seeing
-measurements. High-wind-only mode sends only wind speed, gust, and the local
-threshold in m/s, plus alert/recovery state. An active alert may be resent after
-a station reconnect or threshold change to synchronize status without another
-user-facing high-wind notification. Missing readings never count as recovery;
-observed wind must cross the hysteresis boundary. Weather-station names, device IDs,
-drivers, and raw N.I.N.A. objects are never included. Weather reports are
-informational and can be delayed, unavailable, or inaccurate; they do not
-replace N.I.N.A.'s safety monitor, local automation, or physical interlocks.
-Switch values and LiveStack data are not captured. Enabled popup notifications
-and opt-in raw N.I.N.A. logs remain unstructured text and may contain
-operational details. Sequencer+
-condition expressions and free-form pause reasons remain inside N.I.N.A.
-Changing any event-delivery selection first closes the current Direct session,
-then applies the new selection and reconnects. This prevents an older Hub or
-local runtime from turning cached operation state into a final message after
-sharing is disabled.
-Every raw log level starts off because logs can be frequent and may include
-device or filesystem details; logs are not read or sent until a level is
-enabled.
-
-Chat forwarding drops repeated diagnostics instead of building a backlog.
-Per profile, errors and warnings share a burst allowance of five messages,
-replenished at one every 12 seconds. Other log lines and popup notifications
-share an allowance of ten, replenished at one every six seconds. Identical
-diagnostics are sent at most once a minute, including alternating failures
-from different sequence items. Excess messages are discarded before entering
-chat history; N.I.N.A.'s own logs are unchanged. Normal equipment events,
-safety changes, sequence outcomes, and responses to remote commands remain
-available. Existing event and log sharing selections still apply.
-
-The Hub can report how many diagnostics were omitted, even if no further
-event arrives. Event-history responses include an additive `ElidedEvents`
-array of cumulative `{Event, Level?, Count, Epoch}` counters, including enabled
-counter slots with a zero count. Unchanged reads do not drain or duplicate
-counts. These contain no suppressed message text.
-Counters obey the original event and log-level permissions, clear when sharing
-settings change, and start a new epoch after a profile reset. Missing slots
-and changed epochs clear pending notices, including messages dropped by the
-Hub itself. An empty array means no diagnostic counters are currently shared;
-older runtimes can ignore the new envelope field while continuing to read the
-unchanged event list.
+Event selection is per N.I.N.A. profile. Repeated diagnostics are rate-limited
+with omitted-message counts. See the
+[event reference](docs/events-and-privacy.md#events-and-report-details) for
+supported integrations and their limits.
 
 ## Development
 
-```powershell
-dotnet run --project Chatstronomy.NINA.Tests\Chatstronomy.NINA.Tests.csproj -c Release
-./fetch-runtime.ps1
-./build-package.ps1
-```
+This repository builds the C# plugin and packages a signed runtime pinned from
+[the backend repository](https://github.com/theatrus/chatstronomy); it does not
+compile Rust.
 
-`fetch-runtime.ps1` downloads the exact backend release pinned by
-`runtime.lock.json`, rejecting identity, protocol, size, or checksum
-mismatches, and leaves the signed runtime in `runtime-cache/`.
-`build-package.ps1` then copies it into the N.I.N.A. plugin archive — it does
-not download anything itself and fails if the runtime is missing. Rust is never
-compiled in this repository. Every archive includes the Apache-2.0 license and
-third-party notices; archives containing the runtime also include the complete
-Liberation Sans SIL Open Font License next to `chatstronomy.exe`.
-
-Three optional environment variables widen the test suite; without them the
-process-level runtime, hub, and cross-repo contract checks report `SKIP`
-rather than failing, so it is easy to believe you ran more than you did:
-
-```powershell
-$env:CHATSTRONOMY_RUNTIME_EXE = "$PWD/runtime-cache/chatstronomy.exe"
-$env:CHATSTRONOMY_HUB_EXE = "<path to full chatstronomy backend executable>"
-$env:CHATSTRONOMY_CONTRACTS_DIR = "<path to chatstronomy>/contracts"
-```
+See [build and test instructions](docs/development.md) for packaging, signing,
+and full integration-test setup.
 
 Author: Yann Ramin. License: Apache-2.0.
