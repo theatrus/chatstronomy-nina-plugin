@@ -27,4 +27,10 @@ $env:CHATSTRONOMY_HUB_EXE = "<path to full chatstronomy backend executable>"
 $env:CHATSTRONOMY_CONTRACTS_DIR = "<path to chatstronomy>/contracts"
 ```
 
+When testing a coordinated backend build that supports the autofocus receipt
+probe, also set `$env:CHATSTRONOMY_EXPECT_AUTOFOCUS_ACK_PROBE = "1"`. This adds a
+real Rust Hub → plugin WebSocket receipt exchange against synthetic chart
+fixtures. Leave it unset when testing older pinned releases; the native
+named-pipe receipt and reconnect tests run in the regular suite either way.
+
 [Back to the README](../README.md#development)
