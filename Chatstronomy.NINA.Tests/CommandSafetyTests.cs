@@ -1,6 +1,9 @@
 using Chatstronomy.NINA.Direct;
 using Chatstronomy.NINA.Protocol;
+using Chatstronomy.NINA.Sequencing;
 using Chatstronomy.NINA.Settings;
+using NINA.Core.Enum;
+using NINA.Core.Model;
 using NINA.Core.Model.Equipment;
 using NINA.Core.Utility;
 using NINA.Core.Utility.WindowService;
@@ -12,7 +15,9 @@ using NINA.Equipment.Interfaces.Mediator;
 using NINA.Profile.Interfaces;
 using NINA.Sequencer;
 using NINA.Sequencer.Container;
+using NINA.Sequencer.Interfaces;
 using NINA.Sequencer.Mediator;
+using NINA.Sequencer.SequenceItem;
 using NINA.ViewModel.Interfaces;
 using NINA.ViewModel.Sequencer;
 using NINA.WPF.Base.Interfaces;
@@ -122,6 +127,174 @@ internal static class CommandSafetyTests
         await ConcurrentAutofocusRequestsHaveOneOwner();
         await NativeAutofocusCannotBeReenteredOrCancelled();
         await FalseHardwareResultsRemainVisible();
+        await ProviderQueuesThroughNativeSequenceTriggers();
+        await ProviderNeverFallsBackWhenSequenceTriggerIsUnavailable();
+        await ProviderRejectsSequenceEpochChangedDuringAdmission();
+    }
+
+    private static async Task ProviderQueuesThroughNativeSequenceTriggers()
+    {
+        foreach (var kind in new[] { DirectRigCommandKind.StartAutofocus, DirectRigCommandKind.ChangeFilter })
+        {
+            using var fixture = new Fixture();
+            var firstStarted = Signal();
+            var finishFirst = Signal();
+            var hardwareStarted = Signal();
+            var secondStarted = Signal();
+            var filterCompleted = new TaskCompletionSource<FilterInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.FilterTask = filterCompleted.Task;
+            fixture.AutofocusStarted = _ => hardwareStarted.TrySetResult();
+            fixture.FilterPreamble = () => hardwareStarted.TrySetResult();
+            var (root, scope, owner) = fixture.NativeSequence();
+            scope.Add(CreateTrigger(kind, fixture.ProfileService));
+            scope.Add(new Exposure(async token => { firstStarted.TrySetResult(); await finishFirst.Task.WaitAsync(token); }));
+            scope.Add(new Exposure(_ => { secondStarted.TrySetResult(); return Task.CompletedTask; }));
+            using var stop = new CancellationTokenSource();
+            var running = root.Run(new Progress<ApplicationStatus>(), stop.Token);
+            try
+            {
+                await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(ReferenceEquals(NinaDirectSequenceSnapshot.TryGetSequenceRoot(fixture.Sequence), root),
+                    "Provider did not discover the real native sequencer root");
+                var reply = await fixture.Send(kind, filter: 0).WaitAsync(TimeSpan.FromSeconds(1));
+                AssertAccepted(reply);
+                Check(((DirectApiEnvelope<string>)reply!).Response.Contains("queued", StringComparison.OrdinalIgnoreCase),
+                    "Provider chose an immediate hardware path during a sequence");
+                Check(fixture.AutofocusCalls == 0 && fixture.FilterCalls == 0,
+                    "Queued hardware ran before the active exposure finished");
+                Check(ReferenceEquals(fixture.CameraOwner, owner), "Queued command stole the sequencer's capture ownership");
+
+                finishFirst.TrySetResult();
+                await hardwareStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Task.Delay(25);
+                Check(!secondStarted.Task.IsCompleted && !running.IsCompleted,
+                    "Native exposure boundary did not await the actual hardware operation");
+                Check(ReferenceEquals(fixture.CameraOwner, owner), "Queued execution changed the sequencer's capture ownership");
+                fixture.AutofocusCompletion.TrySetResult(new AutoFocusReport { Timestamp = DateTime.Now, Filter = "L" });
+                filterCompleted.TrySetResult(fixture.SelectedFilter);
+                await running.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(secondStarted.Task.IsCompleted, "Sequence did not resume after queued hardware completion");
+                Check(kind == DirectRigCommandKind.StartAutofocus
+                    ? fixture.AutofocusCalls == 1 && fixture.FilterCalls == 0 && fixture.AutofocusHistory == 1
+                    : fixture.FilterCalls == 1 && fixture.AutofocusCalls == 0,
+                    "Provider did not route exactly one operation through its matching native trigger");
+                Check(ReferenceEquals(fixture.CameraOwner, owner), "Queued completion released ownership belonging to N.I.N.A.");
+            }
+            finally
+            {
+                finishFirst.TrySetResult();
+                fixture.AutofocusCompletion.TrySetCanceled();
+                filterCompleted.TrySetCanceled();
+                stop.Cancel();
+                await FinishNativeSequence(running, stop.Token);
+                fixture.CameraOwner = null;
+            }
+        }
+    }
+
+    private static async Task ProviderNeverFallsBackWhenSequenceTriggerIsUnavailable()
+    {
+        foreach (var kind in new[] { DirectRigCommandKind.StartAutofocus, DirectRigCommandKind.ChangeFilter })
+        foreach (var mode in new[] { "absent", "wrong", "disabled" })
+        {
+            using var fixture = new Fixture();
+            var firstStarted = Signal();
+            var finishFirst = Signal();
+            var (root, scope, owner) = fixture.NativeSequence();
+            if (mode != "absent")
+            {
+                var triggerKind = mode == "wrong"
+                    ? kind == DirectRigCommandKind.StartAutofocus ? DirectRigCommandKind.ChangeFilter : DirectRigCommandKind.StartAutofocus
+                    : kind;
+                var trigger = CreateTrigger(triggerKind, fixture.ProfileService);
+                if (mode == "disabled") trigger.Status = SequenceEntityStatus.DISABLED;
+                scope.Add(trigger);
+            }
+            scope.Add(new Exposure(async token => { firstStarted.TrySetResult(); await finishFirst.Task.WaitAsync(token); }));
+            using var stop = new CancellationTokenSource();
+            var running = root.Run(new Progress<ApplicationStatus>(), stop.Token);
+            try
+            {
+                await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Reject(() => fixture.Send(kind, filter: 0), "trigger");
+                Check(fixture.AutofocusCalls == 0 && fixture.FilterCalls == 0,
+                    "Missing, wrong, or disabled trigger caused a direct hardware fallback");
+                Check(!SequenceCommandCoordinator.For(fixture.ProfileService).IsBusy,
+                    "Unavailable trigger left an accepted command behind");
+                Check(ReferenceEquals(fixture.CameraOwner, owner), "Rejected sequence command changed native capture ownership");
+            }
+            finally
+            {
+                finishFirst.TrySetResult();
+                stop.Cancel();
+                await FinishNativeSequence(running, stop.Token);
+                fixture.CameraOwner = null;
+            }
+        }
+    }
+
+    private static async Task ProviderRejectsSequenceEpochChangedDuringAdmission()
+    {
+        using var fixture = new Fixture();
+        var firstStarted = Signal();
+        var finishFirst = Signal();
+        var (root, scope, owner) = fixture.NativeSequence();
+        scope.Add(new ChatstronomyAutofocusTrigger(fixture.ProfileService));
+        scope.Add(new Exposure(async token => { firstStarted.TrySetResult(); await finishFirst.Task.WaitAsync(token); }));
+        using var stop = new CancellationTokenSource();
+        var running = root.Run(new Progress<ApplicationStatus>(), stop.Token);
+        try
+        {
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var epoch = typeof(NinaDirectDataProvider).GetField("sequenceControlEpoch", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var changed = false;
+            fixture.CameraInfoRead = () =>
+            {
+                if (changed) return;
+                changed = true;
+                // Reproduce the native lifecycle counter transition while an
+                // equipment snapshot is being checked, retaining the same
+                // root and profile so only the sequence-run guard can reject.
+                epoch.SetValue(fixture.Provider, (long)epoch.GetValue(fixture.Provider)! + 1);
+            };
+            await Reject(() => fixture.Send(DirectRigCommandKind.StartAutofocus), "no longer permitted");
+            Check(changed && fixture.AutofocusCalls == 0 && fixture.FilterCalls == 0,
+                "An old sequence context reached hardware after its epoch changed");
+            Check(!SequenceCommandCoordinator.For(fixture.ProfileService).IsBusy,
+                "Stale admission left a request queued for another sequence run");
+            Check(ReferenceEquals(fixture.CameraOwner, owner), "Stale admission changed native capture ownership");
+        }
+        finally
+        {
+            fixture.CameraInfoRead = null;
+            finishFirst.TrySetResult();
+            stop.Cancel();
+            await FinishNativeSequence(running, stop.Token);
+            fixture.CameraOwner = null;
+        }
+    }
+
+    private static ChatstronomyCommandTrigger CreateTrigger(DirectRigCommandKind kind, IProfileService profile) =>
+        kind == DirectRigCommandKind.StartAutofocus ? new ChatstronomyAutofocusTrigger(profile) : new ChatstronomyFilterChangeTrigger(profile);
+
+    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async Task FinishNativeSequence(Task running, CancellationToken stop)
+    {
+        try { await running.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+    }
+
+    private sealed class Exposure(Func<CancellationToken, Task> execute) : SequenceItem, IExposureItem
+    {
+        public double ExposureTime { get; set; } = 1;
+        public int Gain { get; set; }
+        public int Offset { get; set; }
+        public string ImageType { get; set; } = "LIGHT";
+        public BinningMode Binning { get; set; } = new(1, 1);
+        public override Task Execute(IProgress<ApplicationStatus> progress, CancellationToken token) => execute(token);
+        public override object Clone() => new Exposure(execute);
+        public override TimeSpan GetEstimatedDuration() => TimeSpan.FromSeconds(ExposureTime);
     }
 
     private static async Task HardwarePreamblesDoNotBlockAdmission()
@@ -348,14 +521,18 @@ internal static class CommandSafetyTests
         internal bool AdvancedRunning;
         private object? cameraOwner;
         internal object? CameraOwner { get => Volatile.Read(ref cameraOwner); set => Volatile.Write(ref cameraOwner, value); }
-        internal volatile int HardwareCalls, TemperatureCalls, AutofocusCalls, SequenceStops, SequenceStarts, AutofocusHistory, WindowCloses, GuidingStops;
+        internal volatile int HardwareCalls, TemperatureCalls, AutofocusCalls, SequenceStops, SequenceStarts, AutofocusHistory, WindowCloses, GuidingStops, FilterCalls;
         internal bool HardwareResult = true, TemperatureResult = true, StopGuidingResult = true;
         internal Task<bool>? HardwareTask, TemperatureTask;
-        internal Action? AutofocusPreamble, FilterPreamble, TemperaturePreamble;
+        internal Task<FilterInfo>? FilterTask;
+        internal Action? AutofocusPreamble, FilterPreamble, TemperaturePreamble, CameraInfoRead;
         internal Action<CancellationToken>? AutofocusStarted;
         internal CancellationToken AutofocusToken;
         internal TaskCompletionSource<AutoFocusReport> AutofocusCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal CommandProxy SimpleProxy;
+        internal CommandProxy AdvancedProxy;
+        internal IProfileService ProfileService;
+        internal FilterInfo SelectedFilter;
         internal SequenceMediator Sequence;
         internal ICameraMediator Camera;
         internal ITelescopeMediator Telescope;
@@ -378,6 +555,7 @@ internal static class CommandSafetyTests
                 }),
                 _ => null,
             });
+            AdvancedProxy = (CommandProxy)(object)seqVm;
             Sequence = new SequenceMediator();
             Sequence.RegisterSequenceNavigation(Mock<ISequenceNavigationVM>((method, args) => method.Name switch
             {
@@ -391,7 +569,7 @@ internal static class CommandSafetyTests
             {
                 switch (method.Name)
                 {
-                    case "GetInfo": return cameraInfo;
+                    case "GetInfo": CameraInfoRead?.Invoke(); return cameraInfo;
                     case "IsFreeToCapture": return CameraOwner is null || ReferenceEquals(CameraOwner, args![0]);
                     case "RegisterCaptureBlock":
                         Check(CameraOwner is null, "Duplicate capture owner"); CameraOwner = args![0]; return null;
@@ -413,15 +591,18 @@ internal static class CommandSafetyTests
                 return method.ReturnType == typeof(Task<bool>) ? HardwareTask ?? Task.FromResult(HardwareResult) : null;
             });
             var filter = new FilterInfo { Name = "L", Position = 0 };
+            SelectedFilter = filter;
             var filterSettings = Mock<IFilterWheelSettings>((method, args) => method.Name == "get_FilterWheelFilters"
                 ? new ObserveAllCollection<FilterInfo> { filter } : null);
             var profile = Mock<IProfile>((method, args) => method.Name switch
             {
                 "get_FilterWheelSettings" => filterSettings,
                 "get_CameraSettings" => Mock<ICameraSettings>(),
+                "get_FocuserSettings" => Mock<IFocuserSettings>(),
                 _ => null,
             });
             var profileService = Mock<IProfileService>((method, args) => method.Name == "get_ActiveProfile" ? profile : null);
+            ProfileService = profileService;
             var window = Mock<IWindowService>((method, args) =>
             {
                 if (method.Name == "Close") { WindowCloses++; return Task.CompletedTask; }
@@ -443,8 +624,9 @@ internal static class CommandSafetyTests
                     if (method.Name == "GetInfo") return new FilterWheelInfo { Connected = true, SelectedFilter = filter };
                     if (method.Name == "ChangeFilter")
                     {
+                        Interlocked.Increment(ref FilterCalls);
                         FilterPreamble?.Invoke();
-                        return Task.FromResult(filter);
+                        return FilterTask ?? Task.FromResult(filter);
                     }
                     return null;
                 }),
@@ -469,6 +651,18 @@ internal static class CommandSafetyTests
             Provider.ExecuteAsync(new(Guid.NewGuid(), DirectQueryKind.Command,
                 Command: new(kind, FilterId: filter, Temperature: temperature, Minutes: minutes),
                 ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds()), CancellationToken.None);
+
+        internal (SequenceRootContainer Root, SequentialContainer Scope, object CaptureOwner) NativeSequence()
+        {
+            var root = new SequenceRootContainer();
+            var scope = new SequentialContainer();
+            root.Add(scope);
+            AdvancedProxy.SequencerValue = new global::NINA.Sequencer.Sequencer(root);
+            AdvancedRunning = true;
+            var owner = new object();
+            CameraOwner = owner; // Native Sequence2VM already owns capture.
+            return (root, scope, owner);
+        }
 
         internal async Task WaitForRelease()
         {
@@ -497,6 +691,7 @@ internal static class CommandSafetyTests
         internal Func<MethodInfo, object?[]?, object?>? Handler;
         public bool IsRunning { get; set; }
         public ICommand? CancelSequenceCommand { get; set; }
+        internal ISequencer? SequencerValue { get; set; }
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             var method = targetMethod!;
@@ -504,6 +699,7 @@ internal static class CommandSafetyTests
             if (result is not null || method.ReturnType == typeof(void)) return result;
             if (method.Name == "get_IsRunning") return IsRunning;
             if (method.Name == "get_CancelSequenceCommand") return CancelSequenceCommand;
+            if (method.Name == "get_Sequencer") return SequencerValue;
             if (method.ReturnType == typeof(Task)) return Task.CompletedTask;
             if (method.ReturnType.IsGenericType && method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>))
             {
