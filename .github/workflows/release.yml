@@ -9,7 +9,7 @@ on:
       version:
         description: Plugin version to stage and sign (four numeric parts)
         required: true
-        default: 0.1.0.28
+        default: 0.1.0.29
 
 permissions:
   contents: write
@@ -81,6 +81,7 @@ jobs:
           CHATSTRONOMY_RUNTIME_EXE: ${{ steps.runtime.outputs.runtime }}
           CHATSTRONOMY_HUB_EXE: ${{ steps.runtime.outputs.hub_probe }}
           CHATSTRONOMY_CONTRACTS_DIR: ${{ steps.runtime.outputs.contracts }}
+          CHATSTRONOMY_EXPECT_AUTOFOCUS_ACK_PROBE: '1'
         run: dotnet run --project Chatstronomy.NINA.Tests/Chatstronomy.NINA.Tests.csproj --configuration Release
 
       # Build and stage first. The archive checksum goes into the N.I.N.A.
