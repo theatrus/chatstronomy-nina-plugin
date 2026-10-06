@@ -1775,6 +1775,12 @@ internal sealed partial class NinaDirectDataProvider :
     {
         var result = SnapshotCoordinates(info.Coordinates)
             ?? new Dictionary<string, object?>();
+        result["SideOfPier"] = info.SideOfPier switch
+        {
+            PierSide.pierEast => "East",
+            PierSide.pierWest => "West",
+            _ => "Unknown",
+        };
         if (double.IsFinite(info.Altitude))
         {
             result["Altitude"] = info.Altitude;
