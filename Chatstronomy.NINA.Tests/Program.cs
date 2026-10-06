@@ -4785,6 +4785,7 @@ internal static class Program
                 Coordinates = from,
                 Altitude = 31.25,
                 Azimuth = 141.75,
+                SideOfPier = global::NINA.Core.Enum.PierSide.pierEast,
                 TargetCoordinates = target,
                 Slewing = false,
             };
@@ -4798,6 +4799,7 @@ internal static class Program
             AssertEqual(-12.25d, start.GetProperty("From").GetProperty("Dec").GetDouble());
             AssertEqual(31.25d, start.GetProperty("From").GetProperty("Altitude").GetDouble());
             AssertEqual(141.75d, start.GetProperty("From").GetProperty("Azimuth").GetDouble());
+            AssertEqual("East", start.GetProperty("From").GetProperty("SideOfPier").GetString());
             AssertEqual(6.25d, start.GetProperty("Target").GetProperty("RA").GetDouble());
             AssertEqual(-8.75d, start.GetProperty("Target").GetProperty("Dec").GetDouble());
             AssertFalse(start.TryGetProperty("ObservedInProgress", out _));
@@ -4805,6 +4807,7 @@ internal static class Program
             info.Coordinates = measuredEnd;
             info.Altitude = 47.5;
             info.Azimuth = 212.25;
+            info.SideOfPier = global::NINA.Core.Enum.PierSide.pierWest;
             info.Slewing = false;
             var events = await WaitForNamedEventCountAsync(
                 provider,
@@ -4823,6 +4826,8 @@ internal static class Program
             AssertEqual(-8.8d, end.GetProperty("To").GetProperty("Dec").GetDouble());
             AssertEqual(47.5d, end.GetProperty("To").GetProperty("Altitude").GetDouble());
             AssertEqual(212.25d, end.GetProperty("To").GetProperty("Azimuth").GetDouble());
+            AssertEqual("East", end.GetProperty("From").GetProperty("SideOfPier").GetString());
+            AssertEqual("West", end.GetProperty("To").GetProperty("SideOfPier").GetString());
             AssertEqual(6.25d, end.GetProperty("Target").GetProperty("RA").GetDouble());
             AssertEqual(-8.75d, end.GetProperty("Target").GetProperty("Dec").GetDouble());
             AssertEqual("motion_state", end.GetProperty("EndDetection").GetString());
@@ -4837,6 +4842,8 @@ internal static class Program
             AssertFalse(redactedStart.GetProperty("From").TryGetProperty("Azimuth", out _));
             AssertFalse(redactedEnd.GetProperty("To").TryGetProperty("Altitude", out _));
             AssertFalse(redactedEnd.GetProperty("To").TryGetProperty("Azimuth", out _));
+            AssertEqual("East", redactedStart.GetProperty("From").GetProperty("SideOfPier").GetString());
+            AssertEqual("West", redactedEnd.GetProperty("To").GetProperty("SideOfPier").GetString());
             AssertEqual(4.5d, redactedStart.GetProperty("From").GetProperty("RA").GetDouble());
             AssertEqual(6.25d, redactedStart.GetProperty("Target").GetProperty("RA").GetDouble());
 
@@ -4941,6 +4948,7 @@ internal static class Program
             info.TargetCoordinates = callbackOnlyTarget;
             info.Altitude = 56.5;
             info.Azimuth = 231.5;
+            info.SideOfPier = global::NINA.Core.Enum.PierSide.pierUnknown;
             await InvokeProviderCallbackAsync(
                 provider,
                 "TelescopeSlewed",
@@ -4963,6 +4971,8 @@ internal static class Program
             AssertEqual("nina_slewed", recoveredEnd.GetProperty("EndDetection").GetString());
             AssertTrue(recoveredEnd.GetProperty("ObservedInProgress").GetBoolean());
             AssertFalse(recoveredEnd.TryGetProperty("DurationSeconds", out _));
+            AssertFalse(recoveredStart.GetProperty("From").TryGetProperty("SideOfPier", out _));
+            AssertEqual("Unknown", recoveredEnd.GetProperty("To").GetProperty("SideOfPier").GetString());
             AssertEqual(
                 8.25d,
                 recoveredEnd.GetProperty("Target").GetProperty("RA").GetDouble());

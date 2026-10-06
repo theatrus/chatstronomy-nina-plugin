@@ -97,8 +97,9 @@ Chatstronomy detects moving and idle edges from N.I.N.A.'s live
 `Slewing` and `IsMoving` state. When both edges are observed, a motion ID pairs
 the start and end and the interval spans those observations. Slew events record
 a requested target when N.I.N.A. provides one, plus observed moving and idle
-RA/Dec positions. State-observed starts and ends also include altitude and
-azimuth only while **Share exact observatory coordinates and location-derived
+RA/Dec positions and the observed pier side (East, West, or Unknown). Pier side
+is included independently of location sharing. State-observed starts and ends
+also include altitude and azimuth only while **Share exact observatory coordinates and location-derived
 mount position** is enabled.
 N.I.N.A. does not expose the requested rotator target at its public start-state
 boundary. State-observed rotator starts report available sky and mechanical
@@ -111,9 +112,9 @@ N.I.N.A.'s equipment callbacks. If a short movement completes between live
 state observations, Chatstronomy recovers a paired start and end from N.I.N.A.'s
 completion callback, labels it **Recovered after motion began**, and omits a
 duration it could not observe. Because that callback has no start timestamp, a
-recovered mount start contains callback RA/Dec but no historical altitude or
-azimuth; its end is timestamped by the completion callback and uses the
-available live idle snapshot. Neither recovery record implies success.
+recovered mount start contains callback RA/Dec but no historical altitude,
+azimuth, or pier side; its end is timestamped by the completion callback and
+uses the available live idle snapshot. Neither recovery record implies success.
 
 Timed waits use Discord's localized timestamps and relative countdowns. Matrix
 shows UTC timestamps and the time remaining when the message was sent. Target
