@@ -470,7 +470,7 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock VerticalAlignment="Center" Text="Images and thumbnails" />
+                                <TextBlock VerticalAlignment="Center" Text="Images, thumbnails, and capture details" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendImageEvents}" />
                             </Grid>
                             <Grid Margin="0,3,18,3">
@@ -607,6 +607,30 @@
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendNinaNotifications}" />
                             </Grid>
                         </UniformGrid>
+
+                        <StackPanel Margin="0,12,0,0" IsEnabled="{Binding SendImageEvents}">
+                            <TextBlock FontWeight="SemiBold" Text="HFR and star-count charts" />
+                            <TextBlock Margin="0,3,0,0" Text="Frame details include available focuser and weather readings." TextWrapping="Wrap" />
+                            <Grid Margin="0,6,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Post every N light frames (0 = off)" />
+                                <TextBox Grid.Column="1" Width="72" Margin="8,0,0,0"
+                                    HorizontalContentAlignment="Right"
+                                    Text="{Binding ImageStatisticsEveryNFrames, UpdateSourceTrigger=LostFocus}" />
+                            </Grid>
+                            <Grid Margin="0,3,0,3" IsEnabled="{Binding SendSequenceEvents}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Post a chart when the sequence ends" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0"
+                                    IsChecked="{Binding ImageStatisticsOnSequenceEnd}" />
+                            </Grid>
+                        </StackPanel>
 
                         <TextBlock
                             Margin="0,7,0,0"

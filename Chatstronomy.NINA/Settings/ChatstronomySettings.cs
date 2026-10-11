@@ -1,3 +1,4 @@
+using Chatstronomy.NINA.Protocol;
 using System.IO;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -346,6 +347,26 @@ internal sealed class ChatstronomySettings
         get => options.GetValueBoolean(nameof(SendImageEvents), true);
         set => options.SetValueBoolean(nameof(SendImageEvents), value);
     }
+
+    public int ImageStatisticsEveryNFrames
+    {
+        get => NormalizeImageStatisticsInterval(options.GetValueInt32(
+            nameof(ImageStatisticsEveryNFrames), 0));
+        set => options.SetValueInt32(nameof(ImageStatisticsEveryNFrames),
+            NormalizeImageStatisticsInterval(value));
+    }
+
+    public bool ImageStatisticsOnSequenceEnd
+    {
+        get => options.GetValueBoolean(nameof(ImageStatisticsOnSequenceEnd), false);
+        set => options.SetValueBoolean(nameof(ImageStatisticsOnSequenceEnd), value);
+    }
+
+    internal static int NormalizeImageStatisticsInterval(int value) =>
+        Math.Clamp(value, 0, 10_000);
+
+    internal DirectImageStatisticsOptions ImageStatisticsOptions => new(
+        ImageStatisticsEveryNFrames, ImageStatisticsOnSequenceEnd);
 
     public bool SendAutofocusEvents
     {

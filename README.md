@@ -86,7 +86,8 @@ reply is not a completion notice.
 
 ## Native data and event controls
 
-- Image previews with capture details.
+- Image previews with capture details, focuser readings, and available weather.
+- Optional HFR and star-count charts every N light frames or at sequence end.
 - Native N.I.N.A. and Hocus Focus autofocus reports, plus guider graphs.
 - Target Scheduler targets, sequence progress, waits, cooling, and safety updates.
 - Equipment events, optional weather and motion diagnostics, and selected logs.

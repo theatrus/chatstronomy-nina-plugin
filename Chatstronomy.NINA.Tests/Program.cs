@@ -38,6 +38,8 @@ internal static class Program
         Run("Hosted setup links to the Hub pairing flow", HostedSetupLinksToHubPairingFlow);
         Run("Local security and privacy controls are visible", LocalSecurityOptionsAreVisible);
         Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
+        await RunAsync("Image capture context and chart configuration are additive and private",
+            ImageStatisticsTests.RunAsync);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
         Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
@@ -600,6 +602,51 @@ internal static class Program
                 notReadyPayload.GetProperty("error_code").GetString());
         }
 
+        // Optional additive image fields/configuration leave older pinned
+        // runtimes valid while newer artifacts share the exact capture units.
+        var imageStatisticsFixture = Path.Combine(fixtures, "query-result-image-statistics.json");
+        if (File.Exists(imageStatisticsFixture))
+        {
+            using var fixture = JsonDocument.Parse(File.ReadAllText(imageStatisticsFixture));
+            var payload = fixture.RootElement.GetProperty("payload");
+            var response = payload.GetProperty("payload");
+            var envelope = response.Deserialize<DirectApiEnvelope<DirectImageMetadata[]>>(
+                DirectProtocol.JsonOptions)!;
+            AssertEqual(new DirectImageStatisticsOptions(10, true), envelope.ImageStatistics);
+            AssertEqual(2, envelope.Response.Length);
+            var image = envelope.Response[0];
+            AssertEqual<double?>(10.5, image.FocuserTemperature); // Celsius
+            AssertEqual<int?>(30105, image.FocuserPosition); // focuser steps
+            AssertEqual<double?>(8.2, image.WeatherTemperature); // Celsius
+            AssertEqual<double?>(4.1, image.DewPoint); // Celsius
+            AssertEqual<double?>(2.0, image.WindSpeed); // m/s, not km/h
+            AssertEqual<double?>(3.5, image.WindGust); // m/s, not km/h
+            AssertEqual<DateTimeOffset?>(DateTimeOffset.Parse("2026-10-10T08:00:00Z"), image.Timestamp);
+            AssertEqual<bool?>(true, image.TimestampIsExposureStart);
+            AssertEqual<bool?>(true, image.StarDetectionAvailable);
+
+            var unavailable = envelope.Response[1];
+            AssertEqual(0, unavailable.Stars);
+            AssertEqual(0d, unavailable.HFR);
+            AssertEqual<bool?>(false, unavailable.StarDetectionAvailable);
+            AssertEqual<bool?>(false, unavailable.TimestampIsExposureStart);
+            var originalUnavailable = response.GetProperty("Response")[1];
+            var reserializedUnavailable = JsonSerializer.SerializeToElement(
+                unavailable, DirectProtocol.JsonOptions);
+            foreach (var name in new[] { "FocuserTemperature", "FocuserPosition", "WeatherTemperature",
+                "DewPoint", "WindSpeed", "WindGust" })
+            {
+                AssertFalse(originalUnavailable.TryGetProperty(name, out _));
+                AssertFalse(reserializedUnavailable.TryGetProperty(name, out _));
+            }
+
+            using var wire = JsonDocument.Parse(DirectProtocol.SerializeSuccess(
+                payload.GetProperty("id").GetGuid(), response));
+            AssertTrue(JsonNode.DeepEquals(
+                JsonNode.Parse(response.GetRawText()),
+                JsonNode.Parse(wire.RootElement.GetProperty("payload").GetProperty("payload").GetRawText())));
+        }
+
         // These additive fixtures first shipped after payload v3. Older
         // pinned runtimes remain valid without them, while newer artifacts
         // must preserve both the diagnostic fields and legacy omissions.
@@ -1025,7 +1072,7 @@ internal static class Program
     {
         var labelsByBinding = new Dictionary<string, string>
         {
-            ["{Binding SendImageEvents}"] = "Images and thumbnails",
+            ["{Binding SendImageEvents}"] = "Images, thumbnails, and capture details",
             ["{Binding SendAutofocusEvents}"] = "Autofocus results",
             ["{Binding SendGuidingEvents}"] = "Guiding and dithering",
             ["{Binding SendMountEvents}"] = "Mount status, flips, and centering",

@@ -105,7 +105,8 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             accessPolicy,
             imaging: imaging,
             domeFollower: domeFollower,
-            plateSolverFactory: plateSolverFactory);
+            plateSolverFactory: plateSolverFactory,
+            imageStatisticsOptions: () => settings.ImageStatisticsOptions);
         runtimeController = new ChatstronomyRuntimeController(directDataProvider);
         hubClient = new ChatstronomyHubClient(directDataProvider);
         startRuntimeCommand = new AsyncCommand(
@@ -531,6 +532,18 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
     {
         get => settings.SendImageEvents;
         set => SetEventDeliveryOption(() => settings.SendImageEvents = value);
+    }
+
+    public int ImageStatisticsEveryNFrames
+    {
+        get => settings.ImageStatisticsEveryNFrames;
+        set => SetEventDeliveryOption(() => settings.ImageStatisticsEveryNFrames = value);
+    }
+
+    public bool ImageStatisticsOnSequenceEnd
+    {
+        get => settings.ImageStatisticsOnSequenceEnd;
+        set => SetEventDeliveryOption(() => settings.ImageStatisticsOnSequenceEnd = value);
     }
 
     public bool SendAutofocusEvents
@@ -1364,6 +1377,8 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(AllowCenterTarget),
             nameof(AllowCenterRotateTarget),
             nameof(SendImageEvents),
+            nameof(ImageStatisticsEveryNFrames),
+            nameof(ImageStatisticsOnSequenceEnd),
             nameof(SendAutofocusEvents),
             nameof(SendGuidingEvents),
             nameof(SendMountEvents),
