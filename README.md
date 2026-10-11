@@ -92,6 +92,10 @@ reply is not a completion notice.
 - Target Scheduler targets, sequence progress, waits, cooling, and safety updates.
 - Equipment events, optional weather and motion diagnostics, and selected logs.
 
+Enable **Focuser movement diagnostics** to report temperature-based sequence
+adjustments and other observed focus moves with position changes and available
+temperature. See the [event reference](docs/events-and-privacy.md#focuser-movement-diagnostics).
+
 Event selection is per N.I.N.A. profile. Repeated diagnostics are rate-limited
 with omitted-message counts. See the
 [event reference](docs/events-and-privacy.md#events-and-report-details) for

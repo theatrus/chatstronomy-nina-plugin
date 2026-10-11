@@ -29,6 +29,8 @@ internal sealed record DirectEventDeliveryOptions(
     bool NinaLogDebug,
     bool NinaLogTrace)
 {
+    internal bool FocuserMotion { get; init; }
+
     internal static DirectEventDeliveryOptions Default { get; } = new(
         Images: true,
         Autofocus: true,
@@ -125,6 +127,10 @@ internal sealed record DirectEventDeliveryOptions(
             || eventName.Equals("ROTATOR-MOVED-MECHANICAL", StringComparison.Ordinal))
         {
             return RotatorMotion;
+        }
+        if (eventName.Equals("FOCUSER-MOVED", StringComparison.Ordinal))
+        {
+            return FocuserMotion;
         }
         if (eventName.StartsWith("FILTERWHEEL-", StringComparison.Ordinal)
             || eventName.StartsWith("ROTATOR-", StringComparison.Ordinal)

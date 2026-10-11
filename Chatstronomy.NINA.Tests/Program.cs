@@ -21,12 +21,14 @@ using System.Threading.Channels;
 
 namespace Chatstronomy.NINA.Tests;
 
-internal static class Program
+internal static partial class Program
 {
     private static int failures;
 
     public static async Task<int> Main()
     {
+        Run("Focuser motion tracking handles short moves, settling, and backlash", FocuserMotionTrackerHandlesEdges);
+        await RunAsync("Focuser diagnostics capture stable native position changes without replay", FocuserMotionCapturesState);
         Run("Matrix accepts HTTPS homeservers", MatrixAcceptsHttpsHomeserver);
         Run("Matrix rejects HTTP homeservers", MatrixRejectsHttpHomeserver);
         Run("Discord accepts complete webhook URLs", DiscordAcceptsCompleteWebhookUrls);
@@ -1083,6 +1085,7 @@ internal static class Program
             ["{Binding SendHighWindAlerts}"] = "High-wind alerts",
             ["{Binding SendTargetSchedulerEvents}"] = "Targets and Target Scheduler",
             ["{Binding SendFilterFocuserRotatorEvents}"] = "Filter, focuser, and rotator sync",
+            ["{Binding SendFocuserMoveEvents}"] = "Focuser movement diagnostics (can be chatty)",
             ["{Binding SendRotatorMoveEvents}"] = "Rotator move start/end diagnostics",
             ["{Binding SendObservatoryAndFlatPanelEvents}"] = "Observatory and flat panel",
             ["{Binding SendEquipmentConnectionEvents}"] = "Equipment connections",
@@ -2365,8 +2368,10 @@ internal static class Program
             ("targets", new[] { "TS-TARGETSTART", "TS-NEWTARGETSTART", "TS-WAITSTART" },
                 options => options with { TargetScheduler = false }),
             ("filter, focuser, and rotator", new[]
-                { "FILTERWHEEL-CHANGED", "FOCUSER-MOVED", "FOCUSER-USER-FOCUSED" },
+                { "FILTERWHEEL-CHANGED", "FOCUSER-USER-FOCUSED" },
                 options => options with { FilterFocuserRotator = false }),
+            ("focuser motion", new[] { "FOCUSER-MOVED" },
+                options => options with { FocuserMotion = false }),
             ("rotator motion", new[]
                 { "ROTATOR-MOVE-STARTED", "ROTATOR-MOVED", "ROTATOR-MOVED-MECHANICAL" },
                 options => options with { RotatorMotion = false }),
@@ -2394,6 +2399,8 @@ internal static class Program
                     { SlewMotion = true },
                 "rotator motion" => DirectEventDeliveryOptions.Default with
                     { RotatorMotion = true },
+                "focuser motion" => DirectEventDeliveryOptions.Default with
+                    { FocuserMotion = true },
                 _ => DirectEventDeliveryOptions.Default,
             };
             var delivery = new DirectEventDeliveryPolicy(initial);

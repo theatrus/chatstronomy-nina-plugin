@@ -66,6 +66,8 @@ The plugin provides bounded native histories and typed command handling for:
   center, and plate-solve results;
 - optional rotator move start/end diagnostics with sky and mechanical angles
   when N.I.N.A. exposes them;
+- optional focuser position-change diagnostics, including temperature-based
+  advanced-sequence actions, with available focuser temperature;
 - Target Scheduler broker events and the active scheduled target name;
 - N.I.N.A. popup status notifications;
 - N.I.N.A. log events at individually selected levels.
@@ -89,7 +91,7 @@ run starts, including with older Hub or local-runtime versions that do not
 send receipts. The last completed report stays available for status queries.
 
 Event families, images, and popup notifications can be controlled independently
-for each N.I.N.A. profile. Slew diagnostics, rotator-motion diagnostics, weather
+for each N.I.N.A. profile. Slew, rotator-motion, focuser-motion diagnostics, weather
 changes, and high-wind alerts are separate and start disabled; most other event
 families start enabled. Disabled categories never leave N.I.N.A. over either the
 hosted WebSocket or the local bot's named pipe; turning a category off
@@ -120,6 +122,34 @@ duration it could not observe. Because that callback has no start timestamp, a
 recovered mount start contains callback RA/Dec but no historical altitude,
 azimuth, or pier side; its end is timestamped by the completion callback and
 uses the available live idle snapshot. Neither recovery record implies success.
+
+### Focuser movement diagnostics
+
+Enable **Focuser movement diagnostics (can be chatty)** under Event delivery to
+send observed focuser position changes. This separate per-profile switch also
+covers advanced-sequencer temperature compensation, absolute/relative moves,
+filter offsets, and autofocus steps when they produce a changed position.
+It is independent of **Filter, focuser, and rotator sync** and starts disabled.
+
+`FOCUSER-MOVED` notifications show the previous and current observed positions
+in steps, the signed change, and temperature in Celsius when available. The
+plugin waits for two matching idle updates and coalesces shorter busy/idle
+pauses. A fast move can
+be detected from its changed position even if no moving update was seen; the
+notification labels that distinction. It does not identify the action's cause,
+requested destination, exact physical endpoint, or command success. A longer
+backlash pause may still appear as a separate observation.
+
+Startup, focuser reconnect, device replacement, profile changes, and privacy changes
+establish a silent baseline; pre-boundary moves are not reconstructed or
+replayed. Turning the switch off clears its buffered events and pending state.
+The older manual-focus callback remains supported and describes a manual
+adjustment request, not a completion. Autofocus scan steps are not suppressed
+by an autofocus-start latch: N.I.N.A. does not reliably send a matching end
+callback after a failed or cancelled run.
+
+This is an additive Direct event. Older runtimes can display it as a generic
+event; newer Hub/runtime versions render its captured position and temperature.
 
 Timed waits use Discord's localized timestamps and relative countdowns. Matrix
 shows UTC timestamps and the time remaining when the message was sent. Target

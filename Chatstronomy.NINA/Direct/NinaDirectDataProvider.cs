@@ -392,6 +392,7 @@ internal sealed partial class NinaDirectDataProvider :
         started = true;
         sequenceSubscriptionsPaused = false;
         eventCaptureStop = new CancellationTokenSource();
+        ResetFocuserMotionCapture(blockSharing: !eventDelivery.Current.FocuserMotion);
         lock (motionGate)
         {
             // Stop() closes both publishers. A provider restarted by N.I.N.A.
@@ -597,6 +598,10 @@ internal sealed partial class NinaDirectDataProvider :
         {
             ResetRotatorMotionCaptureAtPolicyBoundary();
         }
+        if (previous.FocuserMotion != current.FocuserMotion)
+        {
+            ResetFocuserMotionCapture(blockSharing: true, purgeHistory: true);
+        }
         var imagePolicyChanged = previous.Images != current.Images;
         lock (historyGenerationGate)
         {
@@ -708,6 +713,10 @@ internal sealed partial class NinaDirectDataProvider :
     {
         Volatile.Write(ref eventElisionSession, new EventElisionSession(
             CaptureHistoryGeneration(), new DirectEventElisionCounters(current)));
+        if (previous.FocuserMotion != current.FocuserMotion)
+        {
+            ResetFocuserMotionCapture(blockSharing: !current.FocuserMotion);
+        }
         if (previous.SlewMotion != current.SlewMotion)
         {
             lock (motionGate)
@@ -791,6 +800,7 @@ internal sealed partial class NinaDirectDataProvider :
     public void RevokeProfileAccess()
     {
         Volatile.Write(ref eventElisionSession, null);
+        ResetFocuserMotionCapture(blockSharing: true);
         // Close motion publication and the predecessor Direct session before
         // any watcher stop that may wait for filesystem activity. Equipment
         // property changes can continue on N.I.N.A.'s update thread while
@@ -843,6 +853,7 @@ internal sealed partial class NinaDirectDataProvider :
         // mediators. A focuser callback can otherwise create new pending work
         // in the interval between cancellation and RemoveConsumer().
         started = false;
+        ResetFocuserMotionCapture(blockSharing: true);
         InvalidateAutofocusCapture();
         CancelPendingThumbnailWork();
         var captureStop = eventCaptureStop;
@@ -945,6 +956,7 @@ internal sealed partial class NinaDirectDataProvider :
     public void Reset()
     {
         CancelPendingThumbnailWork();
+        ResetFocuserMotionCapture(blockSharing: true);
         // Keep motion closed until the new profile's history generation,
         // delivery policy, and state baselines have all been rebuilt.
         ResetMotionCapture(blockSharing: true);
@@ -1002,6 +1014,7 @@ internal sealed partial class NinaDirectDataProvider :
             PublishCurrentWeatherBaseline();
         }
         ResumeSequenceSubscriptions();
+        ResetFocuserMotionCapture(blockSharing: !eventDelivery.Current.FocuserMotion);
         lock (motionGate)
         {
             mountMotionSharingBlocked = !eventDelivery.Current.SlewMotion;
@@ -2616,9 +2629,7 @@ internal sealed partial class NinaDirectDataProvider :
         }
     }
 
-    public void UpdateDeviceInfo(FocuserInfo deviceInfo)
-    {
-    }
+    public void UpdateDeviceInfo(FocuserInfo deviceInfo) => RecordFocuserMotion(deviceInfo);
 
     public void UpdateDeviceInfo(SafetyMonitorInfo deviceInfo) =>
         RecordSafetyState(
@@ -5520,8 +5531,17 @@ internal sealed partial class NinaDirectDataProvider :
     private Task GuiderStopped(object sender, EventArgs args) => AddSimpleEvent("GUIDER-STOP");
     private Task RotatorConnected(object sender, EventArgs args) => AddSimpleEvent("ROTATOR-CONNECTED");
     private Task RotatorDisconnected(object sender, EventArgs args) => AddSimpleEvent("ROTATOR-DISCONNECTED");
-    private Task FocuserConnected(object sender, EventArgs args) => AddSimpleEvent("FOCUSER-CONNECTED");
-    private Task FocuserDisconnected(object sender, EventArgs args) => AddSimpleEvent("FOCUSER-DISCONNECTED");
+    private Task FocuserConnected(object sender, EventArgs args)
+    {
+        ResetFocuserMotionCapture();
+        return AddSimpleEvent("FOCUSER-CONNECTED");
+    }
+
+    private Task FocuserDisconnected(object sender, EventArgs args)
+    {
+        ResetFocuserMotionCapture();
+        return AddSimpleEvent("FOCUSER-DISCONNECTED");
+    }
     private Task DomeConnected(object sender, EventArgs args) => AddSimpleEvent("DOME-CONNECTED");
     private Task DomeDisconnected(object sender, EventArgs args) => AddSimpleEvent("DOME-DISCONNECTED");
     private void DomeSynced(object? sender, EventArgs args) => AddEvent("DOME-SYNCED");

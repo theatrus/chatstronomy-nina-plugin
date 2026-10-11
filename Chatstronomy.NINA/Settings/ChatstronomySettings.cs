@@ -453,6 +453,12 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendRotatorMoveEvents), value);
     }
 
+    public bool SendFocuserMoveEvents
+    {
+        get => options.GetValueBoolean(nameof(SendFocuserMoveEvents), false);
+        set => options.SetValueBoolean(nameof(SendFocuserMoveEvents), value);
+    }
+
     public bool SendObservatoryAndFlatPanelEvents
     {
         get => options.GetValueBoolean(nameof(SendObservatoryAndFlatPanelEvents), true);
@@ -529,7 +535,10 @@ internal sealed class ChatstronomySettings
         NinaLogWarnings: SendNinaLogWarnings,
         NinaLogInformation: SendNinaLogInformation,
         NinaLogDebug: SendNinaLogDebug,
-        NinaLogTrace: SendNinaLogTrace);
+        NinaLogTrace: SendNinaLogTrace)
+    {
+        FocuserMotion = SendFocuserMoveEvents,
+    };
 
     private string CredentialTarget(string kind) =>
         CredentialTarget(profileService.ActiveProfile.Id, kind);
