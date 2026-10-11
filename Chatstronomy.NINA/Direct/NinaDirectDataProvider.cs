@@ -106,6 +106,7 @@ internal sealed partial class NinaDirectDataProvider :
     private readonly Func<BitmapSource, byte[]> thumbnailEncoder;
     private readonly Func<DateTimeOffset> utcNow;
     private readonly Func<long>? monotonicTimestamp;
+    private readonly Func<DirectImageStatisticsOptions> imageStatisticsOptions;
     private readonly DirectAutofocusReplay autofocusReplay;
     private EventFloodSession eventFloodSession;
     private EventElisionSession? eventElisionSession;
@@ -239,7 +240,8 @@ internal sealed partial class NinaDirectDataProvider :
         Func<long>? monotonicTimestamp = null,
         IImagingMediator? imaging = null,
         IDomeFollower? domeFollower = null,
-        global::NINA.PlateSolving.Interfaces.IPlateSolverFactory? plateSolverFactory = null)
+        global::NINA.PlateSolving.Interfaces.IPlateSolverFactory? plateSolverFactory = null,
+        Func<DirectImageStatisticsOptions>? imageStatisticsOptions = null)
     {
         this.profileService = profileService;
         this.telescope = telescope;
@@ -273,6 +275,8 @@ internal sealed partial class NinaDirectDataProvider :
         this.thumbnailEncoder = thumbnailEncoder ?? DirectThumbnailEncoder.Encode;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         this.monotonicTimestamp = monotonicTimestamp;
+        this.imageStatisticsOptions = imageStatisticsOptions
+            ?? (() => DirectImageStatisticsOptions.Disabled);
         autofocusReplay = new(EventHistoryCapacity, monotonicTimestamp);
         eventFloodSession = new(0, new DirectEventFloodLimiter(monotonicTimestamp));
         eventElisionSession = new(0, new DirectEventElisionCounters(eventDelivery.Current));
@@ -1113,7 +1117,12 @@ internal sealed partial class NinaDirectDataProvider :
                 },
             DirectQueryKind.ImageHistory =>
                 DirectApiEnvelope<IReadOnlyList<DirectImageMetadata>>.Ok(
-                    SnapshotImagesForQuery(query, directSessionToken)),
+                    SnapshotImagesForQuery(query, directSessionToken)) with
+                {
+                    ImageStatistics = imageStatisticsOptions().ForDelivery(
+                        eventDelivery.Current.Images,
+                        eventDelivery.Current.Sequence),
+                },
             DirectQueryKind.Sequence =>
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
                     RunOnUiThread(() => NinaDirectSequenceSnapshot.Build(
@@ -4520,6 +4529,7 @@ internal sealed partial class NinaDirectDataProvider :
         var metadata = args.MetaData;
         var statistics = args.Statistics;
         var starAnalysis = args.StarDetectionAnalysis;
+        var context = DirectImageCaptureContext.FromMetadata(metadata);
         var image = new DirectImageMetadata(
             ExposureTime: FiniteOrZero(args.Duration),
             ImageType: metadata?.Image?.ImageType ?? string.Empty,
@@ -4538,7 +4548,16 @@ internal sealed partial class NinaDirectDataProvider :
             Stars: starAnalysis?.DetectedStars ?? 0,
             HFR: FiniteOrZero(starAnalysis?.HFR ?? 0),
             IsBayered: args.IsBayered,
-            ChatEnabled: eventDelivery.Current.Images);
+            ChatEnabled: eventDelivery.Current.Images,
+            FocuserTemperature: context.FocuserTemperature,
+            FocuserPosition: context.FocuserPosition,
+            WeatherTemperature: context.WeatherTemperature,
+            DewPoint: context.DewPoint,
+            WindSpeed: context.WindSpeed,
+            WindGust: context.WindGust,
+            StarDetectionAvailable: starAnalysis is not null,
+            Timestamp: DirectImageCaptureContext.Timestamp(metadata, utcNow()),
+            TimestampIsExposureStart: DirectImageCaptureContext.HasExposureStartTimestamp(metadata));
         var savedImage = new DirectSavedImage(image);
         if (!AddImageHistoryIfCurrent(
             savedImage,
@@ -6826,7 +6845,16 @@ internal sealed record DirectImageMetadata(
     int Stars,
     double HFR,
     bool IsBayered,
-    bool ChatEnabled);
+    bool ChatEnabled,
+    double? FocuserTemperature = null,
+    int? FocuserPosition = null,
+    double? WeatherTemperature = null,
+    double? DewPoint = null,
+    double? WindSpeed = null,
+    double? WindGust = null,
+    bool? StarDetectionAvailable = null,
+    DateTimeOffset? Timestamp = null,
+    bool? TimestampIsExposureStart = null);
 
 internal sealed class DirectSavedImage(DirectImageMetadata metadata)
 {

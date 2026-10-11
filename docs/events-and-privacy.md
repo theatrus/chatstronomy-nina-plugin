@@ -31,6 +31,11 @@ you do not want to leave N.I.N.A. Turning a
 category off prevents its underlying events from reaching the Hub or local bot,
 including events already buffered before the setting changed. Turning off
 images also blocks image history and thumbnails.
+Saved frames include available focuser temperature/position and weather
+temperature, dew point, wind speed, and gust from N.I.N.A.'s capture metadata.
+These details follow **Images, thumbnails, and capture details**, not the
+separate weather-event switches. Missing readings are omitted rather than
+replaced with zero.
 Equipment/status queries remain available, although disabling event categories
 can reduce the detail available for target, sequence, and equipment tracking.
 Raw N.I.N.A. logs are neither read nor sent until you enable at least one log
@@ -128,7 +133,8 @@ safety wait is sent only when both sequence and safety delivery are enabled.
 The dedicated **Observatory and flat panel** switch covers dome/shutter actions
 and flat cover, light, and brightness changes. Their connection events, along
 with weather-station and switch-device connection state, use **Equipment
-connections**. Structured weather measurements remain private unless
+connections**. Apart from saved-frame context when image sharing is enabled,
+structured weather measurements remain private unless
 **Meaningful weather changes** or **High-wind alerts** is enabled. General
 weather reports group significant changes and send
 at most once every five minutes, except rain onset; they can include available
@@ -174,6 +180,36 @@ and changed epochs clear pending notices, including messages dropped by the
 Hub itself. An empty array means no diagnostic counters are currently shared;
 older runtimes can ignore the new envelope field while continuing to read the
 unchanged event list.
+
+## Image-statistics charts
+
+Under **Event delivery → HFR and star-count charts**, choose how often to post
+a chart: every N light frames (`0` turns periodic charts off), at sequence end,
+or both. Charts use shared LIGHT frames, not calibration frames; missing
+measurements appear as gaps. Image sharing is required, and the sequence-end
+option also requires sequence sharing.
+
+Charts cover the last 24 hours, up to 2,000 frames. Same-session reconnects keep
+history and cadence. After a Hub/runtime restart, new plugin session, or
+profile/privacy/routing change, the updater reseeds from the plugin's retained
+history (up to 500 frames) and restarts the periodic count. Sequence summaries
+allow late image saves to finish: at least 15 seconds after the end event and
+10 seconds without another frame, up to a
+two-minute limit. Frames with known capture times remain tied to the sequence
+in which they were exposed. Saving is asynchronous, so a frame arriving after
+the settling window can appear in a later chart instead of the summary.
+
+Image-history responses add an optional `ImageStatistics` object with
+`EveryNFrames` and `OnSequenceEnd`. Existing `Response` images remain unchanged
+except for optional capture-context fields: `FocuserTemperature`,
+`FocuserPosition`, `WeatherTemperature`, `DewPoint`, `WindSpeed`, and `WindGust`.
+Temperatures are Celsius, position is focuser steps, and wind is m/s (N.I.N.A.'s
+native units). `StarDetectionAvailable` distinguishes missing analysis from a
+measured zero-star frame, and `Timestamp` supplies a zoned capture instant
+(or save-time fallback, identified by `TimestampIsExposureStart`) without
+changing the legacy `Date` field. Older Hub or local-runtime versions can
+ignore these additions; Direct envelope 1 and
+payload 3 remain supported.
 
 ## Credentials and transport
 

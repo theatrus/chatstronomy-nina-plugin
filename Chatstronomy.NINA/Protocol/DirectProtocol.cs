@@ -489,6 +489,11 @@ internal sealed record DirectApiEnvelope<T>(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<DirectElidedEvent>? ElidedEvents { get; init; }
 
+    // Image-history-only extension. Older peers continue reading Response.
+    [JsonPropertyName("ImageStatistics")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DirectImageStatisticsOptions? ImageStatistics { get; init; }
+
     internal static DirectApiEnvelope<T> Ok(T response) =>
         new(response, string.Empty, 200, true, "API");
 
@@ -498,6 +503,20 @@ internal sealed record DirectApiEnvelope<T>(
     /// successful completion prematurely.
     internal static DirectApiEnvelope<T> Accepted(T response) =>
         new(response, string.Empty, 202, true, "API");
+}
+
+internal sealed record DirectImageStatisticsOptions(int EveryNFrames, bool OnSequenceEnd)
+{
+    internal static DirectImageStatisticsOptions Disabled { get; } = new(0, false);
+
+    internal DirectImageStatisticsOptions ForDelivery(bool images, bool sequence) =>
+        images
+            ? this with
+            {
+                EveryNFrames = Math.Clamp(EveryNFrames, 0, 10_000),
+                OnSequenceEnd = OnSequenceEnd && sequence,
+            }
+            : Disabled;
 }
 
 internal sealed record DirectElidedEvent(
