@@ -571,6 +571,14 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center" Text="Focuser movement diagnostics (can be chatty)" />
+                                <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendFocuserMoveEvents}" />
+                            </Grid>
+                            <Grid Margin="0,3,18,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <TextBlock VerticalAlignment="Center" Text="Targets and Target Scheduler" />
                                 <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding SendTargetSchedulerEvents}" />
                             </Grid>
@@ -611,6 +619,10 @@
                         <TextBlock
                             Margin="0,7,0,0"
                             Text="Motion diagnostics normally use observed moving and idle states from N.I.N.A., not exact physical endpoints. Slews include observed RA/Dec and, only when location sharing is enabled above, start/end altitude and azimuth. If a short move completes between updates, Chatstronomy recovers the pair from N.I.N.A.'s completion event; its start has callback RA/Dec but no historical Alt/Az or estimated duration. N.I.N.A. does not expose a rotator target at the start. State-observed rotator starts show available sky and mechanical angles; a recovered start has the callback's logical or mechanical From angle. A normal end marks the first observed idle state; a recovered end marks the completion callback. Neither proves settling or overall success."
+                            TextWrapping="Wrap" />
+
+                        <TextBlock Margin="0,7,0,0"
+                            Text="Focuser diagnostics report position changes after two matching idle updates, with available temperature. They include temperature-based sequence actions and autofocus steps; they do not prove a command succeeded."
                             TextWrapping="Wrap" />
 
                         <TextBlock
