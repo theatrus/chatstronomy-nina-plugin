@@ -61,6 +61,13 @@ Hardware commands require **both the local master switch and each command's
 permission**. Hub roles cannot override them. Skipping sequence validation
 requires separate approval.
 
+The optional **Share observation state for pier-camera overlays** setting provides
+target-visit identity, permitted focuser/external temperatures, and an authoritative
+saved-LIGHT-frame count to an updated Hub. Category settings still apply; missing
+or incomplete readings stay unknown. Reconnects preserve counts without replaying
+image triggers. Requires a compatible overlay-enabled camera and Hub 0.4.13 or
+newer. See the [Hub/camera wire contract](https://github.com/theatrus/chatstronomy/blob/main/docs/OBSERVATION_STATE_PROTOCOL.md).
+
 See [events, sharing, and privacy](docs/events-and-privacy.md) for defaults,
 redaction rules, supported events, and reporting limits.
 

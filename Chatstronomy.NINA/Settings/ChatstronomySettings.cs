@@ -459,6 +459,12 @@ internal sealed class ChatstronomySettings
         set => options.SetValueBoolean(nameof(SendFocuserMoveEvents), value);
     }
 
+    public bool ShareObservationTelemetry
+    {
+        get => options.GetValueBoolean(nameof(ShareObservationTelemetry), false);
+        set => options.SetValueBoolean(nameof(ShareObservationTelemetry), value);
+    }
+
     public bool SendObservatoryAndFlatPanelEvents
     {
         get => options.GetValueBoolean(nameof(SendObservatoryAndFlatPanelEvents), true);
@@ -538,6 +544,7 @@ internal sealed class ChatstronomySettings
         NinaLogTrace: SendNinaLogTrace)
     {
         FocuserMotion = SendFocuserMoveEvents,
+        ObservationTelemetry = ShareObservationTelemetry,
     };
 
     private string CredentialTarget(string kind) =>

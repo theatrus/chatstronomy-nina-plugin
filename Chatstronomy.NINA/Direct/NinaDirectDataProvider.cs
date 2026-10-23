@@ -367,6 +367,7 @@ internal sealed partial class NinaDirectDataProvider :
     {
         TargetCommands = true,
         AutofocusDeliveryAck = true,
+        ObservationState = true,
     };
 
     public CancellationToken ProfileSessionToken =>
@@ -584,6 +585,12 @@ internal sealed partial class NinaDirectDataProvider :
         DirectEventDeliveryOptions previous,
         DirectEventDeliveryOptions current)
     {
+        // Reset before the new policy publishes. Never count across a privacy gap.
+        if (previous.ObservationTelemetry != current.ObservationTelemetry
+            || previous.TargetScheduler != current.TargetScheduler || previous.Images != current.Images
+            || previous.Sequence != current.Sequence || previous.FilterFocuserRotator != current.FilterFocuserRotator
+            || previous.WeatherChanges != current.WeatherChanges)
+            ResetObservationState();
         // Close count publication before consent changes. Old callbacks keep
         // only their old counter object; re-enabling cannot reveal that tally.
         Volatile.Write(ref eventElisionSession, null);
@@ -799,6 +806,7 @@ internal sealed partial class NinaDirectDataProvider :
 
     public void RevokeProfileAccess()
     {
+        ResetObservationState();
         Volatile.Write(ref eventElisionSession, null);
         ResetFocuserMotionCapture(blockSharing: true);
         // Close motion publication and the predecessor Direct session before
@@ -842,6 +850,7 @@ internal sealed partial class NinaDirectDataProvider :
 
     public void Stop()
     {
+        ResetObservationState();
         sequenceCommands.Invalidate("Chatstronomy stopped.");
         CancelIdleCommand();
         if (!started)
@@ -955,6 +964,7 @@ internal sealed partial class NinaDirectDataProvider :
 
     public void Reset()
     {
+        ResetObservationState();
         CancelPendingThumbnailWork();
         ResetFocuserMotionCapture(blockSharing: true);
         // Keep motion closed until the new profile's history generation,
@@ -1119,6 +1129,7 @@ internal sealed partial class NinaDirectDataProvider :
         directSessionToken?.ThrowIfCancellationRequested();
         object? result = query.Kind switch
         {
+            DirectQueryKind.ObservationState => GetObservationState(),
             DirectQueryKind.EventHistory =>
                 DirectApiEnvelope<IReadOnlyList<Dictionary<string, object?>>>.Ok(
                     SnapshotEventHistoryForQuery(query, directSessionToken)) with
@@ -2629,7 +2640,15 @@ internal sealed partial class NinaDirectDataProvider :
         }
     }
 
-    public void UpdateDeviceInfo(FocuserInfo deviceInfo) => RecordFocuserMotion(deviceInfo);
+    public void UpdateDeviceInfo(FocuserInfo deviceInfo)
+    {
+        if (deviceInfo is null) return;
+        var generation = Volatile.Read(ref observationGeneration);
+        lock (observationSubscriptionsGate)
+            if (generation == observationGeneration && started && eventDelivery.Current.ObservationTelemetry && eventDelivery.Current.FilterFocuserRotator)
+                observationState.Temperature(true, deviceInfo.Connected ? deviceInfo.Temperature : null, utcNow());
+        RecordFocuserMotion(deviceInfo);
+    }
 
     public void UpdateDeviceInfo(SafetyMonitorInfo deviceInfo) =>
         RecordSafetyState(
@@ -2643,6 +2662,11 @@ internal sealed partial class NinaDirectDataProvider :
         {
             return;
         }
+
+        var observationEpoch = Volatile.Read(ref observationGeneration);
+        lock (observationSubscriptionsGate)
+            if (observationEpoch == observationGeneration && eventDelivery.Current.ObservationTelemetry && eventDelivery.Current.WeatherChanges)
+                observationState.Temperature(false, deviceInfo.Connected ? deviceInfo.Temperature : null, utcNow());
 
         long weatherChangesEpoch;
         long windEpoch;
@@ -4578,6 +4602,21 @@ internal sealed partial class NinaDirectDataProvider :
             return;
         }
         AddEvent(historyGeneration, "IMAGE-SAVE");
+        lock (historyGenerationGate)
+        {
+            var delivery = eventDelivery.Current;
+            if (!historyWritesSuspended && historyGeneration == this.historyGeneration
+                && captureGeneration == imageCaptureGeneration && delivery.ObservationTelemetry && delivery.Images)
+            {
+                var now = utcNow();
+                if (delivery.TargetScheduler && delivery.Sequence)
+                    observationState.ImageSaved(metadata?.Target?.Name, image.ImageType,
+                        DirectImageCaptureContext.HasExposureStartTimestamp(metadata) ? image.Timestamp : null, now);
+                var measuredAt = DirectImageCaptureContext.Timestamp(metadata, now);
+                if (delivery.FilterFocuserRotator) observationState.Temperature(true, context.FocuserTemperature, measuredAt);
+                if (delivery.WeatherChanges) observationState.Temperature(false, context.WeatherTemperature, measuredAt);
+            }
+        }
         if (image.ChatEnabled)
         {
             // Images captured without consent can never leave N.I.N.A. Avoid
@@ -4783,6 +4822,7 @@ internal sealed partial class NinaDirectDataProvider :
 
         if (eventName == "TS-WAITSTART")
         {
+            ObserveSchedulerTarget(eventName, string.Empty, message.SentAt, historyGeneration);
             AddEventAt(
                 historyGeneration,
                 message.SentAt,
@@ -4792,6 +4832,7 @@ internal sealed partial class NinaDirectDataProvider :
         }
 
         message.CustomHeaders.TryGetValue("ProjectName", out var projectName);
+        ObserveSchedulerTarget(eventName, Convert.ToString(message.Content) ?? string.Empty, message.SentAt, historyGeneration);
         message.CustomHeaders.TryGetValue("Coordinates", out var coordinates);
         message.CustomHeaders.TryGetValue("Rotation", out var rotation);
         AddEventAt(
@@ -6258,6 +6299,7 @@ internal sealed partial class NinaDirectDataProvider :
                         eventDelivery.Current);
             }
         }
+        ObserveSequenceBoundary(root, historyGeneration, beginning: true);
         AddEvent(historyGeneration, "SEQUENCE-STARTING");
         return Task.CompletedTask;
     }
@@ -6301,6 +6343,7 @@ internal sealed partial class NinaDirectDataProvider :
                 sequenceOutcomeProvenanceComplete = false;
             }
         }
+        ObserveSequenceBoundary(root, historyGeneration, beginning: false);
         Interlocked.Increment(ref sequenceControlEpoch);
         sequenceCommands.Invalidate("The sequence finished.");
         var status = provenanceComplete ? observedStatus : "UNKNOWN";

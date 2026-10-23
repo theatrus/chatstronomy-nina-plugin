@@ -64,6 +64,7 @@ internal static class DirectProtocol
             "guider_graph" => new DirectQuery(id, DirectQueryKind.GuiderGraph, ExpiresAt: expiresAt),
             "rotator_info" => new DirectQuery(id, DirectQueryKind.RotatorInfo, ExpiresAt: expiresAt),
             "focuser_info" => new DirectQuery(id, DirectQueryKind.FocuserInfo, ExpiresAt: expiresAt),
+            "observation_state" => new DirectQuery(id, DirectQueryKind.ObservationState, ExpiresAt: expiresAt),
             "command" => new DirectQuery(
                 id,
                 DirectQueryKind.Command,
@@ -347,6 +348,7 @@ internal enum DirectQueryKind
     GuiderGraph,
     RotatorInfo,
     FocuserInfo,
+    ObservationState,
     Command,
 }
 
@@ -546,6 +548,10 @@ internal sealed record DirectCapabilities(
     [JsonPropertyName("autofocus_delivery_ack")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool AutofocusDeliveryAck { get; init; }
+
+    [JsonPropertyName("observation_state")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ObservationState { get; init; }
 
     internal static DirectCapabilities None { get; } = new(
         EventHistory: false,

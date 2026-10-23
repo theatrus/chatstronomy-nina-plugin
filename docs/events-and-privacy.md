@@ -241,6 +241,31 @@ changing the legacy `Date` field. Older Hub or local-runtime versions can
 ignore these additions; Direct envelope 1 and
 payload 3 remain supported.
 
+## Pier-camera overlays
+
+Enable **Share observation state for pier-camera overlays** under **Event
+delivery** to share a small read-only snapshot with a compatible Hub and camera.
+The camera's overlay permission must also be enabled. This does not enable
+hardware commands, image triggers, or timelapse uploads.
+
+Other sharing settings still apply:
+
+- Target sharing requires **Target Scheduler** events.
+- Completed-frame counts also require **Images** and **Sequence** sharing.
+- Focuser temperature requires **Filter, focuser, and rotator sync**.
+- External sensor temperature requires **Meaningful weather changes**.
+
+Counts include only confirmed, successfully saved LIGHT frames in the current
+target visit—not autofocus images, failed saves, or pier-camera frames. Joining
+mid-visit or missing frame metadata leaves the count unknown. A new visit resets
+it; scheduler waits clear the active target. Network reconnects preserve known
+counts without replaying image triggers. Sensor readings expire and never use
+camera-cooler temperature as a substitute.
+
+Requires Hub 0.4.13 or newer and a compatible overlay-enabled camera. Older Hubs
+and plugins keep their existing behavior. The [wire contract](https://github.com/theatrus/chatstronomy/blob/main/docs/OBSERVATION_STATE_PROTOCOL.md)
+describes freshness, reset semantics, and routing limits.
+
 ## Credentials and transport
 
 Local mode starts and stops its signed bundled runtime with N.I.N.A. Local

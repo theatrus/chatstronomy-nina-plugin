@@ -624,6 +624,12 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
         set => SetEventDeliveryOption(() => settings.SendFocuserMoveEvents = value);
     }
 
+    public bool ShareObservationTelemetry
+    {
+        get => settings.ShareObservationTelemetry;
+        set => SetEventDeliveryOption(() => settings.ShareObservationTelemetry = value);
+    }
+
     public bool SendObservatoryAndFlatPanelEvents
     {
         get => settings.SendObservatoryAndFlatPanelEvents;
@@ -1398,6 +1404,7 @@ public sealed class ChatstronomyPlugin : PluginBase, INotifyPropertyChanged
             nameof(SendFilterFocuserRotatorEvents),
             nameof(SendRotatorMoveEvents),
             nameof(SendFocuserMoveEvents),
+            nameof(ShareObservationTelemetry),
             nameof(SendObservatoryAndFlatPanelEvents),
             nameof(SendEquipmentConnectionEvents),
             nameof(SendOtherEvents),
