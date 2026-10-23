@@ -29,8 +29,12 @@ internal static class ObservationStateTests
         state.ImageSaved("M31", "LIGHT", now.AddSeconds(1), now.AddSeconds(30));
         state.ImageSaved("M31", "LIGHT", now.AddSeconds(1), now.AddSeconds(30));
         state.ImageSaved("M31", "FLAT", now.AddSeconds(2), now.AddSeconds(30));
-        state.ImageSaved("Other", "LIGHT", now.AddSeconds(3), now.AddSeconds(30));
+        state.ImageSaved("Other", "LIGHT", now.AddSeconds(-3), now.AddSeconds(30));
         Check(Count(Read(state, now.AddSeconds(30))) == 1, "Only distinct, associated saved LIGHTs count.");
+        state.ImageSaved("M31", "LIGHT", now.AddSeconds(2), now.AddSeconds(20));
+        Check(Count(Read(state, now.AddSeconds(30))) == 2
+            && Read(state, now.AddSeconds(30)).GetProperty("completed_exposures").GetProperty("as_of").GetDateTimeOffset() == now.AddSeconds(30),
+            "Out-of-order save callbacks must not rewind the latest included completion time.");
         state.BeginTarget(owner, "M31", now.AddSeconds(30), complete: true);
         Check(Read(state, now.AddSeconds(30)).GetProperty("target").GetProperty("run_id").GetGuid() == run,
             "Repeated same-target scheduler observations must not restart the visit.");
@@ -55,6 +59,10 @@ internal static class ObservationStateTests
         state.ImageSaved("M31", null, now.AddSeconds(41), now.AddSeconds(50));
         Check(Read(state, now.AddSeconds(50)).GetProperty("completed_exposures").ValueKind == JsonValueKind.Null,
             "Missing frame classification must invalidate completeness, not assume a non-LIGHT frame.");
+        state.BeginTarget(owner, "M31", now.AddSeconds(60), complete: true, force: true);
+        state.ImageSaved("Other", "LIGHT", now.AddSeconds(61), now.AddSeconds(70));
+        Check(Read(state, now.AddSeconds(70)).GetProperty("completed_exposures").ValueKind == JsonValueKind.Null,
+            "A conflicting in-visit target association must not leave a misleading complete count.");
         var hidden = state.Snapshot(now, false, true, true, true, true);
         Check(!hidden.GetProperty("available").GetBoolean() && hidden.GetProperty("target").ValueKind == JsonValueKind.Null,
             "The local opt-in is an actual transmission boundary.");

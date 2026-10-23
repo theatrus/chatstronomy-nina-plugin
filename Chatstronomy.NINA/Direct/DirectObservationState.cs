@@ -92,13 +92,16 @@ internal sealed class DirectObservationState
             // A delayed save from another target must not enter the current visit.
             // A missing association invalidates completeness instead of inventing a total.
             if (exposureStart is null || string.IsNullOrWhiteSpace(name)) { count = null; revision++; return; }
-            if (name != target.Name || exposureStart < target.StartedAt || exposureStart > savedAt) return;
-            // Acquisition is serial per N.I.N.A. profile. Equal starts are duplicate
-            // callbacks; older arrivals cannot advance or rewind the total.
+            if (exposureStart < target.StartedAt) return;
+            if (name != target.Name || exposureStart > savedAt) { count = null; revision++; return; }
+            // Acquisition is serial per N.I.N.A. profile. Equal starts are
+            // duplicates; distinct out-of-order saves still count without
+            // rewinding the latest included completion time.
             if (!completed.Add(exposureStart.Value)) return;
             if (completed.Count > 100_000) { count = null; completed.Clear(); revision++; return; }
             count++;
-            countAt = savedAt.ToUniversalTime();
+            var completedAt = savedAt.ToUniversalTime();
+            if (countAt is null || completedAt > countAt) countAt = completedAt;
             revision++;
         }
     }

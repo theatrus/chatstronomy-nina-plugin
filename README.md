@@ -65,7 +65,8 @@ The optional **Share observation state for pier-camera overlays** setting provid
 target-visit identity, permitted focuser/external temperatures, and an authoritative
 saved-LIGHT-frame count to an updated Hub. Category settings still apply; missing
 or incomplete readings stay unknown. Reconnects preserve counts without replaying
-image triggers. See the [Hub/camera wire contract](https://github.com/theatrus/chatstronomy/blob/theatrus/pier-camera-observation-context/docs/OBSERVATION_STATE_PROTOCOL.md).
+image triggers. Requires a compatible overlay-enabled camera and Hub 0.4.13 or
+newer. See the [Hub/camera wire contract](https://github.com/theatrus/chatstronomy/blob/main/docs/OBSERVATION_STATE_PROTOCOL.md).
 
 See [events, sharing, and privacy](docs/events-and-privacy.md) for defaults,
 redaction rules, supported events, and reporting limits.
