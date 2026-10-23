@@ -131,8 +131,12 @@ internal static class ObservationStateTests
                 "Disabling image transmission must revoke the saved-frame tally.");
             var scheduler = typeof(NinaDirectDataProvider).GetMethod("ObserveSchedulerTarget", flags)!;
             var generation = typeof(NinaDirectDataProvider).GetField("historyGeneration", flags)!.GetValue(provider)!;
+            typeof(NinaDirectDataProvider).GetMethod("ResetObservationState", flags)!.Invoke(provider, null);
             clock = clock.AddSeconds(1);
             scheduler.Invoke(provider, ["TS-NEWTARGETSTART", "M31", clock, generation]);
+            var scheduled = (JsonElement)(await provider.ExecuteAsync(query, default))!;
+            Check(scheduled.GetProperty("target").GetProperty("name").GetString() == "M31",
+                "A fresh scheduler visit must establish its target before the wait regression test.");
             clock = clock.AddSeconds(1);
             scheduler.Invoke(provider, ["TS-WAITSTART", "", clock, generation]);
             var waiting = (JsonElement)(await provider.ExecuteAsync(query, default))!;
