@@ -163,6 +163,11 @@ internal sealed partial class NinaDirectDataProvider
                 || (sentAt == lastSchedulerObservation && eventName == lastSchedulerObservationKind)) return;
             lastSchedulerObservation = sentAt;
             lastSchedulerObservationKind = eventName;
+            if (eventName == "TS-WAITSTART")
+            {
+                observationState.EndTarget(schedulerObservationOwner);
+                return;
+            }
             observationState.BeginTarget(schedulerObservationOwner, name, sentAt,
                 complete: eventName == "TS-NEWTARGETSTART",
                 force: eventName == "TS-NEWTARGETSTART");

@@ -15,6 +15,8 @@ internal sealed class DirectObservationState
     private readonly HashSet<DateTimeOffset> completed = [];
     private ObservationTemperature? focuser;
     private ObservationTemperature? external;
+    private DateTimeOffset? focuserAt;
+    private DateTimeOffset? externalAt;
 
     internal void Reset()
     {
@@ -28,6 +30,7 @@ internal sealed class DirectObservationState
             countAt = null;
             completed.Clear();
             focuser = external = null;
+            focuserAt = externalAt = null;
         }
     }
 
@@ -67,11 +70,14 @@ internal sealed class DirectObservationState
     {
         lock (gate)
         {
-            var previous = isFocuser ? focuser : external;
-            if (previous?.ObservedAt > at) return;
+            // Keep the watermark even when a disconnect/invalid reading clears
+            // the value, so a delayed capture cannot resurrect that sensor.
+            var previousAt = isFocuser ? focuserAt : externalAt;
+            if (previousAt > at) return;
             var value = celsius is { } number && double.IsFinite(number)
                 ? new ObservationTemperature(number, at.ToUniversalTime(), at.ToUniversalTime().AddMinutes(2)) : null;
-            if (isFocuser) focuser = value; else external = value;
+            if (isFocuser) { focuser = value; focuserAt = at; }
+            else { external = value; externalAt = at; }
             revision++;
         }
     }
@@ -80,7 +86,9 @@ internal sealed class DirectObservationState
     {
         lock (gate)
         {
-            if (target is null || count is null || !string.Equals(imageType, "LIGHT", StringComparison.OrdinalIgnoreCase)) return;
+            if (target is null || count is null) return;
+            if (string.IsNullOrWhiteSpace(imageType)) { count = null; revision++; return; }
+            if (!string.Equals(imageType, "LIGHT", StringComparison.OrdinalIgnoreCase)) return;
             // A delayed save from another target must not enter the current visit.
             // A missing association invalidates completeness instead of inventing a total.
             if (exposureStart is null || string.IsNullOrWhiteSpace(name)) { count = null; revision++; return; }

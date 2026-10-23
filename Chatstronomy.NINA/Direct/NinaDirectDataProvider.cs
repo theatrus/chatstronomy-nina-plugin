@@ -4822,6 +4822,7 @@ internal sealed partial class NinaDirectDataProvider :
 
         if (eventName == "TS-WAITSTART")
         {
+            ObserveSchedulerTarget(eventName, string.Empty, message.SentAt, historyGeneration);
             AddEventAt(
                 historyGeneration,
                 message.SentAt,

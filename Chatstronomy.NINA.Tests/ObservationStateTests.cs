@@ -48,6 +48,13 @@ internal static class ObservationStateTests
             "Sensor identity and true zero readings must survive; unknown is null.");
         Check(Read(state, now.AddMinutes(3)).GetProperty("temperatures").GetProperty("focuser").ValueKind == JsonValueKind.Null,
             "Old measurements must expire without being refreshed by polling.");
+        state.Temperature(true, null, now.AddSeconds(10));
+        state.Temperature(true, 25, now.AddSeconds(5));
+        Check(Read(state, now.AddSeconds(10)).GetProperty("temperatures").GetProperty("focuser").ValueKind == JsonValueKind.Null,
+            "A delayed pre-disconnect reading must not resurrect the sensor.");
+        state.ImageSaved("M31", null, now.AddSeconds(41), now.AddSeconds(50));
+        Check(Read(state, now.AddSeconds(50)).GetProperty("completed_exposures").ValueKind == JsonValueKind.Null,
+            "Missing frame classification must invalidate completeness, not assume a non-LIGHT frame.");
         var hidden = state.Snapshot(now, false, true, true, true, true);
         Check(!hidden.GetProperty("available").GetBoolean() && hidden.GetProperty("target").ValueKind == JsonValueKind.Null,
             "The local opt-in is an actual transmission boundary.");
@@ -122,6 +129,15 @@ internal static class ObservationStateTests
             var privateState = (JsonElement)(await provider.ExecuteAsync(query, default))!;
             Check(privateState.GetProperty("completed_exposures").ValueKind == JsonValueKind.Null,
                 "Disabling image transmission must revoke the saved-frame tally.");
+            var scheduler = typeof(NinaDirectDataProvider).GetMethod("ObserveSchedulerTarget", flags)!;
+            var generation = typeof(NinaDirectDataProvider).GetField("historyGeneration", flags)!.GetValue(provider)!;
+            clock = clock.AddSeconds(1);
+            scheduler.Invoke(provider, ["TS-NEWTARGETSTART", "M31", clock, generation]);
+            clock = clock.AddSeconds(1);
+            scheduler.Invoke(provider, ["TS-WAITSTART", "", clock, generation]);
+            var waiting = (JsonElement)(await provider.ExecuteAsync(query, default))!;
+            Check(waiting.GetProperty("target").ValueKind == JsonValueKind.Null,
+                "Scheduler waits must clear the previously active target.");
         }
         finally { started.SetValue(provider, false); }
     }
