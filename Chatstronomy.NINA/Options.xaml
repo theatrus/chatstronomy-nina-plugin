@@ -616,6 +616,16 @@
                             </Grid>
                         </UniformGrid>
 
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock VerticalAlignment="Center" Text="Share observation state for pier-camera overlays" />
+                            <CheckBox Grid.Column="1" Margin="8,0,0,0" IsChecked="{Binding ShareObservationTelemetry}" />
+                        </Grid>
+                        <TextBlock Margin="0,3,0,0" TextWrapping="Wrap"
+                            Text="Shares target, temperature, and saved-light-frame counts with opted-in pier cameras. Your event-category settings still apply." />
                         <StackPanel Margin="0,12,0,0" IsEnabled="{Binding SendImageEvents}">
                             <TextBlock FontWeight="SemiBold" Text="HFR and star-count charts" />
                             <TextBlock Margin="0,3,0,0" Text="Frame details include available focuser and weather readings." TextWrapping="Wrap" />

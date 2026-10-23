@@ -30,6 +30,7 @@ internal sealed record DirectEventDeliveryOptions(
     bool NinaLogTrace)
 {
     internal bool FocuserMotion { get; init; }
+    internal bool ObservationTelemetry { get; init; }
 
     internal static DirectEventDeliveryOptions Default { get; } = new(
         Images: true,

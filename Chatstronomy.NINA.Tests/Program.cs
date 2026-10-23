@@ -42,6 +42,7 @@ internal static partial class Program
         Run("Event delivery switches have visible labels", EventDeliverySwitchesHaveVisibleLabels);
         await RunAsync("Image capture context and chart configuration are additive and private",
             ImageStatisticsTests.RunAsync);
+        await RunAsync("Overlay observations preserve authoritative counts, consent, and reconnect identity", ObservationStateTests.RunAsync);
         Run("New profiles default to hosted delivery", NewProfilesDefaultToHostedDelivery);
         Run("Existing webhook profiles keep local delivery", ExistingWebhookProfilesKeepLocalDelivery);
         Run("Unknown log levels stay silent", UnknownLogLevelsStaySilent);
