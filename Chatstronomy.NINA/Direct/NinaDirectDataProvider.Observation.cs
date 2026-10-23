@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Specialized;
 using System.Text.Json;
 using Chatstronomy.NINA.Sequencing;
 using NINA.Core.Enum;
@@ -11,6 +12,7 @@ internal sealed partial class NinaDirectDataProvider
     private readonly DirectObservationState observationState = new();
     private readonly object observationSubscriptionsGate = new();
     private readonly List<(ISequenceContainer Container, INotifyPropertyChanged Source, PropertyChangedEventHandler Handler)> observationSubscriptions = [];
+    private readonly List<(INotifyCollectionChanged Source, NotifyCollectionChangedEventHandler Handler)> observationStructureSubscriptions = [];
     private readonly object schedulerObservationOwner = new();
     private long observationGeneration;
     private DateTimeOffset lastSchedulerObservation;
@@ -25,6 +27,8 @@ internal sealed partial class NinaDirectDataProvider
             Interlocked.Increment(ref observationGeneration);
             foreach (var (_, source, handler) in observationSubscriptions) source.PropertyChanged -= handler;
             observationSubscriptions.Clear();
+            foreach (var (source, handler) in observationStructureSubscriptions) source.CollectionChanged -= handler;
+            observationStructureSubscriptions.Clear();
             observationRoot = null;
             lastSchedulerObservation = default;
             lastSchedulerObservationKind = null;
@@ -54,12 +58,14 @@ internal sealed partial class NinaDirectDataProvider
         var visited = new HashSet<ISequenceContainer>(ReferenceEqualityComparer.Instance);
         var pending = new Stack<ISequenceContainer>();
         var targets = new List<ISequenceContainer>();
+        var collections = new List<INotifyCollectionChanged>();
         pending.Push(root);
         // Do not hold our gate while taking N.I.N.A.'s item-snapshot locks:
         // its property-change callbacks may be waiting for our gate.
         while (pending.TryPop(out var candidate) && visited.Count < 4096)
         {
             if (!visited.Add(candidate) || TargetSchedulerCommandContext.IsSchedulerScope(candidate)) continue;
+            if (candidate.Items is INotifyCollectionChanged collection) collections.Add(collection);
             if (candidate is IDeepSkyObjectContainer) targets.Add(candidate);
             foreach (var item in candidate.GetItemsSnapshot().OfType<ISequenceContainer>()) pending.Push(item);
         }
@@ -68,6 +74,18 @@ internal sealed partial class NinaDirectDataProvider
             if (generation != observationGeneration || observationRoot is not null
                 || !eventDelivery.Current.ObservationTelemetry || !eventDelivery.Current.TargetScheduler) return;
             observationRoot = root;
+            // A partial graph cannot establish an authoritative target tally.
+            if (pending.Count > 0 || targets.Any(item => item is not INotifyPropertyChanged)) return;
+            foreach (var collection in collections)
+            {
+                NotifyCollectionChangedEventHandler handler = (_, _) =>
+                {
+                    lock (observationSubscriptionsGate)
+                        if (generation == observationGeneration) ResetObservationState();
+                };
+                collection.CollectionChanged += handler;
+                observationStructureSubscriptions.Add((collection, handler));
+            }
             foreach (var container in targets)
             {
                 if (container is IDeepSkyObjectContainer targetContainer && container is INotifyPropertyChanged source)

@@ -104,6 +104,9 @@ internal static class ObservationStateTests
                 != next.GetProperty("target").GetProperty("run_id").GetGuid(), "Re-entering a native container starts a new target visit.");
             var second = new TestTarget { Target = input };
             root.Items.Add(second);
+            var edited = (JsonElement)(await provider.ExecuteAsync(query, default))!;
+            Check(edited.GetProperty("completed_exposures").ValueKind == JsonValueKind.Null,
+                "A dynamically edited sequence must invalidate completeness before another save.");
             // Rebind a fresh root baseline to exercise ambiguous native targets.
             typeof(NinaDirectDataProvider).GetMethod("ResetObservationState", flags)!.Invoke(provider, null);
             typeof(NinaDirectDataProvider).GetMethod("BindObservationTargets", flags)!.Invoke(provider, [root, null]);
